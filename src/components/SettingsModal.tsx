@@ -1754,7 +1754,7 @@ export default function SettingsModal() {
                     <div className="min-w-0">
                       <div className="font-semibold text-emerald-800 dark:text-emerald-200">YDN 生图兼容配置</div>
                       <p className="mt-1 text-xs leading-relaxed text-emerald-700/80 dark:text-emerald-200/80">
-                        YDN 模型页显示 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">{YDN_IMAGE_MODEL}</code> 支持 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">/v1/images/generations</code> 和 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">/v1/images/edits</code>。推荐使用 Images API、GPT Image 兼容参数、关闭 API 代理和流式；GPT Image 模型通常直接返回 Base64，不额外追加 response_format 参数。为降低 4K 生成的超时和限流风险，YDN 会按单图任务提交。兼容参数可以手动关闭，提交时不会被强制改回。
+                        YDN 模型页显示 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">{YDN_IMAGE_MODEL}</code> 支持 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">/v1/images/generations</code> 和 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">/v1/images/edits</code>。推荐使用 Images API、GPT Image 兼容参数、开启同源 API 代理并关闭流式；GPT Image 模型通常直接返回 Base64，不额外追加 response_format 参数。为降低 4K 生成的超时和限流风险，YDN 会按单图任务提交。兼容参数可以手动关闭，提交时不会被强制改回。
                       </p>
                     </div>
                     <div className="flex shrink-0 flex-col gap-2 sm:min-w-[128px]">
@@ -1808,7 +1808,7 @@ export default function SettingsModal() {
                     </button>
                   </div>
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-                    {apiProxyLocked ? '部署端已锁定代理开启，请求经服务器转发到上游 API，上方 URL 设置将失效。' : '开启后请求经服务器转发到上游 API，可绕过浏览器跨域限制，上方 URL 设置将失效。'}
+                    {apiProxyLocked ? '部署端已锁定代理开启，请求经服务器转发到上游 API，并按允许域名校验上方 URL。' : '开启后请求经服务器转发到上游 API，可绕过浏览器跨域限制；上方 URL 会作为代理目标传给服务器。'}
                   </div>
                 </div>
               )}

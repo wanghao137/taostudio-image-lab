@@ -1,5 +1,5 @@
 import type { ApiProfile } from '../types'
-import { normalizeBaseUrl } from './devProxy'
+import { isApiProxyAvailable, normalizeBaseUrl } from './devProxy'
 
 export const YDN_API_BASE_URL = 'https://www.ydn99.com'
 export const YDN_IMAGE_MODEL = 'gpt-image-2'
@@ -25,7 +25,11 @@ export function getYdnImageProfilePatch(profile: Pick<ApiProfile, 'provider' | '
   if (profile.apiMode !== 'images') patch.apiMode = 'images'
   if (profile.model.trim() !== YDN_IMAGE_MODEL) patch.model = YDN_IMAGE_MODEL
   if (profile.timeout !== YDN_IMAGE_TIMEOUT_SECONDS) patch.timeout = YDN_IMAGE_TIMEOUT_SECONDS
-  if (profile.apiProxy) patch.apiProxy = false
+  if (isApiProxyAvailable()) {
+    if (!profile.apiProxy) patch.apiProxy = true
+  } else if (profile.apiProxy) {
+    patch.apiProxy = false
+  }
   if (profile.streamImages) patch.streamImages = false
   if ((profile.streamPartialImages ?? 0) !== 0) patch.streamPartialImages = 0
   if (profile.responseFormatB64Json) patch.responseFormatB64Json = false

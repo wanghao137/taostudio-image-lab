@@ -532,6 +532,10 @@ describe('callImageApi', () => {
       '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
+      Authorization: 'Bearer test-key',
+      'X-TaoStudio-API-Base-URL': 'http://api.example.com/v1',
+    })
   })
 
   it('uses the same-origin API proxy path when API proxy is enabled and base URL is empty', async () => {
@@ -559,6 +563,10 @@ describe('callImageApi', () => {
       '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
+    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
+      Authorization: 'Bearer test-key',
+      'X-TaoStudio-API-Base-URL': '',
+    })
   })
 
   it('uses the same-origin API proxy path for sync custom providers', async () => {

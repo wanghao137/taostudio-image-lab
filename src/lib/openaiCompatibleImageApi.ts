@@ -20,6 +20,7 @@ import {
 import { isYdnApiUrl } from './ydnCompatibility'
 
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
+const API_PROXY_TARGET_HEADER = 'X-TaoStudio-API-Base-URL'
 const YDN_MAX_ACTIVE_IMAGE_REQUESTS = 3
 const YDN_RETRY_DELAYS_MS = [1500, 4000]
 
@@ -104,10 +105,12 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
   return { data: [] }
 }
 
-function createRequestHeaders(profile: ApiProfile): Record<string, string> {
-  return {
-    Authorization: `Bearer ${profile.apiKey}`,
-  }
+function createRequestHeaders(profile: ApiProfile, useApiProxy = false): Record<string, string> {
+  const headers: Record<string, string> = {}
+  const apiKey = profile.apiKey.trim()
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+  if (useApiProxy) headers[API_PROXY_TARGET_HEADER] = profile.baseUrl
+  return headers
 }
 
 function isEventStreamResponse(response: Response): boolean {
@@ -679,7 +682,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const paths = createOpenAICompatiblePaths(customProvider)
 
   const controller = new AbortController()
@@ -957,7 +960,7 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const context = createCustomProviderContext(opts, profile)
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
@@ -1149,7 +1152,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
 
