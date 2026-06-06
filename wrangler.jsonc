@@ -1,7 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gpt-image-playground",
+  "name": "taostudio-image-lab",
   "compatibility_date": "2026-05-07",
+  "routes": [
+    {
+      "pattern": "image.taostudioai.com",
+      "custom_domain": true
+    }
+  ],
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application"
