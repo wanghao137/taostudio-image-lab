@@ -8,6 +8,7 @@
     "mock:api": "node scripts/mock-image-api.mjs",
     "upgrade:upstream": "node scripts/upgrade-upstream.mjs",
     "verify:ui": "node scripts/verify-ui.mjs",
+    "verify:ydn": "node scripts/verify-ydn-image.mjs",
     "lint": "eslint .",
     "build": "tsc -b && vite build",
     "deploy:cf": "npm run build && wrangler deploy",

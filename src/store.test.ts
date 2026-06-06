@@ -96,6 +96,7 @@ vi.mock('./lib/agentApi', () => ({
   }),
 }))
 import { clearAgentConversations, clearImages, clearTasks, getAllAgentConversations, getAllTasks, putAgentConversation, putImage, putTask as putDbTask } from './lib/db'
+import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { cleanStaleAgentInputDrafts, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, reuseConfig, submitAgentMessage, submitTask, useStore } from './store'
 
@@ -203,6 +204,13 @@ describe('favorite collection deletion', () => {
 
 describe('mask draft lifecycle in store actions', () => {
   beforeEach(() => {
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(callImageApi).mockResolvedValue({
+      images: [],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
     useStore.setState({
       settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
       prompt: 'prompt',
@@ -259,6 +267,74 @@ describe('mask draft lifecycle in store actions', () => {
     const state = useStore.getState()
     expect(state.tasks).toHaveLength(1)
     expect(state.showToast).toHaveBeenCalledWith('任务已提交', 'success')
+  })
+
+  it('auto applies the YDN Images API profile before submitting a task without forcing Codex compatibility', async () => {
+    const ydnProfile = createDefaultOpenAIProfile({
+      id: 'ydn-profile',
+      name: 'YDN',
+      baseUrl: 'https://www.ydn99.com/v1',
+      apiKey: 'test-key',
+      apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL,
+      timeout: 60,
+      codexCli: false,
+      apiProxy: true,
+      streamImages: true,
+      streamPartialImages: 3,
+      responseFormatB64Json: true,
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [ydnProfile],
+        activeProfileId: ydnProfile.id,
+      }),
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 4 },
+    })
+
+    await submitTask()
+
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledTimes(1))
+    const callSettings = vi.mocked(callImageApi).mock.calls[0][0].settings
+    const callProfile = callSettings.profiles.find((profile) => profile.id === ydnProfile.id)
+    const stateProfile = useStore.getState().settings.profiles.find((profile) => profile.id === ydnProfile.id)
+    const taskRecord = useStore.getState().tasks[0]
+
+    expect(callSettings.activeProfileId).toBe(ydnProfile.id)
+    expect(callSettings.baseUrl).toBe('https://www.ydn99.com')
+    expect(callSettings.apiMode).toBe('images')
+    expect(callSettings.model).toBe('gpt-image-2')
+    expect(callSettings.apiProxy).toBe(false)
+    expect(callProfile).toMatchObject({
+      baseUrl: 'https://www.ydn99.com',
+      apiMode: 'images',
+      model: 'gpt-image-2',
+      timeout: 600,
+      codexCli: false,
+      apiProxy: false,
+      streamImages: false,
+      streamPartialImages: 0,
+    })
+    expect(callProfile?.responseFormatB64Json).toBeFalsy()
+    expect(stateProfile).toMatchObject({
+      baseUrl: 'https://www.ydn99.com',
+      apiMode: 'images',
+      model: 'gpt-image-2',
+      timeout: 600,
+      codexCli: false,
+      apiProxy: false,
+      streamImages: false,
+      streamPartialImages: 0,
+    })
+    expect(taskRecord).toMatchObject({
+      apiProvider: 'openai',
+      apiMode: 'images',
+      apiModel: 'gpt-image-2',
+      params: expect.objectContaining({ n: 1 }),
+    })
+    expect(vi.mocked(callImageApi).mock.calls[0][0].params.n).toBe(1)
   })
 
   it('preserves selected image mentions when replacing a mask target with an equivalent image id', () => {

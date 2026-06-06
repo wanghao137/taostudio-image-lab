@@ -51,6 +51,7 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
+import { getYdnImageProfilePatch } from './lib/ydnCompatibility'
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
@@ -1833,6 +1834,39 @@ function getApiModeApiName(apiMode: ApiMode) {
   return apiMode === 'responses' ? 'Responses API' : 'Image API'
 }
 
+function getApiRequestServerErrorHint(
+  errorMessage: string,
+  profile?: Pick<ApiProfile, 'provider' | 'apiMode' | 'streamImages' | 'streamPartialImages'> | null,
+): string | null {
+  const normalized = errorMessage.trim()
+  if (!normalized) return null
+
+  if (/invalid_api_key|incorrect api key|invalid api key|unauthorized|authentication|api key|bearer|HTTP 401|HTTP 403|permission|not have access|billing|quota|insufficient_quota/i.test(normalized)) {
+    return '提示：这类错误更像 API Key、模型权限、账户额度或账单问题；请检查 Key 是否属于当前服务商、模型是否可用、额度/账单是否正常。'
+  }
+
+  if (/rate limit|too many requests|HTTP 429|requests to the .*api .*exceeded/i.test(normalized)) {
+    return '提示：这类错误是限流或并发过高；建议先把生成张数设为 1、降低并发重试，或稍后再试。'
+  }
+
+  if (/unsupported|not supported|unknown parameter|unrecognized|invalid.*parameter|invalid request|does not support/i.test(normalized)) {
+    return '提示：这类错误更像服务商能力或参数不兼容；可尝试关闭流式生成、返回 Base64、质量参数或中间步骤图像，或改用自定义服务商配置匹配该网关。'
+  }
+
+  if (/an error occurred while processing your request|processing your request|request id/i.test(normalized)) {
+    const streamingHint = profile?.streamImages
+      ? '也可先关闭流式生成和中间步骤图像，排除 SSE 或中间图参数带来的不稳定。'
+      : '如果当前经网关转发，也可切换直连或代理路径交叉验证。'
+    return `提示：上游已经接收请求但在处理阶段失败，这不是典型 API Key 无效。请保留 request ID 联系服务商；同时可降低尺寸/质量、把张数设为 1、缩短提示词或拆分复杂指令后重试。${streamingHint}`
+  }
+
+  if (/timeout|timed out|abort|aborted/i.test(normalized)) {
+    return `提示：这类错误通常是请求耗时过长、连接被浏览器或网关中断。可降低图片尺寸/质量、把张数设为 1，或检查代理超时设置。${getTimeoutStreamingHint(profile)}`
+  }
+
+  return null
+}
+
 function getApiRequestNetworkErrorHint(
   err: unknown,
   createdAt: number,
@@ -1873,6 +1907,13 @@ function getRawErrorPayload(err: unknown): Pick<Partial<TaskRecord>, 'rawImageUr
     rawImageUrls: Array.isArray(rawImageUrls) && rawImageUrls.length ? rawImageUrls.filter((url): url is string => typeof url === 'string') : undefined,
     rawResponsePayload: typeof rawResponsePayload === 'string' ? rawResponsePayload : undefined,
   }
+}
+
+function getFallbackOutputImageIdsFromPartialTask(task: TaskRecord) {
+  const ids = task.streamPartialImageIds ?? []
+  if (!ids.length) return []
+  const count = Math.max(1, Math.min(task.params.n || 1, ids.length))
+  return ids.slice(-count)
 }
 
 function clearFalRecoveryTimer(taskId: string) {
@@ -2233,7 +2274,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, showToast, setConfirmDialog } =
     useStore.getState()
 
-  const normalizedSettings = normalizeSettings(settings)
+  let normalizedSettings = normalizeSettings(settings)
   let activeProfile = getActiveApiProfile(settings)
   let requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
   if (normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
@@ -2257,6 +2298,27 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       activeProfile = reusedProfile
       requestSettings = createSettingsForApiProfile(normalizedSettings, reusedProfile)
     }
+  }
+
+  const ydnProfilePatch = getYdnImageProfilePatch(activeProfile)
+  if (ydnProfilePatch) {
+    const patchedProfile = { ...activeProfile, ...ydnProfilePatch }
+    if (!reusedTaskApiProfileId && normalizedSettings.profiles.some((profile) => profile.id === patchedProfile.id)) {
+      const nextSettings = normalizeSettings({
+        ...normalizedSettings,
+        profiles: normalizedSettings.profiles.map((profile) =>
+          profile.id === patchedProfile.id ? { ...profile, ...ydnProfilePatch } : profile,
+        ),
+      })
+      useStore.getState().setSettings(nextSettings)
+      normalizedSettings = nextSettings
+      activeProfile = getActiveApiProfile(nextSettings)
+      requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
+    } else {
+      activeProfile = patchedProfile
+      requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
+    }
+    showToast('已自动使用 YDN 生图推荐配置：Images API + gpt-image-2', 'info')
   }
 
   if (validateApiProfile(activeProfile)) {
@@ -4120,6 +4182,30 @@ async function executeTask(taskId: string) {
       const networkErrorHint = getApiRequestNetworkErrorHint(err, latestTask.createdAt, usesApiProxy, hintProfile)
       if (networkErrorHint && !errorMessage.includes(IMAGE_FETCH_CORS_HINT)) {
         errorMessage += `\n${networkErrorHint}`
+      }
+      const serverErrorHint = !networkErrorHint ? getApiRequestServerErrorHint(errorMessage, hintProfile) : null
+      if (serverErrorHint && !errorMessage.includes(serverErrorHint)) {
+        errorMessage += `\n${serverErrorHint}`
+      }
+      const fallbackOutputIds = getFallbackOutputImageIdsFromPartialTask(latestTask)
+      if (fallbackOutputIds.length > 0) {
+        const fallbackOutputSet = new Set(fallbackOutputIds)
+        const partialImageIdsToClean = (latestTask.streamPartialImageIds ?? []).filter((id) => !fallbackOutputSet.has(id))
+        updateTaskInStore(taskId, {
+          outputImages: fallbackOutputIds,
+          streamPartialImageIds: undefined,
+          actualParams: { ...latestTask.params, n: fallbackOutputIds.length },
+          status: 'done',
+          error: null,
+          falRecoverable: false,
+          customRecoverable: false,
+          finishedAt: Date.now(),
+          elapsed: Date.now() - task.createdAt,
+        })
+        void deleteUnreferencedImageIds(partialImageIdsToClean)
+        useStore.getState().showToast(`上游最终响应异常，已保留 ${fallbackOutputIds.length} 张已返回图片`, 'success')
+        useStore.getState().setDetailTaskId(taskId)
+        return
       }
       updateTaskInStore(taskId, {
         status: 'error',

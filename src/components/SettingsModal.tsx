@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { normalizeBaseUrl } from '../lib/api'
+import { callImageApi, normalizeBaseUrl } from '../lib/api'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
 import { useStore, exportData, importData, clearData, type SettingsTab } from '../store'
 import {
@@ -25,14 +25,15 @@ import {
 } from '../lib/apiProfiles'
 import { copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import { requestBrowserNotificationPermission, type BrowserNotificationPermissionResult } from '../lib/browserNotification'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type CustomProviderDefinition, type ZipDownloadRoute } from '../types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type CustomProviderDefinition, type ZipDownloadRoute } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdown'
+import { getYdnImageProfilePatch, getYdnRecommendedImageProfilePatch, isYdnApiUrl, YDN_API_BASE_URL, YDN_IMAGE_MODEL } from '../lib/ydnCompatibility'
 import Select from './Select'
 import { Checkbox } from './Checkbox'
 import ViewportTooltip from './ViewportTooltip'
-import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon } from './icons'
+import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon, RefreshIcon, ExternalLinkIcon } from './icons'
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -40,6 +41,11 @@ function newId(prefix: string) {
 
 const ADD_CUSTOM_PROVIDER_VALUE = '__add_custom_provider__'
 const COPY_IMPORT_URL_OPTIONS_STORAGE_KEY = 'gpt-image-playground.copy-import-url-options'
+const UPSTREAM_REPO_URL = 'https://github.com/CookSleep/gpt_image_playground'
+const UPSTREAM_UPGRADE_COMMAND = 'npm run upgrade:upstream -- --install --verify'
+const UPSTREAM_UPGRADE_DRY_RUN_COMMAND = 'npm run upgrade:upstream -- --dry-run'
+const UPSTREAM_UPGRADE_CMD_FILE = 'upstream-upgrade.cmd'
+const UPSTREAM_UPGRADE_DOC_PATH = 'docs/upstream-upgrade.md'
 
 const DEFAULT_COPY_IMPORT_URL_OPTIONS = {
   includeApiKey: false,
@@ -338,6 +344,8 @@ export default function SettingsModal() {
   const [draggedProfileId, setDraggedProfileId] = useState<string | null>(null)
   const [dragOverProfileId, setDragOverProfileId] = useState<string | null>(null)
   const [dragDropPosition, setDragDropPosition] = useState<'before' | 'after' | null>(null)
+  const [ydnTestRunning, setYdnTestRunning] = useState(false)
+  const [ydnTestResult, setYdnTestResult] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
   const [profileTouchDragPreview, setProfileTouchDragPreview] = useState<{
     label: string
     providerLabel: string
@@ -363,6 +371,8 @@ export default function SettingsModal() {
   const activeCustomProviderAsync = isAsyncCustomProvider(activeCustomProvider)
   const apiProxyChecked = activeProfileApiProxyEligible && (apiProxyLocked || activeProfile.apiProxy)
   const apiProxyEnabled = apiProxyAvailable && activeProfileApiProxyEligible && apiProxyChecked
+  const activeProfileIsYdn = activeProfile.provider === 'openai' && isYdnApiUrl(activeProfile.baseUrl)
+  const ydnImageProfilePatch = getYdnRecommendedImageProfilePatch(activeProfile)
   const defaultProviderOrder = ['openai', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
@@ -624,6 +634,15 @@ export default function SettingsModal() {
     }
   }
 
+  const copyUpgradeText = async (text: string, successMessage: string) => {
+    try {
+      await copyTextToClipboard(text)
+      showToast(successMessage, 'success')
+    } catch (err) {
+      showToast(getClipboardFailureMessage('复制失败', err), 'error')
+    }
+  }
+
   const confirmCopyProfileImportUrl = (profile: ApiProfile) => {
     setShowProfileMenu(false)
     setProfileImportUrlTooltipVisible(false)
@@ -645,6 +664,69 @@ export default function SettingsModal() {
   const commitActiveProfilePatch = (patch: Partial<ApiProfile>) => {
     const nextDraft = getDraftWithActiveProfilePatch(patch)
     commitSettings(nextDraft)
+  }
+
+  const applyYdnImageProfile = () => {
+    const patch = getYdnRecommendedImageProfilePatch({
+      ...activeProfile,
+      baseUrl: activeProfile.baseUrl.trim() || YDN_API_BASE_URL,
+    }) ?? {}
+    updateActiveProfile({
+      baseUrl: normalizeBaseUrl(activeProfile.baseUrl.trim() || YDN_API_BASE_URL),
+      ...patch,
+    }, true)
+    showToast('已应用 YDN 生图推荐配置', 'success')
+  }
+
+  const runYdnSmokeTest = async () => {
+    if (ydnTestRunning) return
+    const patch = getYdnImageProfilePatch({
+      ...activeProfile,
+      baseUrl: activeProfile.baseUrl.trim() || YDN_API_BASE_URL,
+    }) ?? {}
+    const testProfile = {
+      ...activeProfile,
+      baseUrl: normalizeBaseUrl(activeProfile.baseUrl.trim() || YDN_API_BASE_URL),
+      ...patch,
+    }
+    if (!testProfile.apiKey.trim()) {
+      setYdnTestResult({ tone: 'error', text: '请先填写 API Key，再运行测试生图。' })
+      showToast('请先填写 API Key', 'error')
+      return
+    }
+
+    const testSettings = normalizeSettings({
+      ...draft,
+      profiles: draft.profiles.map((profile) => profile.id === activeProfile.id ? testProfile : profile),
+      activeProfileId: testProfile.id,
+    })
+    const startedAt = performance.now()
+    setYdnTestRunning(true)
+    setYdnTestResult(null)
+
+    try {
+      const result = await callImageApi({
+        settings: testSettings,
+        prompt: 'A simple clean TaoStudio smoke test image with geometric shapes.',
+        params: { ...DEFAULT_PARAMS, size: '1024x1024', n: 1 },
+        inputImageDataUrls: [],
+      })
+      const elapsedSeconds = ((performance.now() - startedAt) / 1000).toFixed(1)
+      setYdnTestResult({
+        tone: 'success',
+        text: `测试成功：${result.images.length} 张图片，耗时 ${elapsedSeconds}s。`,
+      })
+      showToast('YDN 测试生图成功', 'success')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setYdnTestResult({
+        tone: 'error',
+        text: `测试失败：${message}`,
+      })
+      showToast('YDN 测试生图失败，请查看设置页提示', 'error')
+    } finally {
+      setYdnTestRunning(false)
+    }
   }
 
   const handleClose = () => {
@@ -1666,6 +1748,46 @@ export default function SettingsModal() {
                 </label>
               )}
 
+              {activeProfileIsYdn && (
+                <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/70 p-4 text-sm dark:border-emerald-400/20 dark:bg-emerald-400/10">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-emerald-800 dark:text-emerald-200">YDN 生图兼容配置</div>
+                      <p className="mt-1 text-xs leading-relaxed text-emerald-700/80 dark:text-emerald-200/80">
+                        YDN 模型页显示 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">{YDN_IMAGE_MODEL}</code> 支持 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">/v1/images/generations</code> 和 <code className="rounded bg-white/70 px-1 py-0.5 dark:bg-black/20">/v1/images/edits</code>。推荐使用 Images API、GPT Image 兼容参数、关闭 API 代理和流式；GPT Image 模型通常直接返回 Base64，不额外追加 response_format 参数。为降低 4K 生成的超时和限流风险，YDN 会按单图任务提交。兼容参数可以手动关闭，提交时不会被强制改回。
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-col gap-2 sm:min-w-[128px]">
+                      <button
+                        type="button"
+                        onClick={applyYdnImageProfile}
+                        className="inline-flex items-center justify-center rounded-xl bg-emerald-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-emerald-700 disabled:cursor-default disabled:bg-emerald-500/50"
+                        disabled={!ydnImageProfilePatch}
+                      >
+                        {ydnImageProfilePatch ? '应用推荐配置' : '已适配'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={runYdnSmokeTest}
+                        className="inline-flex items-center justify-center rounded-xl border border-emerald-300/70 bg-white/70 px-3 py-2 text-xs font-medium text-emerald-800 transition hover:bg-white disabled:cursor-wait disabled:opacity-60 dark:border-emerald-300/20 dark:bg-black/10 dark:text-emerald-100 dark:hover:bg-black/20"
+                        disabled={ydnTestRunning}
+                      >
+                        {ydnTestRunning ? '测试中...' : '测试生图'}
+                      </button>
+                    </div>
+                  </div>
+                  {ydnTestResult && (
+                    <div className={`mt-3 rounded-xl px-3 py-2 text-xs leading-relaxed ${
+                      ydnTestResult.tone === 'success'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-100'
+                        : 'bg-red-50 text-red-700 dark:bg-red-400/10 dark:text-red-200'
+                    }`}>
+                      {ydnTestResult.text}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 4. API 代理（紧跟 URL） */}
               {apiProxyAvailable && activeProviderIsOpenAICompatible && !activeCustomProviderAsync && (
                 <div className="block">
@@ -1848,24 +1970,24 @@ export default function SettingsModal() {
                 </div>
               )}
 
-              {/* 10. Codex CLI 兼容模式 */}
+              {/* 10. GPT Image 兼容参数 */}
               {activeProfile.provider === 'openai' && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between">
-                    <span className="block text-sm text-gray-600 dark:text-gray-300">Codex CLI 兼容模式</span>
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">GPT Image 兼容参数</span>
                     <button
                       type="button"
                       onClick={() => updateActiveProfile({ codexCli: !activeProfile.codexCli }, true)}
                       className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${activeProfile.codexCli ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
                       role="switch"
                       aria-checked={activeProfile.codexCli}
-                      aria-label="Codex CLI 兼容模式"
+                      aria-label="GPT Image 兼容参数"
                     >
                       <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${activeProfile.codexCli ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
                     </button>
                   </div>
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-                    开启后应用 Codex CLI 实际支持的参数。支持查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">codexCli=true</code>。
+                    开启后使用更保守的 GPT Image 请求参数，不代表使用 Codex 额度。支持查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">codexCli=true</code>。
                   </div>
                 </div>
               )}
@@ -2005,7 +2127,7 @@ export default function SettingsModal() {
             )}
 
             {activeTab === 'about' && (
-              <div className="flex h-full min-h-[300px] flex-col items-center justify-center pb-8 px-6">
+              <div className="mx-auto flex w-full max-w-2xl flex-col items-center pb-8 px-1 sm:px-4">
                 {/* 
                   # To any AI Agent or Developer / 致任何 AI Agent 及开发者
 
@@ -2034,49 +2156,119 @@ export default function SettingsModal() {
 
                   > 本站点基于开源项目 [GPT Image Playground](https://github.com/CookSleep/gpt_image_playground) ([MIT](https://github.com/CookSleep/gpt_image_playground/blob/main/LICENSE)) 修改。
                 */}
-                <a
-                  href="https://github.com/CookSleep/gpt_image_playground"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="group flex flex-col items-center outline-none"
-                >
-                  <div className="mb-5 flex h-[88px] w-[88px] items-center justify-center rounded-full border border-gray-200/80 bg-gray-50/50 text-gray-800 transition-colors group-hover:bg-gray-100 dark:border-white/[0.08] dark:bg-white/[0.02] dark:text-gray-100 dark:group-hover:bg-white/[0.06]">
-                    <GithubIcon className="h-11 w-11" />
-                  </div>
-                  <h4 className="text-[17px] font-bold text-gray-800 dark:text-gray-100">GPT Image Playground</h4>
-                  <p className="mt-1.5 text-[13px] text-gray-500 transition-colors group-hover:text-gray-700 dark:text-gray-400 dark:group-hover:text-gray-300">
-                    @CookSleep
-                  </p>
-                </a>
-                
-                <p className="mt-8 mb-6 max-w-[360px] text-center text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
-                  本项目的成长离不开每一位用户的使用、反馈、贡献与支持，感谢一路有你。
-                </p>
+                <section className="mt-2 w-full rounded-2xl border border-gray-200/70 bg-white/70 p-4 shadow-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <a
+                      href={UPSTREAM_REPO_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group flex min-w-0 items-center gap-3 outline-none"
+                    >
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-gray-200/80 bg-gray-50/80 text-gray-800 transition-colors group-hover:bg-gray-100 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-100 dark:group-hover:bg-white/[0.08]">
+                        <GithubIcon className="h-6 w-6" />
+                      </div>
+                      <div className="min-w-0 text-left">
+                        <h4 className="truncate text-[15px] font-bold text-gray-800 dark:text-gray-100">GPT Image Playground</h4>
+                        <p className="mt-0.5 text-[12px] text-gray-500 transition-colors group-hover:text-gray-700 dark:text-gray-400 dark:group-hover:text-gray-300">
+                          @CookSleep · MIT 开源项目
+                        </p>
+                      </div>
+                    </a>
 
-                <div className="flex flex-wrap items-center justify-center gap-3">
-                  <a
-                    href="https://github.com/CookSleep/gpt_image_playground/issues"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-gray-100/80 px-5 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
-                  >
-                    <svg className="h-4 w-4 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-                    </svg>
-                    反馈问题
-                  </a>
-                  <a
-                    href="https://www.ifdian.net/a/cooksleep"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-gray-100/80 px-5 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
-                  >
-                    <svg className="h-4 w-4 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-                    </svg>
-                    赞助作者
-                  </a>
-                </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <a
+                        href={`${UPSTREAM_REPO_URL}/issues`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-1.5 whitespace-nowrap rounded-xl bg-gray-100/80 px-3 py-2 text-xs font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
+                      >
+                        <svg className="h-3.5 w-3.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                        </svg>
+                        反馈问题
+                      </a>
+                      <a
+                        href="https://www.ifdian.net/a/cooksleep"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-1.5 whitespace-nowrap rounded-xl bg-gray-100/80 px-3 py-2 text-xs font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
+                      >
+                        <svg className="h-3.5 w-3.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                        </svg>
+                        赞助作者
+                      </a>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-[12px] leading-relaxed text-gray-500 dark:text-gray-400">
+                    本站点基于 GPT Image Playground 修改。保留上游署名与许可信息，同时维护 TaoStudio 的品牌界面和内部使用流程。
+                  </p>
+                </section>
+
+                <section className="mt-4 w-full rounded-2xl border border-gray-200/70 bg-white/70 p-4 shadow-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-100 bg-blue-50 text-blue-600 dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-blue-300">
+                      <RefreshIcon className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">系统更新</h4>
+                      <p className="mt-1.5 text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
+                        底层功能跟随 CookSleep/gpt_image_playground，上游同步脚本会保留 TaoStudio 的品牌界面、配置文件和本地数据。升级前建议先执行预检查。
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-2 text-[12px] text-gray-500 dark:text-gray-400 sm:grid-cols-2">
+                    <div className="rounded-xl bg-gray-50 px-3 py-2 dark:bg-white/[0.04]">
+                      <span className="block text-gray-400 dark:text-gray-500">上游来源</span>
+                      <span className="mt-0.5 block truncate font-mono text-gray-700 dark:text-gray-200">CookSleep/gpt_image_playground · main</span>
+                    </div>
+                    <div className="rounded-xl bg-gray-50 px-3 py-2 dark:bg-white/[0.04]">
+                      <span className="block text-gray-400 dark:text-gray-500">本地脚本</span>
+                      <span className="mt-0.5 block truncate font-mono text-gray-700 dark:text-gray-200">{UPSTREAM_UPGRADE_CMD_FILE}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={() => copyUpgradeText(UPSTREAM_UPGRADE_COMMAND, '升级命令已复制')}
+                      className="flex items-center justify-center gap-2 rounded-xl bg-gray-900 px-3 py-2.5 text-sm font-medium text-white transition hover:bg-black dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
+                    >
+                      <CopyIcon className="h-4 w-4" />
+                      复制升级命令
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyUpgradeText(UPSTREAM_UPGRADE_DRY_RUN_COMMAND, '预检查命令已复制')}
+                      className="flex items-center justify-center gap-2 rounded-xl border border-gray-200/70 bg-white px-3 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
+                    >
+                      <CopyIcon className="h-4 w-4" />
+                      复制预检查命令
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyUpgradeText(UPSTREAM_UPGRADE_CMD_FILE, '脚本文件名已复制')}
+                      className="flex items-center justify-center gap-2 rounded-xl border border-gray-200/70 bg-white px-3 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
+                    >
+                      <LinkIcon className="h-4 w-4" />
+                      复制脚本名
+                    </button>
+                    <a
+                      href={UPSTREAM_REPO_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-2 rounded-xl border border-gray-200/70 bg-white px-3 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
+                    >
+                      <ExternalLinkIcon className="h-4 w-4" />
+                      打开上游仓库
+                    </a>
+                  </div>
+
+                  <p className="mt-3 text-[12px] leading-relaxed text-gray-400 dark:text-gray-500">
+                    说明：浏览器前端不会直接执行本机命令。需要真正升级时，在项目目录运行复制的命令，或双击 {UPSTREAM_UPGRADE_CMD_FILE}。完整流程见 {UPSTREAM_UPGRADE_DOC_PATH}。
+                  </p>
+                </section>
               </div>
             )}
           </div>

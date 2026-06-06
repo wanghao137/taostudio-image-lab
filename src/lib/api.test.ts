@@ -155,6 +155,54 @@ describe('callImageApi', () => {
     })
   })
 
+  it('uses the latest Images API partial image when the stream ends with an error', async () => {
+    const streamBody = [
+      'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"cGFydGlhbC0x"}',
+      '',
+      'data: {"type":"image_generation.partial_image","partial_image_index":1,"b64_json":"cGFydGlhbC0y"}',
+      '',
+      'data: {"type":"image_generation.failed","message":"upstream tail error"}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }))
+    const partialImages: string[] = []
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        streamImages: true,
+        streamPartialImages: 3,
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          streamImages: true,
+          streamPartialImages: 3,
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+      onPartialImage: (partial: { image: string }) => partialImages.push(partial.image),
+    } as any)
+
+    expect(partialImages).toEqual([
+      'data:image/png;base64,cGFydGlhbC0x',
+      'data:image/png;base64,cGFydGlhbC0y',
+    ])
+    expect(result).toMatchObject({
+      images: ['data:image/png;base64,cGFydGlhbC0y'],
+      actualParams: { n: 1 },
+      actualParamsList: [{ n: 1 }],
+      revisedPrompts: [undefined],
+    })
+  })
+
   it('does not expect revised prompts on official Images API stream completed events', async () => {
     const streamBody = [
       'data: {"created_at":1779112721,"type":"image_generation.completed","b64_json":"ZmluYWw=","background":"opaque","output_format":"jpeg","quality":"medium","sequence_number":0,"size":"1448x1086","usage":{"total_tokens":1569}}',
@@ -341,6 +389,56 @@ describe('callImageApi', () => {
       actualParams: { size: '1024x1024' },
       actualParamsList: [{ size: '1024x1024' }],
       revisedPrompts: ['rewritten'],
+    })
+  })
+
+  it('uses the latest Responses API partial image when the stream ends with an error', async () => {
+    const streamBody = [
+      'data: {"type":"response.image_generation_call.partial_image","partial_image_index":0,"partial_image_b64":"cGFydGlhbC0x"}',
+      '',
+      'data: {"type":"response.image_generation_call.partial_image","partial_image_index":1,"partial_image_b64":"cGFydGlhbC0y"}',
+      '',
+      'data: {"type":"response.failed","message":"upstream tail error"}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }))
+    const partialImages: string[] = []
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'responses',
+        streamImages: true,
+        streamPartialImages: 2,
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          apiMode: 'responses',
+          streamImages: true,
+          streamPartialImages: 2,
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+      onPartialImage: (partial: { image: string }) => partialImages.push(partial.image),
+    } as any)
+
+    expect(partialImages).toEqual([
+      'data:image/png;base64,cGFydGlhbC0x',
+      'data:image/png;base64,cGFydGlhbC0y',
+    ])
+    expect(result).toMatchObject({
+      images: ['data:image/png;base64,cGFydGlhbC0y'],
+      actualParams: { n: 1 },
+      actualParamsList: [{ n: 1 }],
+      revisedPrompts: [undefined],
     })
   })
 

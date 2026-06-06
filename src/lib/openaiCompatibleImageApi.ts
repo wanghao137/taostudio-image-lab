@@ -24,6 +24,27 @@ function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
 }
 
+function rememberStreamPartialImage(partialImages: string[], image: string, partialImageIndex?: number) {
+  if (typeof partialImageIndex === 'number' && partialImageIndex >= 0) {
+    partialImages[partialImageIndex] = image
+    return
+  }
+  partialImages.push(image)
+}
+
+function createPartialImageFallbackResult(partialImages: string[], actualParams?: Partial<TaskParams>): CallApiResult | null {
+  const usableImages = partialImages.filter(Boolean)
+  const image = usableImages[usableImages.length - 1]
+  if (!image) return null
+  const params = mergeActualParams(actualParams ?? {}, { n: 1 })
+  return {
+    images: [image],
+    actualParams: params,
+    actualParamsList: [params],
+    revisedPrompts: [undefined],
+  }
+}
+
 function appendQuery(path: string, query?: Record<string, string>): string {
   if (!query || !Object.keys(query).length) return path
   const params = new URLSearchParams()
@@ -352,16 +373,21 @@ async function parseImagesApiStreamResponse(
 ): Promise<CallApiResult> {
   const completedItems: ImageResponseItem[] = []
   let resultPayload: ImageApiResponse | null = null
+  const partialImages: string[] = []
 
-  await readJsonServerSentEvents(response, (event) => {
+  try {
+    await readJsonServerSentEvents(response, (event) => {
     const type = getStringValue(event, 'type')
     const object = getStringValue(event, 'object')
     if (type === 'image_generation.partial_image' || type === 'image_edit.partial_image') {
       const b64 = getStringValue(event, 'b64_json')
       if (b64) {
+        const partialImageIndex = getNumberValue(event, 'partial_image_index')
+        const image = normalizeBase64Image(b64, mime)
+        rememberStreamPartialImage(partialImages, image, partialImageIndex)
         onPartialImage?.({
-          image: normalizeBase64Image(b64, mime),
-          partialImageIndex: getNumberValue(event, 'partial_image_index'),
+          image,
+          partialImageIndex,
         })
       }
       return
@@ -376,12 +402,19 @@ async function parseImagesApiStreamResponse(
       completedItems.push(eventToImageResponseItem(event))
     }
   })
+  } catch (err) {
+    const fallback = createPartialImageFallbackResult(partialImages)
+    if (fallback) return fallback
+    throw err
+  }
 
   if (resultPayload) {
     return parseImagesApiResponse(resultPayload, mime)
   }
 
   if (!completedItems.length) {
+    const fallback = createPartialImageFallbackResult(partialImages)
+    if (fallback) return fallback
     throw new Error('流式接口未返回最终图片数据')
   }
 
@@ -389,7 +422,11 @@ async function parseImagesApiStreamResponse(
     .map((item) => item.b64_json)
     .filter((b64): b64 is string => Boolean(b64))
     .map((b64) => normalizeBase64Image(b64, mime))
-  if (!images.length) throw new Error('流式接口未返回可用图片数据')
+  if (!images.length) {
+    const fallback = createPartialImageFallbackResult(partialImages)
+    if (fallback) return fallback
+    throw new Error('流式接口未返回可用图片数据')
+  }
 
   const actualParamsList = completedItems.map((item) => mergeActualParams(pickActualParams(item)))
   const actualParams = mergeActualParams(
@@ -423,15 +460,20 @@ async function parseResponsesApiStreamResponse(
 ): Promise<CallApiResult> {
   let completedPayload: ResponsesApiResponse | null = null
   const outputItems: ResponsesOutputItem[] = []
+  const partialImages: string[] = []
 
-  await readJsonServerSentEvents(response, (event) => {
+  try {
+    await readJsonServerSentEvents(response, (event) => {
     const type = getStringValue(event, 'type')
     if (type === 'response.image_generation_call.partial_image') {
       const b64 = getStringValue(event, 'partial_image_b64')
       if (b64) {
+        const partialImageIndex = getNumberValue(event, 'partial_image_index')
+        const image = normalizeBase64Image(b64, mime)
+        rememberStreamPartialImage(partialImages, image, partialImageIndex)
         onPartialImage?.({
-          image: normalizeBase64Image(b64, mime),
-          partialImageIndex: getNumberValue(event, 'partial_image_index'),
+          image,
+          partialImageIndex,
         })
       }
       return
@@ -447,16 +489,29 @@ async function parseResponsesApiStreamResponse(
 
     completedPayload = payload
   })
+  } catch (err) {
+    const fallback = createPartialImageFallbackResult(partialImages)
+    if (fallback) return fallback
+    throw err
+  }
 
   const payload = completedPayload ?? (outputItems.length ? { output: outputItems } : null)
-  if (!payload) throw new Error('流式接口未返回最终图片数据')
+  if (!payload) {
+    const fallback = createPartialImageFallbackResult(partialImages)
+    if (fallback) return fallback
+    throw new Error('流式接口未返回最终图片数据')
+  }
 
   let imageResults: ReturnType<typeof parseResponsesImageResults>
   try {
     imageResults = parseResponsesImageResults(payload, mime)
   } catch (err) {
     const collectedImageItems = outputItems.filter((item) => getResponsesImageResultBase64(item.result))
-    if (collectedImageItems.length === 0) throw err
+    if (collectedImageItems.length === 0) {
+      const fallback = createPartialImageFallbackResult(partialImages)
+      if (fallback) return fallback
+      throw err
+    }
     imageResults = parseResponsesImageResults({ output: collectedImageItems }, mime)
   }
   const actualParams = mergeActualParams(imageResults[0]?.actualParams ?? {})
