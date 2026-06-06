@@ -1,0 +1,8 @@
+{
+  "upstreamRepo": "https://github.com/CookSleep/gpt_image_playground.git",
+  "upstreamRef": "main",
+  "baselineCommit": "927451dcf14d789042ac370857227df16316928d",
+  "lastAppliedCommit": null,
+  "recordedAt": "2026-06-06",
+  "notes": "Initial upstream tracking state for TaoStudio Image Lab. The baseline commit was read from refs/heads/main before the project was first published."
+}

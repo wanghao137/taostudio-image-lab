@@ -1,0 +1,94 @@
+# TaoStudio 生图工作台
+
+TaoStudio 生图工作台是一个内部使用的生图工作台，底层基于开源项目 `CookSleep/gpt_image_playground`。参考仓库不直接修改；本项目保留完整功能，并叠加 TaoStudio 品牌与 Studio Console UI。
+
+## Scope
+
+- Target app: `D:\codesolo\taostudio-image-lab`.
+- Reference app: `D:\codesolo\gpt_image_playground`.
+- UI and branding are customized for TaoStudio.
+- Generation, edit, mask, history, favorites, Agent, provider, proxy, import/export, IndexedDB, PWA, mock API, and deployment behavior are preserved from the reference app.
+- Provider wording is neutral. The app supports OpenAI-compatible APIs, fal.ai, and custom HTTP image providers. It does not hard-code a machine-specific gateway identity.
+
+The full migration inventory is recorded in:
+
+```text
+docs/plans/2026-06-05-gpt-image-playground-ui-only-migration.md
+```
+
+## Start
+
+```bash
+npm install
+npm run dev -- --host 127.0.0.1 --port 5174
+```
+
+Open:
+
+```text
+http://127.0.0.1:5174/
+```
+
+## Upstream Upgrade
+
+保留从 `CookSleep/gpt_image_playground` 一键同步底层能力的升级入口：
+
+```bash
+npm run upgrade:upstream -- --dry-run
+npm run upgrade:upstream -- --install --verify
+```
+
+Windows 下也可以直接双击：
+
+```text
+upstream-upgrade.cmd
+```
+
+详细规则见：
+
+```text
+docs/upstream-upgrade.md
+```
+
+## Local API Proxy
+
+For local development, either create `dev-proxy.config.json` from `dev-proxy.config.example.json`, or use the target project's convenience environment variable:
+
+```text
+IMAGE_API_PROXY_TARGET=https://your-gateway.example.com/v1
+```
+
+When this variable is present, Vite exposes the same-origin proxy at:
+
+```text
+/api-proxy
+```
+
+The API key should be entered in the app settings or kept in ignored local configuration. Do not commit real API keys, bearer tokens, cookies, or gateway credentials.
+
+## Theme
+
+The header theme control supports:
+
+- light
+- dark
+- system
+
+The preference is stored in browser `localStorage` under `taostudio.imageLab.theme`.
+
+## Verification
+
+Run the available gates before considering a change complete:
+
+```bash
+npm run lint
+npm run test
+npm run build
+npm run verify:ui -- http://127.0.0.1:5175/
+```
+
+For UI work, also verify the app in a browser at desktop and mobile widths.
+
+## Attribution
+
+This app is modified from `GPT Image Playground` by CookSleep and keeps the required MIT license attribution in the About/settings surface.

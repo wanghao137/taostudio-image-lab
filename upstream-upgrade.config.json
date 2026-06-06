@@ -1,0 +1,38 @@
+{
+  "upstream": {
+    "repo": "https://github.com/CookSleep/gpt_image_playground.git",
+    "ref": "main"
+  },
+  "cacheDir": ".upstream/gpt_image_playground",
+  "stateFile": "docs/upstream-upgrade-state.json",
+  "reportFile": "docs/upstream-upgrade-report.md",
+  "preservePaths": [
+    ".git",
+    ".github",
+    ".gitignore",
+    ".env",
+    ".env.example",
+    ".env.local",
+    ".omx",
+    ".upstream",
+    "README.md",
+    "design-qa.md",
+    "docs",
+    "index.html",
+    "package.json",
+    "package-lock.json",
+    "public/brand",
+    "public/manifest.webmanifest",
+    "scripts/upgrade-upstream.mjs",
+    "scripts/verify-ui.mjs",
+    "tailwind.config.js",
+    "upstream-upgrade.cmd",
+    "upstream-upgrade.config.json",
+    "src/App.tsx",
+    "src/components/Header.tsx",
+    "src/components/InputBar.tsx",
+    "src/components/SearchBar.tsx",
+    "src/components/TaskGrid.tsx",
+    "src/index.css"
+  ]
+}

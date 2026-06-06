@@ -1,0 +1,428 @@
+import { useEffect, useRef, useState } from 'react'
+import { Monitor, Moon, Sun } from 'lucide-react'
+import { useStore } from '../store'
+import { useVersionCheck } from '../hooks/useVersionCheck'
+import { useTooltip } from '../hooks/useTooltip'
+import { dismissAllTooltips } from '../lib/tooltipDismiss'
+import ViewportTooltip from './ViewportTooltip'
+import HelpModal from './HelpModal'
+import HistoryModal from './HistoryModal'
+import { useFavoriteCollectionTitle } from './FavoriteCollections'
+import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, SettingsIcon } from './icons'
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>
+}
+
+type ThemeMode = 'system' | 'light' | 'dark'
+type ThemeValue = 'light' | 'dark'
+
+const THEME_KEY = 'taostudio.imageLab.theme'
+
+function getSystemTheme(): ThemeValue {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function getSavedThemeMode(): ThemeMode {
+  const saved = window.localStorage.getItem(THEME_KEY)
+  return saved === 'light' || saved === 'dark' || saved === 'system' ? saved : 'system'
+}
+
+function applyTheme(mode: ThemeMode) {
+  const resolved = mode === 'system' ? getSystemTheme() : mode
+  document.documentElement.dataset.theme = resolved
+  document.documentElement.dataset.themeMode = mode
+  document.documentElement.classList.toggle('dark', resolved === 'dark')
+  document.documentElement.style.colorScheme = resolved
+}
+
+function isInstalledPwa() {
+  const nav = window.navigator as Navigator & { standalone?: boolean }
+  return window.matchMedia('(display-mode: standalone)').matches || nav.standalone === true
+}
+
+export default function Header() {
+  const appMode = useStore((s) => s.appMode)
+  const setAppMode = useStore((s) => s.setAppMode)
+  const setShowSettings = useStore((s) => s.setShowSettings)
+  const setConfirmDialog = useStore((s) => s.setConfirmDialog)
+  const agentMobileHeaderVisible = useStore((s) => s.agentMobileHeaderVisible)
+  const setAgentMobileHeaderVisible = useStore((s) => s.setAgentMobileHeaderVisible)
+  const agentConversations = useStore((s) => s.agentConversations)
+  const activeAgentConversationId = useStore((s) => s.activeAgentConversationId)
+  const filterFavorite = useStore((s) => s.filterFavorite)
+  const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const setAgentEditingConversationId = useStore((s) => s.setAgentEditingConversationId)
+  const setAgentSidebarCollapsed = useStore((s) => s.setAgentSidebarCollapsed)
+  const activeConversation = agentConversations.find((item) => item.id === activeAgentConversationId)
+  const favoriteCollectionTitle = useFavoriteCollectionTitle()
+  const showFavoriteCollectionTitle = appMode === 'gallery' && Boolean(activeFavoriteCollectionId)
+  const { hasUpdate, latestRelease, dismiss } = useVersionCheck()
+  const [showHelp, setShowHelp] = useState(false)
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
+  const [isPwaInstalled, setIsPwaInstalled] = useState(isInstalledPwa)
+  const [hintVisible, setHintVisible] = useState(false)
+  const [scrollDirection, setScrollDirection] = useState<'up' | 'down'>('up')
+  const [showHistoryModal, setShowHistoryModal] = useState(false)
+  const [themeMode, setThemeMode] = useState<ThemeMode>(getSavedThemeMode)
+  const historyButtonRef = useRef<HTMLButtonElement>(null)
+  const createConversation = useStore((s) => s.createAgentConversation)
+
+  useEffect(() => {
+    applyTheme(themeMode)
+    window.localStorage.setItem(THEME_KEY, themeMode)
+
+    if (themeMode !== 'system') return
+
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const listener = () => applyTheme('system')
+    media.addEventListener('change', listener)
+    return () => media.removeEventListener('change', listener)
+  }, [themeMode])
+
+  useEffect(() => {
+    if (appMode === 'agent') {
+      setScrollDirection('up')
+      return
+    }
+
+    let lastScrollY = window.scrollY
+    let ticking = false
+
+    const handleScroll = () => {
+      if (!ticking) {
+        window.requestAnimationFrame(() => {
+          const currentScrollY = window.scrollY
+          if (currentScrollY < 20) {
+            setScrollDirection('up')
+          } else if (currentScrollY > lastScrollY + 10) {
+            setScrollDirection('down')
+          } else if (currentScrollY < lastScrollY - 10) {
+            setScrollDirection('up')
+          }
+          lastScrollY = currentScrollY
+          ticking = false
+        })
+        ticking = true
+      }
+    }
+
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    return () => window.removeEventListener('scroll', handleScroll)
+  }, [appMode])
+
+  useEffect(() => {
+    if (appMode === 'agent' && !agentMobileHeaderVisible) {
+      setHintVisible(true)
+      const timer = setTimeout(() => {
+        setHintVisible(false)
+      }, 1500)
+      return () => clearTimeout(timer)
+    }
+  }, [appMode, agentMobileHeaderVisible])
+
+  const installTooltip = useTooltip()
+  const helpTooltip = useTooltip()
+  const settingsTooltip = useTooltip()
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault()
+      setInstallPrompt(event as BeforeInstallPromptEvent)
+      setIsPwaInstalled(false)
+    }
+
+    const handleAppInstalled = () => {
+      setInstallPrompt(null)
+      setIsPwaInstalled(true)
+    }
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
+    window.addEventListener('appinstalled', handleAppInstalled)
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt)
+      window.removeEventListener('appinstalled', handleAppInstalled)
+    }
+  }, [])
+
+  const handleInstallClick = async () => {
+    if (installPrompt) {
+      const promptEvent = installPrompt
+      setInstallPrompt(null)
+
+      try {
+        await promptEvent.prompt()
+        const choice = await promptEvent.userChoice
+        setIsPwaInstalled(choice.outcome === 'accepted')
+      } catch {
+        setIsPwaInstalled(isInstalledPwa())
+      }
+    } else {
+      const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+      if (isIos) {
+        setConfirmDialog({
+          title: '安装为应用',
+          message: '在 Safari 浏览器中，点击底部「分享」按钮，选择「添加到主屏幕」即可安装此应用。',
+          showCancel: false,
+          confirmText: '我知道了',
+          icon: 'info',
+          action: () => {},
+        })
+      } else {
+        setConfirmDialog({
+          title: '安装为应用',
+          message: '请在浏览器的菜单中选择「添加到主屏幕」或「安装应用」。\n\n（如果在微信等内置浏览器中，请先在外部浏览器打开）',
+          showCancel: false,
+          confirmText: '我知道了',
+          icon: 'info',
+          action: () => {},
+        })
+      }
+    }
+  }
+
+  return (
+    <>
+      <header data-no-drag-select className={`safe-area-top fixed top-0 left-0 right-0 z-40 border-b border-stone-200/80 bg-[#f7f2ec]/88 shadow-[0_18px_60px_rgba(65,47,28,0.08)] backdrop-blur-xl transition-transform duration-300 ease-in-out dark:border-white/[0.08] dark:bg-[#13100d]/88 dark:shadow-[0_18px_70px_rgba(0,0,0,0.32)] ${appMode === 'agent' && !agentMobileHeaderVisible ? '-translate-y-full sm:translate-y-0' : 'translate-y-0'}`}>
+        <div className="safe-area-x safe-header-inner max-w-7xl mx-auto flex items-center justify-between relative">
+          <div className="flex-1 min-w-0 pr-2 flex items-center gap-2">
+            <h1 className="inline-flex min-w-0 items-center relative mr-2">
+              {showFavoriteCollectionTitle ? (
+                <>
+                  <span className="min-w-0 truncate text-[17px] font-bold tracking-tight text-gray-800 dark:text-gray-100 sm:hidden" title={favoriteCollectionTitle}>{favoriteCollectionTitle}</span>
+                  <a
+                    href="https://taostudioai.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hidden items-center gap-2.5 text-lg font-bold tracking-tight text-stone-900 transition-colors hover:text-stone-700 dark:text-stone-100 dark:hover:text-stone-300 sm:inline-flex"
+                  >
+                    <img src="./brand/taostudio-peach-logo-64.png" alt="" className="h-8 w-8 rounded-lg object-contain" />
+                    <span>TaoStudio 生图工作台</span>
+                  </a>
+                </>
+              ) : (
+                <a
+                  href="https://taostudioai.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex min-w-0 items-center gap-2.5 text-[17px] font-bold tracking-tight text-stone-900 transition-colors hover:text-stone-700 dark:text-stone-100 dark:hover:text-stone-300 sm:text-lg"
+                >
+                  <img src="./brand/taostudio-peach-logo-64.png" alt="" className="h-8 w-8 shrink-0 rounded-lg object-contain" />
+                  <span className="sm:hidden">生图工作台</span>
+                  <span className="hidden truncate sm:inline">TaoStudio 生图工作台</span>
+                </a>
+              )}
+              {hasUpdate && latestRelease && (
+                <a
+                  href={latestRelease.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={dismiss}
+                  className="absolute -right-1 -top-1 translate-x-full -translate-y-1/4 px-1 py-0.5 rounded-[4px] border border-red-500/30 text-[9px] font-black bg-red-500 text-white hover:bg-red-600 transition-all animate-fade-in leading-none shadow-sm"
+                  title={`新版本 ${latestRelease.tag}`}
+                >
+                  NEW
+                </a>
+              )}
+            </h1>
+            {appMode === 'agent' && <div className="hidden sm:flex items-center gap-1 relative">
+              <button
+                ref={historyButtonRef}
+                type="button"
+                onClick={() => setShowHistoryModal((visible) => !visible)}
+                className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/[0.04] rounded-lg transition-colors"
+                title="历史任务"
+              >
+                <HistoryIcon className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAppMode('agent')
+                  createConversation()
+                }}
+                className="p-1.5 text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/[0.04] rounded-lg transition-colors"
+                title="新对话"
+              >
+                <EditIcon className="w-5 h-5" />
+              </button>
+              {showHistoryModal && (
+                <HistoryModal onClose={() => setShowHistoryModal(false)} ignoreOutsideClickRef={historyButtonRef} />
+              )}
+            </div>}
+          </div>
+          {appMode === 'agent' && activeConversation && (
+            <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 hidden sm:flex max-w-[30%]">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowHistoryModal(true)
+                  // Use setTimeout to ensure HistoryModal is mounted before setting editing id
+                  setTimeout(() => {
+                    useStore.getState().setAgentEditingConversationId(activeConversation.id)
+                  }, 0)
+                }}
+                className="text-sm font-semibold text-gray-700 dark:text-gray-300 truncate hover:bg-gray-100 dark:hover:bg-white/[0.04] px-2 py-1 rounded transition-colors"
+              >
+                {activeConversation.title || '智能体'}
+              </button>
+            </div>
+          )}
+          {showFavoriteCollectionTitle && (
+            <div className="absolute left-1/2 top-1/2 hidden max-w-[30%] -translate-x-1/2 -translate-y-1/2 sm:flex">
+              <div className="truncate rounded px-2 py-1 text-sm font-semibold text-gray-700 dark:text-gray-300" title={favoriteCollectionTitle}>
+                {favoriteCollectionTitle}
+              </div>
+            </div>
+          )}
+          <div className="hidden sm:flex items-center gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mr-4">
+            <button
+              type="button"
+              onClick={() => setAppMode('gallery')}
+              className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+            >
+              画廊
+            </button>
+            <button
+              type="button"
+              onClick={() => setAppMode('agent')}
+              className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+            >
+              智能体
+            </button>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              onClick={() => setThemeMode(themeMode === 'system' ? 'light' : themeMode === 'light' ? 'dark' : 'system')}
+              className="rounded-lg p-2 text-stone-600 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100 sm:hidden"
+              title="切换主题"
+              aria-label="切换主题"
+            >
+              {themeMode === 'light' ? <Sun className="h-5 w-5" /> : themeMode === 'dark' ? <Moon className="h-5 w-5" /> : <Monitor className="h-5 w-5" />}
+            </button>
+            <div className="hidden items-center gap-0.5 rounded-xl border border-stone-200/80 bg-white/70 p-1 shadow-sm dark:border-white/[0.08] dark:bg-white/[0.04] sm:flex">
+              <button
+                type="button"
+                onClick={() => setThemeMode('light')}
+                className={`rounded-lg p-1.5 transition-colors ${themeMode === 'light' ? 'bg-stone-900 text-white dark:bg-white dark:text-stone-950' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100'}`}
+                title="浅色"
+                aria-label="浅色"
+              >
+                <Sun className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setThemeMode('dark')}
+                className={`rounded-lg p-1.5 transition-colors ${themeMode === 'dark' ? 'bg-stone-900 text-white dark:bg-white dark:text-stone-950' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100'}`}
+                title="深色"
+                aria-label="深色"
+              >
+                <Moon className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setThemeMode('system')}
+                className={`rounded-lg p-1.5 transition-colors ${themeMode === 'system' ? 'bg-stone-900 text-white dark:bg-white dark:text-stone-950' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100'}`}
+                title="跟随系统"
+                aria-label="跟随系统"
+              >
+                <Monitor className="h-4 w-4" />
+              </button>
+            </div>
+            {!isPwaInstalled && (
+              <div
+                className="relative"
+                {...installTooltip.handlers}
+              >
+                <button
+                  onClick={() => {
+                    dismissAllTooltips()
+                    handleInstallClick()
+                  }}
+                  className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+                  aria-label="安装为应用"
+                >
+                  <InstallIcon className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                </button>
+                <ViewportTooltip visible={installTooltip.visible} className="whitespace-nowrap">
+                  安装为应用
+                </ViewportTooltip>
+              </div>
+            )}
+            <div
+              className="relative"
+              {...helpTooltip.handlers}
+            >
+              <button
+                onClick={() => {
+                  dismissAllTooltips()
+                  setShowHelp(true)
+                }}
+                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+                aria-label="操作指南"
+              >
+                <HelpCircleIcon className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+              </button>
+              <ViewportTooltip visible={helpTooltip.visible} className="whitespace-nowrap">
+                操作指南
+              </ViewportTooltip>
+            </div>
+            <div
+              className="relative"
+              {...settingsTooltip.handlers}
+            >
+              <button
+                onClick={() => setShowSettings(true)}
+                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+                aria-label="设置"
+              >
+                <SettingsIcon className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+              </button>
+              <ViewportTooltip visible={settingsTooltip.visible} className="whitespace-nowrap">
+                设置
+              </ViewportTooltip>
+            </div>
+          </div>
+        </div>
+        <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 opacity-0 pb-0' : 'max-h-20 opacity-100 pb-2'}`}>
+          <div className="grid grid-cols-2 gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mx-2">
+            <button
+              type="button"
+              onClick={() => setAppMode('gallery')}
+              className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+            >
+              画廊
+            </button>
+            <button
+              type="button"
+              onClick={() => setAppMode('agent')}
+              className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+            >
+              智能体
+            </button>
+          </div>
+        </div>
+      </header>
+      
+      {/* Hint for sliding down */}
+      <div className={`fixed top-0 left-0 right-0 z-30 flex justify-center pointer-events-none transition-all duration-300 ease-in-out sm:hidden ${appMode === 'agent' && hintVisible && !agentMobileHeaderVisible ? 'translate-y-[env(safe-area-inset-top,0px)] opacity-100' : '-translate-y-full opacity-0'}`}>
+        <div className="bg-black/60 backdrop-blur-sm text-white text-xs px-3 py-1.5 rounded-b-xl shadow-lg">
+          下拉展示顶栏
+        </div>
+      </div>
+
+      <div className={`safe-area-top invisible pointer-events-none transition-all duration-300 ease-in-out ${appMode === 'agent' && !agentMobileHeaderVisible ? 'max-h-0 sm:max-h-[500px] opacity-0 sm:opacity-100 overflow-hidden sm:overflow-visible' : 'max-h-[500px] opacity-100'}`} aria-hidden="true">
+        <div className="safe-header-inner" />
+        <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 pb-0' : 'max-h-20 pb-2'}`}>
+          <div className="p-1">
+            <div className="py-1.5 text-sm">占位</div>
+          </div>
+        </div>
+      </div>
+      {showHelp && <HelpModal appMode={appMode} isFavoriteCollectionOverview={appMode === 'gallery' && filterFavorite && !activeFavoriteCollectionId} onClose={() => setShowHelp(false)} />}
+    </>
+  )
+}
