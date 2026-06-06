@@ -183,6 +183,7 @@ function copyResponseHeaders(upstreamResponse, response) {
   upstreamResponse.headers.forEach((value, name) => {
     const lowerName = name.toLowerCase()
     if (HOP_BY_HOP_HEADERS.has(lowerName)) return
+    if (lowerName === 'content-encoding') return
     response.setHeader(name, value)
   })
   response.setHeader('Cache-Control', 'no-store')
