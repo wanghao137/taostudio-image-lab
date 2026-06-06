@@ -4,13 +4,13 @@ import { buildApiUrl } from './devProxy'
 describe('buildApiUrl', () => {
   it('uses the same-origin proxy prefix when API proxy is enabled', () => {
     expect(buildApiUrl('http://api.example.com/v1', 'images/edits', null, true)).toBe(
-      '/api-proxy/images/edits',
+      '/api-proxy?path=images%2Fedits',
     )
   })
 
   it('leaves API versioning to the proxy target when proxying', () => {
     expect(buildApiUrl('http://api.example.com', 'images/generations', null, true)).toBe(
-      '/api-proxy/images/generations',
+      '/api-proxy?path=images%2Fgenerations',
     )
   })
 

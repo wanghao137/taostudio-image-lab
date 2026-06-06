@@ -64,6 +64,9 @@ export function buildApiUrl(
   const endpointPath = path.replace(/^\/+/, '')
 
   if (useApiProxy) {
+    if (!proxyConfig?.enabled) {
+      return `${proxyConfig?.prefix ?? DEFAULT_PROXY_PREFIX}?path=${encodeURIComponent(endpointPath)}`
+    }
     return `${proxyConfig?.prefix ?? DEFAULT_PROXY_PREFIX}/${endpointPath}`
   }
 

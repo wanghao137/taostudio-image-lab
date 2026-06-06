@@ -529,7 +529,7 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy/images/generations',
+      '/api-proxy?path=images%2Fgenerations',
       expect.objectContaining({ method: 'POST' }),
     )
     expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
@@ -560,7 +560,7 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy/images/generations',
+      '/api-proxy?path=images%2Fgenerations',
       expect.objectContaining({ method: 'POST' }),
     )
     expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
@@ -613,7 +613,7 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy/custom/images',
+      '/api-proxy?path=custom%2Fimages',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -691,7 +691,7 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy/images/generations',
+      '/api-proxy?path=images%2Fgenerations',
       expect.objectContaining({ method: 'POST' }),
     )
   })
