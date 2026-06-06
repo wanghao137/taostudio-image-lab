@@ -17,8 +17,11 @@ import {
   normalizeBase64Image,
   pickActualParams,
 } from './imageApiShared'
+import { isYdnApiUrl } from './ydnCompatibility'
 
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
+const YDN_MAX_ACTIVE_IMAGE_REQUESTS = 3
+const YDN_RETRY_DELAYS_MS = [1500, 4000]
 
 function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
@@ -586,6 +589,87 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
   return { images, actualParams, actualParamsList, revisedPrompts, ...(rawImageUrls.length ? { rawImageUrls } : {}) }
 }
 
+function isYdnRetryableStatus(status: number) {
+  return status === 408 || status === 429 || status >= 500
+}
+
+function isYdnRetryableError(err: unknown) {
+  if (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError') return false
+  const message = err instanceof Error ? err.message : String(err)
+  return /fetch failed|failed to fetch|load failed|network|terminated|socket|connection|timeout|temporarily|连接|断开|中断/i.test(message)
+}
+
+let ydnActiveImageRequests = 0
+const ydnImageRequestQueue: Array<() => void> = []
+
+function releaseYdnImageRequestSlot() {
+  ydnActiveImageRequests = Math.max(0, ydnActiveImageRequests - 1)
+  const next = ydnImageRequestQueue.shift()
+  if (next) next()
+}
+
+async function runWithYdnImageRequestSlot<T>(profile: ApiProfile, signal: AbortSignal, task: () => Promise<T>): Promise<T> {
+  if (profile.provider !== 'openai' || !isYdnApiUrl(profile.baseUrl)) return task()
+
+  if (ydnActiveImageRequests >= YDN_MAX_ACTIVE_IMAGE_REQUESTS) {
+    await new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'))
+        return
+      }
+      const entry = () => {
+        signal.removeEventListener('abort', abort)
+        resolve()
+      }
+      const abort = () => {
+        const index = ydnImageRequestQueue.indexOf(entry)
+        if (index >= 0) ydnImageRequestQueue.splice(index, 1)
+        reject(new DOMException('Aborted', 'AbortError'))
+      }
+      signal.addEventListener('abort', abort, { once: true })
+      ydnImageRequestQueue.push(entry)
+    })
+  }
+
+  ydnActiveImageRequests += 1
+  try {
+    return await task()
+  } finally {
+    releaseYdnImageRequestSlot()
+  }
+}
+
+async function fetchImagesApiWithYdnRetryInner(profile: ApiProfile, input: RequestInfo | URL, init: RequestInit, signal: AbortSignal) {
+  const retryDelays = profile.provider === 'openai' && isYdnApiUrl(profile.baseUrl)
+    ? YDN_RETRY_DELAYS_MS
+    : []
+
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      const response = await fetch(input, init)
+      if (!response.ok && attempt < retryDelays.length && isYdnRetryableStatus(response.status) && !signal.aborted) {
+        await response.text().catch(() => '')
+        await sleep(retryDelays[attempt], signal)
+        continue
+      }
+      return response
+    } catch (err) {
+      if (attempt >= retryDelays.length || signal.aborted || !isYdnRetryableError(err)) throw err
+      await sleep(retryDelays[attempt], signal)
+    }
+  }
+
+  return fetch(input, init)
+}
+
+async function fetchImagesApiWithYdnRetry(profile: ApiProfile, input: RequestInfo | URL, init: RequestInit, signal: AbortSignal) {
+  return runWithYdnImageRequestSlot(
+    profile,
+    signal,
+    () => fetchImagesApiWithYdnRetryInner(profile, input, init, signal),
+  )
+}
+
 async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, customProvider?: CustomProviderDefinition | null): Promise<CallApiResult> {
   const { prompt: originalPrompt, params, inputImageDataUrls } = opts
   const prompt = profile.codexCli
@@ -658,13 +742,13 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await fetchImagesApiWithYdnRetry(profile, buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
         body: formData,
         signal: controller.signal,
-      })
+      }, controller.signal)
     } else {
       const body: Record<string, unknown> = {
         model: profile.model,
@@ -692,7 +776,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await fetchImagesApiWithYdnRetry(profile, buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -701,7 +785,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         cache: 'no-store',
         body: JSON.stringify(body),
         signal: controller.signal,
-      })
+      }, controller.signal)
     }
 
     if (!response.ok) {

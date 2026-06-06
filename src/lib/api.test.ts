@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
-import { DEFAULT_SETTINGS } from './apiProfiles'
+import { createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
 import { callImageApi } from './api'
 
 describe('callImageApi', () => {
@@ -708,6 +708,121 @@ describe('callImageApi', () => {
     expect(headers).not.toHaveProperty('Pragma')
     expect(headers).not.toHaveProperty('Cache-Control')
     expect((init as RequestInit).cache).toBe('no-store')
+  })
+
+  it('retries transient YDN Images API failures before surfacing an error', async () => {
+    vi.useFakeTimers()
+    const ydnProfile = createDefaultOpenAIProfile({
+      id: 'ydn-profile',
+      apiKey: 'test-key',
+      baseUrl: 'https://www.ydn99.com',
+      model: 'gpt-image-2',
+      apiMode: 'images',
+      codexCli: true,
+      timeout: 600,
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [ydnProfile],
+        activeProfileId: ydnProfile.id,
+      }),
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840', n: 1 },
+      inputImageDataUrls: [],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1500)
+
+    await expect(promise).resolves.toEqual({
+      images: ['data:image/png;base64,aW1hZ2U='],
+      actualParams: undefined,
+      actualParamsList: [undefined],
+      revisedPrompts: [undefined],
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry non-transient YDN request errors', async () => {
+    const ydnProfile = createDefaultOpenAIProfile({
+      id: 'ydn-profile',
+      apiKey: 'test-key',
+      baseUrl: 'https://www.ydn99.com',
+      model: 'gpt-image-2',
+      apiMode: 'images',
+      codexCli: true,
+      timeout: 600,
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Invalid API key' },
+    }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await expect(callImageApi({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [ydnProfile],
+        activeProfileId: ydnProfile.id,
+      }),
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840', n: 1 },
+      inputImageDataUrls: [],
+    })).rejects.toThrow(/Invalid API key/)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('queues YDN image requests instead of sending unlimited parallel browser requests', async () => {
+    const ydnProfile = createDefaultOpenAIProfile({
+      id: 'ydn-profile',
+      apiKey: 'test-key',
+      baseUrl: 'https://www.ydn99.com',
+      model: 'gpt-image-2',
+      apiMode: 'images',
+      codexCli: true,
+      timeout: 600,
+    })
+    const settings = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [ydnProfile],
+      activeProfileId: ydnProfile.id,
+    })
+    const responses: Array<() => void> = []
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => {
+      responses.push(() => resolve(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })))
+    }))
+
+    const calls = Array.from({ length: 4 }, () => callImageApi({
+      settings,
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840', n: 1 },
+      inputImageDataUrls: [],
+    }))
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    expect(responses).toHaveLength(3)
+    responses.shift()?.()
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+    while (responses.length) responses.shift()?.()
+
+    await expect(Promise.all(calls)).resolves.toHaveLength(4)
   })
 
   it('ignores stored API proxy settings when the current deployment has no proxy', async () => {
