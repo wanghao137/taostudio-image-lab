@@ -1,5 +1,3 @@
-import { Readable } from 'node:stream'
-
 const TARGET_HEADER = 'x-taostudio-api-base-url'
 const DEFAULT_PROXY_TIMEOUT_MS = 600_000
 const HOP_BY_HOP_HEADERS = new Set([
@@ -190,21 +188,13 @@ function copyResponseHeaders(upstreamResponse, response) {
   response.setHeader('Cache-Control', 'no-store')
 }
 
-async function pipeUpstreamResponse(upstreamResponse, response) {
+async function sendUpstreamResponse(upstreamResponse, response) {
   response.statusCode = upstreamResponse.status
   copyResponseHeaders(upstreamResponse, response)
 
-  if (!upstreamResponse.body) {
-    response.end()
-    return
-  }
-
-  const stream = Readable.fromWeb(upstreamResponse.body)
-  await new Promise((resolve, reject) => {
-    stream.on('error', reject)
-    response.on('finish', resolve)
-    stream.pipe(response)
-  })
+  const bytes = Buffer.from(await upstreamResponse.arrayBuffer())
+  response.setHeader('Content-Length', String(bytes.length))
+  response.end(bytes)
 }
 
 export default async function handler(request, response) {
@@ -239,7 +229,7 @@ export default async function handler(request, response) {
       redirect: 'manual',
       signal: controller.signal,
     })
-    await pipeUpstreamResponse(upstreamResponse, response)
+    await sendUpstreamResponse(upstreamResponse, response)
   } catch (error) {
     if (!response.headersSent) {
       writeJson(response, 502, {
