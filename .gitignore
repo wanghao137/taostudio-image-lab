@@ -30,3 +30,5 @@ docs/upstream-upgrade-report.md
 *.njsproj
 *.sln
 *.sw?
+
+.vercel
