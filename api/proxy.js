@@ -153,7 +153,7 @@ function getHeaderValue(request, name) {
   return typeof value === 'string' ? value : ''
 }
 
-function createForwardHeaders(request, body) {
+function createForwardHeaders(request, body, contentTypeOverride) {
   const headers = new Headers()
 
   const authorization = getHeaderValue(request, 'authorization').trim()
@@ -163,7 +163,7 @@ function createForwardHeaders(request, body) {
   const resolvedAuthorization = (!authorization || authorization === 'Bearer') ? fallbackAuthorization : authorization
   if (resolvedAuthorization) headers.set('authorization', resolvedAuthorization)
 
-  const contentType = getHeaderValue(request, 'content-type').trim()
+  const contentType = contentTypeOverride || getHeaderValue(request, 'content-type').trim()
   if (contentType) headers.set('content-type', contentType)
   const accept = getHeaderValue(request, 'accept').trim()
   if (accept) headers.set('accept', accept)
@@ -172,7 +172,7 @@ function createForwardHeaders(request, body) {
   return headers
 }
 
-async function readRequestBody(request) {
+async function readRawRequestBody(request) {
   if (request.method === 'GET' || request.method === 'HEAD') return undefined
 
   const chunks = []
@@ -180,6 +180,22 @@ async function readRequestBody(request) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
   }
   return chunks.length ? Buffer.concat(chunks) : undefined
+}
+
+async function readRequestBody(request) {
+  const body = await readRawRequestBody(request)
+  const contentType = getHeaderValue(request, 'content-type').toLowerCase()
+  if (!body || !contentType.includes('application/json')) return { body, contentTypeOverride: '' }
+
+  try {
+    const normalizedJson = JSON.stringify(JSON.parse(body.toString('utf8')))
+    return {
+      body: Buffer.from(normalizedJson, 'utf8'),
+      contentTypeOverride: 'application/json',
+    }
+  } catch {
+    return { body, contentTypeOverride: '' }
+  }
 }
 
 function copyResponseHeaders(upstreamResponse, response) {
@@ -192,9 +208,12 @@ function copyResponseHeaders(upstreamResponse, response) {
   response.setHeader('Cache-Control', 'no-store')
 }
 
-async function sendUpstreamResponse(upstreamResponse, response) {
+async function sendUpstreamResponse(upstreamResponse, response, diagnostics) {
   response.statusCode = upstreamResponse.status
   copyResponseHeaders(upstreamResponse, response)
+  response.setHeader('X-TaoStudio-Proxy-Path', diagnostics.path)
+  response.setHeader('X-TaoStudio-Proxy-Body-Bytes', String(diagnostics.bodyBytes))
+  response.setHeader('X-TaoStudio-Proxy-Content-Type', diagnostics.contentType || 'none')
 
   const bytes = Buffer.from(await upstreamResponse.arrayBuffer())
   response.setHeader('Content-Length', String(bytes.length))
@@ -226,15 +245,20 @@ export default async function handler(request, response) {
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    const body = await readRequestBody(request)
+    const { body, contentTypeOverride } = await readRequestBody(request)
+    const forwardHeaders = createForwardHeaders(request, body, contentTypeOverride)
     const upstreamResponse = await fetch(upstreamUrl, {
       method: request.method,
-      headers: createForwardHeaders(request, body),
+      headers: forwardHeaders,
       body,
       redirect: 'manual',
       signal: controller.signal,
     })
-    await sendUpstreamResponse(upstreamResponse, response)
+    await sendUpstreamResponse(upstreamResponse, response, {
+      path: upstreamUrl.pathname,
+      bodyBytes: body?.length ?? 0,
+      contentType: forwardHeaders.get('content-type') ?? '',
+    })
   } catch (error) {
     if (!response.headersSent) {
       writeJson(response, 502, {
