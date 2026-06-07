@@ -1,6 +1,6 @@
 import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
-import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
+import { buildApiUrl, isApiProxyAvailable, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
   assertImageInputPayloadSize,
   assertMaskEditFileSize,
@@ -21,6 +21,8 @@ import {
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
 const API_REQUEST_MAX_ATTEMPTS = 2
 const API_REQUEST_RETRY_DELAY_MS = 1000
+const LONG_PROMPT_API_PROXY_THRESHOLD = 1800
+const LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD = 8_000_000
 const RETRYABLE_API_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 523, 524])
 
 interface ApiFetchContext {
@@ -97,6 +99,46 @@ function isRetryableApiFetchError(error: unknown, signal?: AbortSignal): boolean
   if (name === 'AbortError') return false
   return error instanceof TypeError ||
     /network|failed to fetch|fetch failed|load failed|socket|econnreset|etimedout|timeout|连接|断开|中断/i.test(message)
+}
+
+function getImageSizePixels(size?: string): number {
+  const match = size?.match(/^\s*(\d+)\s*[xX×]\s*(\d+)\s*$/)
+  if (!match) return 0
+  const width = Number(match[1])
+  const height = Number(match[2])
+  return Number.isFinite(width) && Number.isFinite(height) ? width * height : 0
+}
+
+function shouldPreferApiProxyForRequest(
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+  prompt: string,
+  params: TaskParams,
+): boolean {
+  if (!isApiProxyAvailable(proxyConfig)) return false
+  return Array.from(prompt).length >= LONG_PROMPT_API_PROXY_THRESHOLD ||
+    getImageSizePixels(params.size) >= LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD
+}
+
+function headersToRecord(headers: HeadersInit | undefined): Record<string, string> {
+  if (!headers) return {}
+  if (headers instanceof Headers) {
+    const record: Record<string, string> = {}
+    headers.forEach((value, key) => {
+      record[key] = value
+    })
+    return record
+  }
+  if (Array.isArray(headers)) return Object.fromEntries(headers.map(([key, value]) => [key, value]))
+  return { ...headers }
+}
+
+function shouldFallbackToApiProxy(
+  error: unknown,
+  useApiProxy: boolean,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (useApiProxy || !isApiProxyAvailable(proxyConfig) || !isApiDiagnosticError(error)) return false
+  return error.apiDiagnostics.retryable && error.apiDiagnostics.status == null
 }
 
 function createApiRequestDiagnostics(
@@ -176,6 +218,40 @@ async function fetchOpenAICompatibleApi(url: string, init: RequestInit, context:
   }
 
   throw new Error('API request failed without a final response.')
+}
+
+async function fetchOpenAICompatibleApiWithProxyFallback(
+  profile: ApiProfile,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+  path: string,
+  init: RequestInit,
+  context: ApiFetchContext,
+): Promise<Response> {
+  const useApiProxy = context.useApiProxy
+  try {
+    return await fetchOpenAICompatibleApi(
+      buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy),
+      init,
+      context,
+    )
+  } catch (error) {
+    if (!shouldFallbackToApiProxy(error, useApiProxy, proxyConfig)) throw error
+
+    return fetchOpenAICompatibleApi(
+      buildApiUrl(profile.baseUrl, path, proxyConfig, true),
+      {
+        ...init,
+        headers: {
+          ...headersToRecord(init.headers),
+          ...createRequestHeaders(profile, true),
+        },
+      },
+      {
+        ...context,
+        useApiProxy: true,
+      },
+    )
+  }
 }
 
 function appendQuery(path: string, query?: Record<string, string>): string {
@@ -697,7 +773,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
   const isEdit = inputImageDataUrls.length > 0
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
-  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
+  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForRequest(proxyConfig, originalPrompt, params)
   const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const paths = createOpenAICompatiblePaths(customProvider)
 
@@ -761,7 +837,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, paths.editPath, {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
@@ -808,7 +884,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, paths.generationPath, {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -1206,7 +1282,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const { prompt, params, inputImageDataUrls } = opts
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
-  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
+  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForRequest(proxyConfig, prompt, params)
   const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
@@ -1231,7 +1307,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       body.stream = true
     }
 
-    const response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const response = await fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, 'responses', {
       method: 'POST',
       headers: {
         ...requestHeaders,

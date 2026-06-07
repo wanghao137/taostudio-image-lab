@@ -618,6 +618,33 @@ describe('callImageApi', () => {
     )
   })
 
+  it('prefers the same-origin API proxy for long 4K Images API requests when proxy is available', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: false,
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: '清甜小馆品牌视觉提案。'.repeat(180),
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    const headers = (init as RequestInit).headers as Record<string, string>
+    expect(url).toBe('/api-proxy/images/generations')
+    expect(headers['x-taostudio-api-base-url']).toBe('https://api.example.com/v1')
+  })
+
   it('does not add cache request headers that require extra CORS allow-list entries', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       data: [{ b64_json: 'aW1hZ2U=' }],
@@ -692,6 +719,43 @@ describe('callImageApi', () => {
       images: ['data:image/png;base64,aW1hZ2U='],
     }))
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('falls back to the same-origin API proxy after retryable direct Images API network failures', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: false,
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[2][0]).toBe('/api-proxy/images/generations')
   })
 
   it('adds redacted request diagnostics when a retryable Images API response still fails', async () => {
