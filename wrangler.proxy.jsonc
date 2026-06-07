@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "taostudio-image-api-proxy",
+  "main": "workers/api-proxy.js",
+  "compatibility_date": "2026-05-07",
+  "routes": [
+    {
+      "pattern": "image-proxy.taostudioai.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "IMAGE_API_PROXY_TARGET": "https://www.ydn99.com/v1",
+    "IMAGE_API_PROXY_ALLOWED_HOSTS": "www.ydn99.com"
+  }
+}

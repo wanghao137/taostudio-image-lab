@@ -22,7 +22,7 @@ export function getYdnImageProfilePatch(profile: Pick<ApiProfile, 'provider' | '
 
   const patch: Partial<ApiProfile> = {}
   if (normalizeBaseUrl(profile.baseUrl) !== YDN_API_BASE_URL) patch.baseUrl = YDN_API_BASE_URL
-  if (profile.apiMode !== 'images') patch.apiMode = 'images'
+  if (profile.apiMode !== 'responses') patch.apiMode = 'responses'
   if (profile.model.trim() !== YDN_IMAGE_MODEL) patch.model = YDN_IMAGE_MODEL
   if (profile.timeout !== YDN_IMAGE_TIMEOUT_SECONDS) patch.timeout = YDN_IMAGE_TIMEOUT_SECONDS
   if (isApiProxyAvailable()) {

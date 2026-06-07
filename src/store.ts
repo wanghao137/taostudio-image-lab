@@ -2318,7 +2318,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       activeProfile = patchedProfile
       requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
     }
-    showToast('已自动使用 YDN 生图推荐配置：Images API + gpt-image-2', 'info')
+    showToast('已自动使用 YDN 生图推荐配置：Responses API + gpt-image-2', 'info')
   }
 
   if (validateApiProfile(activeProfile)) {

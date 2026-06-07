@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApiUrl } from './devProxy'
 
 describe('buildApiUrl', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it('uses the same-origin proxy prefix when API proxy is enabled', () => {
     expect(buildApiUrl('http://api.example.com/v1', 'images/edits', null, true)).toBe(
       '/api-proxy?path=images%2Fedits',
@@ -29,6 +33,14 @@ describe('buildApiUrl', () => {
         true,
       ),
     ).toBe('/openai-proxy/responses')
+  })
+
+  it('uses the production proxy prefix from Vite env when configured', () => {
+    vi.stubEnv('VITE_API_PROXY_PREFIX', 'https://image-proxy.taostudioai.com/api-proxy')
+
+    expect(buildApiUrl('https://www.ydn99.com', 'images/generations', null, true)).toBe(
+      'https://image-proxy.taostudioai.com/api-proxy?path=images%2Fgenerations',
+    )
   })
 
   it('uses the configured API URL directly when API proxy is disabled', () => {

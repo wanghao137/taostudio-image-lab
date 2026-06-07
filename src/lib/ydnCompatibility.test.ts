@@ -12,7 +12,7 @@ describe('YDN compatibility', () => {
 
     const patch = getYdnImageProfilePatch(createDefaultOpenAIProfile({
       baseUrl: 'https://www.ydn99.com/v1',
-      apiMode: 'responses',
+      apiMode: 'images',
       model: 'gpt-4.1',
       timeout: 60,
       apiProxy: false,
@@ -23,7 +23,7 @@ describe('YDN compatibility', () => {
 
     expect(patch).toMatchObject({
       baseUrl: 'https://www.ydn99.com',
-      apiMode: 'images',
+      apiMode: 'responses',
       model: 'gpt-image-2',
       timeout: 600,
       apiProxy: true,

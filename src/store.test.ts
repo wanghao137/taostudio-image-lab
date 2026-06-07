@@ -269,7 +269,7 @@ describe('mask draft lifecycle in store actions', () => {
     expect(state.showToast).toHaveBeenCalledWith('任务已提交', 'success')
   })
 
-  it('auto applies the YDN Images API profile before submitting a task without forcing Codex compatibility', async () => {
+  it('auto applies the YDN Responses API profile before submitting a task without forcing Codex compatibility', async () => {
     const ydnProfile = createDefaultOpenAIProfile({
       id: 'ydn-profile',
       name: 'YDN',
@@ -304,12 +304,12 @@ describe('mask draft lifecycle in store actions', () => {
 
     expect(callSettings.activeProfileId).toBe(ydnProfile.id)
     expect(callSettings.baseUrl).toBe('https://www.ydn99.com')
-    expect(callSettings.apiMode).toBe('images')
+    expect(callSettings.apiMode).toBe('responses')
     expect(callSettings.model).toBe('gpt-image-2')
     expect(callSettings.apiProxy).toBe(false)
     expect(callProfile).toMatchObject({
       baseUrl: 'https://www.ydn99.com',
-      apiMode: 'images',
+      apiMode: 'responses',
       model: 'gpt-image-2',
       timeout: 600,
       codexCli: false,
@@ -320,7 +320,7 @@ describe('mask draft lifecycle in store actions', () => {
     expect(callProfile?.responseFormatB64Json).toBeFalsy()
     expect(stateProfile).toMatchObject({
       baseUrl: 'https://www.ydn99.com',
-      apiMode: 'images',
+      apiMode: 'responses',
       model: 'gpt-image-2',
       timeout: 600,
       codexCli: false,
@@ -330,7 +330,7 @@ describe('mask draft lifecycle in store actions', () => {
     })
     expect(taskRecord).toMatchObject({
       apiProvider: 'openai',
-      apiMode: 'images',
+      apiMode: 'responses',
       apiModel: 'gpt-image-2',
       params: expect.objectContaining({ n: 1 }),
     })
