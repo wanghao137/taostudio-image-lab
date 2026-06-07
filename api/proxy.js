@@ -147,24 +147,27 @@ function writeJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload))
 }
 
-function createForwardHeaders(request) {
+function getHeaderValue(request, name) {
+  const value = request.headers[name]
+  if (Array.isArray(value)) return value.find(Boolean) ?? ''
+  return typeof value === 'string' ? value : ''
+}
+
+function createForwardHeaders(request, body) {
   const headers = new Headers()
 
-  for (const [name, value] of Object.entries(request.headers)) {
-    const lowerName = name.toLowerCase()
-    if (HOP_BY_HOP_HEADERS.has(lowerName) || lowerName === TARGET_HEADER) continue
-    if (lowerName.startsWith('x-vercel-')) continue
-    if (Array.isArray(value)) headers.set(name, value.join(', '))
-    else if (typeof value === 'string') headers.set(name, value)
-  }
-
-  const authorization = headers.get('authorization')?.trim() ?? ''
+  const authorization = getHeaderValue(request, 'authorization').trim()
   const proxyAuthorization = env('IMAGE_API_PROXY_AUTHORIZATION') || env('API_PROXY_AUTHORIZATION')
   const proxyApiKey = env('YDN_API_KEY') || env('IMAGE_API_PROXY_API_KEY') || env('API_PROXY_API_KEY')
   const fallbackAuthorization = proxyAuthorization || (proxyApiKey ? `Bearer ${proxyApiKey}` : '')
-  if ((!authorization || authorization === 'Bearer') && fallbackAuthorization) {
-    headers.set('authorization', fallbackAuthorization)
-  }
+  const resolvedAuthorization = (!authorization || authorization === 'Bearer') ? fallbackAuthorization : authorization
+  if (resolvedAuthorization) headers.set('authorization', resolvedAuthorization)
+
+  const contentType = getHeaderValue(request, 'content-type').trim()
+  if (contentType) headers.set('content-type', contentType)
+  const accept = getHeaderValue(request, 'accept').trim()
+  if (accept) headers.set('accept', accept)
+  if (body) headers.set('content-length', String(body.length))
 
   return headers
 }
@@ -223,10 +226,11 @@ export default async function handler(request, response) {
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
+    const body = await readRequestBody(request)
     const upstreamResponse = await fetch(upstreamUrl, {
       method: request.method,
-      headers: createForwardHeaders(request),
-      body: await readRequestBody(request),
+      headers: createForwardHeaders(request, body),
+      body,
       redirect: 'manual',
       signal: controller.signal,
     })
