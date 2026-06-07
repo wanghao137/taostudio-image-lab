@@ -436,6 +436,34 @@ describe('callImageApi', () => {
     )
   })
 
+  it('passes the configured API URL to the same-origin API proxy as a target header', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: true,
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    const headers = (init as RequestInit).headers as Record<string, string>
+    expect(url).toBe('/api-proxy/images/generations')
+    expect(headers['x-taostudio-api-base-url']).toBe('https://api.example.com/v1')
+    expect(headers['x-taostudio-api-base-url']).not.toContain('test-key')
+  })
+
   it('uses the same-origin API proxy path when API proxy is enabled and base URL is empty', async () => {
     vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
@@ -637,6 +665,71 @@ describe('callImageApi', () => {
       'http://api.example.com/v1/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('retries transient Images API network failures before returning the generated image', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('adds redacted request diagnostics when a retryable Images API response still fails', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'gateway timeout' } }), {
+        status: 524,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'gateway timeout' } }), {
+        status: 524,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const errorPromise: Promise<Error & { apiDiagnostics?: unknown }> = callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', baseUrl: 'https://api.example.com/v1' },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    }).then(() => {
+      throw new Error('Expected callImageApi to reject')
+    }).catch((err) => err as Error & { apiDiagnostics?: unknown })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+
+    const error = await errorPromise
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain('gateway timeout')
+    expect(error.message).toContain('API request diagnostics')
+    expect(error.message).toContain('"status":524')
+    expect(error.message).not.toContain('test-key')
+    expect(error.apiDiagnostics).toMatchObject({
+      endpoint: 'images/generations',
+      attempts: 2,
+      status: 524,
+      retryable: true,
+    })
   })
 
   it('polls custom async tasks immediately and keeps polling after transient network errors', async () => {

@@ -19,9 +19,163 @@ import {
 } from './imageApiShared'
 
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
+const API_REQUEST_MAX_ATTEMPTS = 2
+const API_REQUEST_RETRY_DELAY_MS = 1000
+const RETRYABLE_API_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 523, 524])
+
+interface ApiFetchContext {
+  endpoint: string
+  apiMode: ApiProfile['apiMode'] | 'custom'
+  bodyKind: 'json' | 'multipart'
+  useApiProxy: boolean
+  model: string
+  timeout: number
+  size?: string
+  outputFormat?: string
+  responseFormat?: string
+  stream?: boolean
+  inputImageCount?: number
+  hasMask?: boolean
+}
+
+interface ApiRequestDiagnostics {
+  endpoint: string
+  apiMode: ApiFetchContext['apiMode']
+  method: string
+  bodyKind: ApiFetchContext['bodyKind']
+  proxy: boolean
+  urlHost?: string
+  model: string
+  timeout: number
+  size?: string
+  outputFormat?: string
+  responseFormat?: string
+  stream?: boolean
+  inputImageCount?: number
+  hasMask?: boolean
+  attempts: number
+  elapsedMs: number
+  retryable: boolean
+  status?: number
+  errorName?: string
+  errorMessage?: string
+}
 
 function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
+}
+
+function getRequestUrlHost(url: string): string | undefined {
+  try {
+    const baseUrl = typeof window === 'undefined' ? 'https://local.taostudio.invalid' : window.location.origin
+    return new URL(url, baseUrl).host
+  } catch {
+    return undefined
+  }
+}
+
+function isRetryableApiStatus(status: number): boolean {
+  return RETRYABLE_API_STATUSES.has(status)
+}
+
+function isApiDiagnosticError(error: unknown): error is Error & { apiDiagnostics: ApiRequestDiagnostics } {
+  return Boolean(error && typeof error === 'object' && 'apiDiagnostics' in error)
+}
+
+function getErrorName(error: unknown): string | undefined {
+  return error instanceof Error ? error.name : undefined
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isRetryableApiFetchError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false
+  const name = getErrorName(error) ?? ''
+  const message = getErrorMessage(error)
+  if (name === 'AbortError') return false
+  return error instanceof TypeError ||
+    /network|failed to fetch|fetch failed|load failed|socket|econnreset|etimedout|timeout|连接|断开|中断/i.test(message)
+}
+
+function createApiRequestDiagnostics(
+  context: ApiFetchContext,
+  url: string,
+  init: RequestInit,
+  attempts: number,
+  startedAt: number,
+  result: Pick<ApiRequestDiagnostics, 'retryable' | 'status' | 'errorName' | 'errorMessage'>,
+): ApiRequestDiagnostics {
+  return {
+    endpoint: context.endpoint,
+    apiMode: context.apiMode,
+    method: init.method ?? 'GET',
+    bodyKind: context.bodyKind,
+    proxy: context.useApiProxy,
+    urlHost: getRequestUrlHost(url),
+    model: context.model,
+    timeout: context.timeout,
+    size: context.size,
+    outputFormat: context.outputFormat,
+    responseFormat: context.responseFormat,
+    stream: context.stream,
+    inputImageCount: context.inputImageCount,
+    hasMask: context.hasMask,
+    attempts,
+    elapsedMs: Date.now() - startedAt,
+    ...result,
+  }
+}
+
+function createApiRequestError(message: string, diagnostics: ApiRequestDiagnostics): Error & { apiDiagnostics: ApiRequestDiagnostics } {
+  const error = new Error(`${message}\nAPI request diagnostics: ${JSON.stringify(diagnostics)}`) as Error & { apiDiagnostics: ApiRequestDiagnostics }
+  error.apiDiagnostics = diagnostics
+  return error
+}
+
+async function fetchOpenAICompatibleApi(url: string, init: RequestInit, context: ApiFetchContext): Promise<Response> {
+  const startedAt = Date.now()
+  let attempts = 0
+
+  while (attempts < API_REQUEST_MAX_ATTEMPTS) {
+    attempts += 1
+
+    try {
+      const response = await fetch(url, init)
+      if (response.ok) return response
+
+      const retryable = isRetryableApiStatus(response.status)
+      if (retryable && attempts < API_REQUEST_MAX_ATTEMPTS) {
+        await sleep(API_REQUEST_RETRY_DELAY_MS, init.signal as AbortSignal)
+        continue
+      }
+
+      const message = await getApiErrorMessage(response)
+      const diagnostics = createApiRequestDiagnostics(context, url, init, attempts, startedAt, {
+        retryable,
+        status: response.status,
+      })
+      throw createApiRequestError(message, diagnostics)
+    } catch (error) {
+      if (isApiDiagnosticError(error)) throw error
+
+      const retryable = isRetryableApiFetchError(error, init.signal as AbortSignal)
+      if (retryable && attempts < API_REQUEST_MAX_ATTEMPTS) {
+        await sleep(API_REQUEST_RETRY_DELAY_MS, init.signal as AbortSignal)
+        continue
+      }
+
+      const diagnostics = createApiRequestDiagnostics(context, url, init, attempts, startedAt, {
+        retryable,
+        errorName: getErrorName(error),
+        errorMessage: getErrorMessage(error),
+      })
+      throw createApiRequestError(getErrorMessage(error), diagnostics)
+    }
+  }
+
+  throw new Error('API request failed without a final response.')
 }
 
 function appendQuery(path: string, query?: Record<string, string>): string {
@@ -80,10 +234,14 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
   return { data: [] }
 }
 
-function createRequestHeaders(profile: ApiProfile): Record<string, string> {
-  return {
+function createRequestHeaders(profile: ApiProfile, useApiProxy = false): Record<string, string> {
+  const headers: Record<string, string> = {
     Authorization: `Bearer ${profile.apiKey}`,
   }
+  if (useApiProxy && profile.baseUrl.trim()) {
+    headers['x-taostudio-api-base-url'] = profile.baseUrl.trim()
+  }
+  return headers
 }
 
 function isEventStreamResponse(response: Response): boolean {
@@ -540,7 +698,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const paths = createOpenAICompatiblePaths(customProvider)
 
   const controller = new AbortController()
@@ -603,12 +761,25 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
         body: formData,
         signal: controller.signal,
+      }, {
+        endpoint: paths.editPath,
+        apiMode: profile.apiMode,
+        bodyKind: 'multipart',
+        useApiProxy,
+        model: profile.model,
+        timeout: profile.timeout,
+        size: params.size,
+        outputFormat: params.output_format,
+        responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
+        stream: Boolean(profile.streamImages),
+        inputImageCount: inputImageDataUrls.length,
+        hasMask: Boolean(opts.maskDataUrl),
       })
     } else {
       const body: Record<string, unknown> = {
@@ -637,7 +808,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -646,6 +817,19 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         cache: 'no-store',
         body: JSON.stringify(body),
         signal: controller.signal,
+      }, {
+        endpoint: paths.generationPath,
+        apiMode: profile.apiMode,
+        bodyKind: 'json',
+        useApiProxy,
+        model: profile.model,
+        timeout: profile.timeout,
+        size: params.size,
+        outputFormat: params.output_format,
+        responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
+        stream: Boolean(profile.streamImages),
+        inputImageCount: 0,
+        hasMask: false,
       })
     }
 
@@ -818,7 +1002,7 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const context = createCustomProviderContext(opts, profile)
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
@@ -847,12 +1031,25 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
     }
   }
 
-  const response = await fetch(buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy), {
+  const response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy), {
     method,
     headers,
     cache: 'no-store',
     body,
     signal: controller.signal,
+  }, {
+    endpoint: mapping.path,
+    apiMode: 'custom',
+    bodyKind: contentType,
+    useApiProxy,
+    model: profile.model,
+    timeout: profile.timeout,
+    size: opts.params.size,
+    outputFormat: opts.params.output_format,
+    responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
+    stream: Boolean(profile.streamImages),
+    inputImageCount: opts.inputImageDataUrls.length,
+    hasMask: Boolean(opts.maskDataUrl),
   })
 
   if (!response.ok) throw new Error(await getApiErrorMessage(response))
@@ -1010,7 +1207,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
 
@@ -1034,7 +1231,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       body.stream = true
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const response = await fetchOpenAICompatibleApi(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
       headers: {
         ...requestHeaders,
@@ -1043,6 +1240,19 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
+    }, {
+      endpoint: 'responses',
+      apiMode: profile.apiMode,
+      bodyKind: 'json',
+      useApiProxy,
+      model: profile.model,
+      timeout: profile.timeout,
+      size: params.size,
+      outputFormat: params.output_format,
+      responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
+      stream: Boolean(profile.streamImages),
+      inputImageCount: inputImageDataUrls.length,
+      hasMask: Boolean(opts.maskDataUrl),
     })
 
     if (!response.ok) {
