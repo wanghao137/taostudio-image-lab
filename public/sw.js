@@ -1,11 +1,5 @@
-const CACHE_NAME = 'taostudio-image-lab-v0.5.5'
-const APP_SHELL = [
-  './',
-  './index.html',
-  './manifest.webmanifest',
-  './brand/taostudio-peach-logo-256.png',
-  './brand/taostudio-peach-logo-512.png',
-]
+const CACHE_NAME = 'gpt-image-playground-v0.1.5'
+const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './pwa-icon.svg']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

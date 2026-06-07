@@ -1,5 +1,4 @@
 const TARGET_HEADER = 'x-taostudio-api-base-url'
-const DEFAULT_TARGET = 'https://www.ydn99.com/v1'
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'content-encoding',
@@ -49,10 +48,21 @@ function getAllowedHosts(env, defaultTargetUrl) {
 }
 
 function resolveTargetUrl(request, env) {
-  const defaultTarget = env.IMAGE_API_PROXY_TARGET || env.API_PROXY_TARGET || DEFAULT_TARGET
-  const defaultTargetUrl = new URL(normalizeBaseUrl(defaultTarget))
+  const defaultTarget = env.IMAGE_API_PROXY_TARGET || env.API_PROXY_TARGET || ''
+  const defaultTargetUrl = defaultTarget ? new URL(normalizeBaseUrl(defaultTarget)) : null
   const requestedTarget = request.headers.get(TARGET_HEADER)?.trim() || ''
-  const targetUrl = new URL(normalizeBaseUrl(requestedTarget || defaultTarget))
+  const rawTarget = requestedTarget || defaultTarget
+
+  if (!rawTarget) {
+    return { errorStatus: 503, errorMessage: 'API proxy target is not configured.' }
+  }
+
+  let targetUrl
+  try {
+    targetUrl = new URL(normalizeBaseUrl(rawTarget))
+  } catch {
+    return { errorStatus: 400, errorMessage: 'API proxy target is invalid.' }
+  }
 
   if (requestedTarget && env.IMAGE_API_PROXY_ALLOW_DYNAMIC_TARGETS !== 'true') {
     const allowedHosts = getAllowedHosts(env, defaultTargetUrl)
@@ -114,8 +124,7 @@ function createForwardHeaders(request, body, contentTypeOverride, env) {
   const headers = new Headers()
   const authorization = request.headers.get('authorization')?.trim() || ''
   const fallbackAuthorization = env.IMAGE_API_PROXY_AUTHORIZATION ||
-    env.API_PROXY_AUTHORIZATION ||
-    (env.YDN_API_KEY ? `Bearer ${env.YDN_API_KEY}` : '')
+    env.API_PROXY_AUTHORIZATION
   const resolvedAuthorization = (!authorization || authorization === 'Bearer') ? fallbackAuthorization : authorization
   if (resolvedAuthorization) headers.set('authorization', resolvedAuthorization)
 

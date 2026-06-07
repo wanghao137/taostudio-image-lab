@@ -39,25 +39,6 @@ describe('parameter compatibility', () => {
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, n: 4 }, settings).n).toBe(4)
   })
 
-  it('limits YDN output count to 1 to avoid parallel high-resolution requests', () => {
-    const ydnProfile = createDefaultOpenAIProfile({
-      apiKey: 'test-key',
-      baseUrl: 'https://www.ydn99.com',
-      model: 'gpt-image-2',
-      apiMode: 'images',
-      codexCli: true,
-      streamImages: false,
-    })
-    const settings = normalizeSettings({
-      ...DEFAULT_SETTINGS,
-      profiles: [ydnProfile],
-      activeProfileId: ydnProfile.id,
-    })
-
-    expect(getOutputImageLimitForSettings(settings)).toBe(1)
-    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, n: 4 }, settings).n).toBe(1)
-  })
-
   it('only replaces fal.ai auto size in text-to-image mode', () => {
     const falProfile = createDefaultFalProfile({ apiKey: 'fal-key' })
     const settings = normalizeSettings({

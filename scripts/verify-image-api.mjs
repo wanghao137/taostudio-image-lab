@@ -1,7 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const DEFAULT_BASE_URL = 'https://www.ydn99.com'
 const DEFAULT_MODEL = 'gpt-image-2'
 const DEFAULT_SIZE = '1024x1024'
 const DEFAULT_TIMEOUT_MS = 600_000
@@ -37,15 +36,30 @@ function getBooleanConfigValue(dotEnv, key, fallback = false) {
 
 function normalizeBaseUrl(value) {
   const trimmed = value.trim().replace(/\/+$/, '')
-  if (!trimmed) return DEFAULT_BASE_URL
-  return /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`
+  if (!trimmed) return ''
+
+  const input = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`
+
+  const url = new URL(input)
+  const segments = url.pathname.split('/').filter(Boolean)
+  const v1Index = segments.indexOf('v1')
+  const normalizedSegments = v1Index >= 0
+    ? segments.slice(0, v1Index + 1)
+    : segments.length
+      ? [...segments, 'v1']
+      : ['v1']
+  url.pathname = `/${normalizedSegments.join('/')}`
+  url.search = ''
+  url.hash = ''
+  return url.toString().replace(/\/+$/, '')
 }
 
-function buildEndpoint(baseUrl) {
+function buildEndpoint(baseUrl, apiMode) {
   const normalized = normalizeBaseUrl(baseUrl)
-  return normalized.endsWith('/v1')
-    ? `${normalized}/images/generations`
-    : `${normalized}/v1/images/generations`
+  if (!normalized) throw new Error('IMAGE_API_BASE_URL is required.')
+  return `${normalized}/${apiMode === 'responses' ? 'responses' : 'images/generations'}`
 }
 
 async function readErrorMessage(response) {
@@ -60,7 +74,25 @@ async function readErrorMessage(response) {
   }
 }
 
-function extractImages(payload) {
+function getResponsesImageResultBase64(result) {
+  const b64 = typeof result === 'string'
+    ? result
+    : result && typeof result === 'object'
+      ? typeof result.b64_json === 'string'
+        ? result.b64_json
+        : typeof result.base64 === 'string'
+          ? result.base64
+          : typeof result.image === 'string'
+            ? result.image
+            : typeof result.data === 'string'
+              ? result.data
+              : ''
+      : ''
+
+  return b64.trim() ? b64.trim() : ''
+}
+
+function extractImagesFromImagesApi(payload) {
   const data = Array.isArray(payload?.data) ? payload.data : []
   const images = []
 
@@ -75,10 +107,52 @@ function extractImages(payload) {
   return images
 }
 
+function extractImagesFromResponsesApi(payload) {
+  const output = Array.isArray(payload?.output) ? payload.output : []
+  const images = []
+
+  for (const item of output) {
+    if (item?.type !== 'image_generation_call') continue
+    const b64 = getResponsesImageResultBase64(item.result)
+    if (b64) images.push({ kind: 'b64', value: b64 })
+  }
+
+  return images
+}
+
+function buildRequestBody({ apiMode, model, prompt, codexCli, size, moderation }) {
+  const effectivePrompt = codexCli ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${prompt}` : prompt
+
+  if (apiMode === 'responses') {
+    return {
+      model,
+      input: effectivePrompt,
+      tools: [{
+        type: 'image_generation',
+        action: 'generate',
+        size,
+        output_format: 'png',
+        moderation,
+      }],
+      tool_choice: 'required',
+    }
+  }
+
+  return {
+    model,
+    prompt: effectivePrompt,
+    size,
+    output_format: 'png',
+    moderation,
+  }
+}
+
 async function materializeImage(image, index, outputDir) {
+  const filePrefix = `image-api-smoke-${Date.now()}-${index + 1}`
+
   if (image.kind === 'b64') {
     const bytes = Buffer.from(image.value, 'base64')
-    const outputPath = path.join(outputDir, `ydn-smoke-${Date.now()}-${index + 1}.png`)
+    const outputPath = path.join(outputDir, `${filePrefix}.png`)
     fs.writeFileSync(outputPath, bytes)
     return { path: outputPath, bytes: bytes.length }
   }
@@ -86,27 +160,30 @@ async function materializeImage(image, index, outputDir) {
   const response = await fetch(image.value)
   if (!response.ok) throw new Error(`Image URL fetch failed with HTTP ${response.status}`)
   const bytes = Buffer.from(await response.arrayBuffer())
-  const outputPath = path.join(outputDir, `ydn-smoke-${Date.now()}-${index + 1}.png`)
+  const outputPath = path.join(outputDir, `${filePrefix}.png`)
   fs.writeFileSync(outputPath, bytes)
   return { path: outputPath, bytes: bytes.length }
 }
 
 const dotEnv = readDotEnv(path.join(process.cwd(), '.env.local'))
-const apiKey = getConfigValue(dotEnv, 'YDN_API_KEY')
+const apiKey = getConfigValue(dotEnv, 'IMAGE_API_KEY')
 
 if (!apiKey) {
-  console.error('Missing YDN_API_KEY. Add it to ignored .env.local or set it only for this shell session.')
+  console.error('Missing IMAGE_API_KEY. Add it to ignored .env.local or set it only for this shell session.')
   process.exit(2)
 }
 
-const baseUrl = getConfigValue(dotEnv, 'YDN_API_BASE_URL', DEFAULT_BASE_URL)
-const model = getConfigValue(dotEnv, 'YDN_IMAGE_MODEL', DEFAULT_MODEL)
-const size = getConfigValue(dotEnv, 'YDN_TEST_SIZE', DEFAULT_SIZE)
-const prompt = getConfigValue(dotEnv, 'YDN_TEST_PROMPT', 'A simple clean TaoStudio smoke test image with geometric shapes.')
-const codexCli = getBooleanConfigValue(dotEnv, 'YDN_TEST_CODEX_CLI', true)
-const moderation = getConfigValue(dotEnv, 'YDN_TEST_MODERATION', 'auto')
-const timeoutMs = Number(getConfigValue(dotEnv, 'YDN_TEST_TIMEOUT_MS', String(DEFAULT_TIMEOUT_MS))) || DEFAULT_TIMEOUT_MS
-const endpoint = buildEndpoint(baseUrl)
+const baseUrl = getConfigValue(dotEnv, 'IMAGE_API_BASE_URL')
+const apiMode = getConfigValue(dotEnv, 'IMAGE_API_TEST_API_MODE', 'images').toLowerCase() === 'responses'
+  ? 'responses'
+  : 'images'
+const model = getConfigValue(dotEnv, 'IMAGE_API_MODEL', DEFAULT_MODEL)
+const size = getConfigValue(dotEnv, 'IMAGE_API_TEST_SIZE', DEFAULT_SIZE)
+const prompt = getConfigValue(dotEnv, 'IMAGE_API_TEST_PROMPT', 'A simple clean TaoStudio smoke test image with geometric shapes.')
+const codexCli = getBooleanConfigValue(dotEnv, 'IMAGE_API_TEST_CODEX_CLI', true)
+const moderation = getConfigValue(dotEnv, 'IMAGE_API_TEST_MODERATION', 'auto')
+const timeoutMs = Number(getConfigValue(dotEnv, 'IMAGE_API_TEST_TIMEOUT_MS', String(DEFAULT_TIMEOUT_MS))) || DEFAULT_TIMEOUT_MS
+const endpoint = buildEndpoint(baseUrl, apiMode)
 const startedAt = Date.now()
 const controller = new AbortController()
 const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -118,13 +195,7 @@ try {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model,
-      prompt: codexCli ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${prompt}` : prompt,
-      size,
-      output_format: 'png',
-      moderation,
-    }),
+    body: JSON.stringify(buildRequestBody({ apiMode, model, prompt, codexCli, size, moderation })),
     signal: controller.signal,
   })
 
@@ -133,12 +204,14 @@ try {
   }
 
   const payload = await response.json()
-  const images = extractImages(payload)
+  const images = apiMode === 'responses'
+    ? extractImagesFromResponsesApi(payload)
+    : extractImagesFromImagesApi(payload)
   if (!images.length) {
-    throw new Error('YDN response did not contain data[].b64_json or data[].url image output.')
+    throw new Error('The response did not contain recognizable image output.')
   }
 
-  const outputDir = path.join(process.cwd(), '.omx', 'ydn-smoke')
+  const outputDir = path.join(process.cwd(), '.omx', 'image-api-smoke')
   fs.mkdirSync(outputDir, { recursive: true })
   const savedFiles = []
   for (let index = 0; index < images.length; index += 1) {
@@ -148,6 +221,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     endpoint,
+    apiMode,
     model,
     size,
     codexCli,
@@ -161,6 +235,7 @@ try {
   console.error(JSON.stringify({
     ok: false,
     endpoint,
+    apiMode,
     model,
     size,
     codexCli,

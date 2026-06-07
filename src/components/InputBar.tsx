@@ -10,7 +10,6 @@ import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { getSafeBoundingClientRect } from '../lib/domRect'
 import { collectAgentRoundOutputImageSlots } from '../lib/agentImageReferences'
-import { isYdnApiUrl } from '../lib/ydnCompatibility'
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { useTooltip } from '../hooks/useTooltip'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
@@ -129,12 +128,6 @@ function getContentEditableBoundaryOffset(
   }
 
   return root.textContent?.length ?? 0
-}
-
-function parseSizePixels(size: string) {
-  const match = size.match(/^(\d+)\s*[xX×]\s*(\d+)$/)
-  if (!match) return 0
-  return Number(match[1]) * Number(match[2])
 }
 
 /** 获取 contentEditable 中光标的纯文本偏移量 */
@@ -808,21 +801,12 @@ export default function InputBar() {
   const displaySize = isFalTextToImage && params.size === 'auto'
     ? DEFAULT_FAL_IMAGE_SIZE
     : normalizeImageSize(params.size) || DEFAULT_PARAMS.size
-  const activeProfileIsYdn = activeProfile.provider === 'openai' && isYdnApiUrl(activeProfile.baseUrl)
-  const displaySizePixels = parseSizePixels(displaySize)
-  const isLargeImageRequest = displaySizePixels >= 8_000_000 || displaySize.includes('3840') || displaySize.includes('2160')
-  const generationStrategyItems = activeProfileIsYdn
-    ? [
-        isLargeImageRequest ? '4K 稳定模式' : 'YDN 稳定模式',
-        '单图提交',
-        '失败自动重试',
-        `${activeProfile.timeout}s 超时`,
-      ]
-    : isFalProvider
+  const generationStrategyItems = isFalProvider
     ? ['fal.ai 队列', '自动恢复']
     : [
         activeProfile.apiMode === 'responses' ? 'Responses API' : 'Images API',
         activeProfile.streamImages ? '流式返回' : '同步返回',
+        `${activeProfile.timeout}s 超时`,
       ]
 
   const qualityOptions = isFalProvider
@@ -2114,28 +2098,18 @@ export default function InputBar() {
   )
 
   const renderGenerationStrategy = () => (
-    <div className={`mb-2 flex flex-col gap-2 rounded-xl border px-3 py-2 text-[11px] sm:flex-row sm:items-center sm:justify-between ${
-      activeProfileIsYdn
-        ? 'border-emerald-200/70 bg-emerald-50/70 text-emerald-800 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-100'
-        : 'border-gray-200/70 bg-white/50 text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400'
-    }`}>
+    <div className="mb-2 flex flex-col gap-2 rounded-xl border border-gray-200/70 bg-white/50 px-3 py-2 text-[11px] text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 items-center gap-2">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${activeProfileIsYdn ? 'bg-emerald-500' : 'bg-blue-400'}`} />
+        <span className="h-2 w-2 shrink-0 rounded-full bg-blue-400" />
         <span className="truncate font-medium">
-          {activeProfileIsYdn
-            ? isLargeImageRequest ? 'YDN 4K 生成策略' : 'YDN 生图策略'
-            : '当前生成策略'}
+          当前生成策略
         </span>
       </div>
       <div className="flex flex-wrap gap-1.5">
         {generationStrategyItems.map((item) => (
           <span
             key={item}
-            className={`rounded-full px-2 py-0.5 ${
-              activeProfileIsYdn
-                ? 'bg-white/70 text-emerald-800 dark:bg-black/15 dark:text-emerald-100'
-                : 'bg-gray-100 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300'
-            }`}
+            className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
           >
             {item}
           </span>

@@ -51,7 +51,7 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
-import { getYdnImageProfilePatch } from './lib/ydnCompatibility'
+import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
@@ -246,7 +246,7 @@ function scheduleThumbnailBackfillTick() {
     void processNextThumbnailBackfill()
   }
 
-  if ('requestIdleCallback' in window) {
+  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
     window.requestIdleCallback(run, { timeout: 2_000 })
   } else {
     globalThis.setTimeout(run, 250)
@@ -929,6 +929,7 @@ function isImageReferencedByState(state: AppState, imageId: string) {
   if (state.tasks.some((task) =>
     task.inputImageIds.includes(imageId) ||
     task.outputImages.includes(imageId) ||
+    task.transparentOriginalImages?.includes(imageId) ||
     task.streamPartialImageIds?.includes(imageId) ||
     task.maskTargetImageId === imageId ||
     task.maskImageId === imageId
@@ -1834,39 +1835,6 @@ function getApiModeApiName(apiMode: ApiMode) {
   return apiMode === 'responses' ? 'Responses API' : 'Image API'
 }
 
-function getApiRequestServerErrorHint(
-  errorMessage: string,
-  profile?: Pick<ApiProfile, 'provider' | 'apiMode' | 'streamImages' | 'streamPartialImages'> | null,
-): string | null {
-  const normalized = errorMessage.trim()
-  if (!normalized) return null
-
-  if (/invalid_api_key|incorrect api key|invalid api key|unauthorized|authentication|api key|bearer|HTTP 401|HTTP 403|permission|not have access|billing|quota|insufficient_quota/i.test(normalized)) {
-    return '提示：这类错误更像 API Key、模型权限、账户额度或账单问题；请检查 Key 是否属于当前服务商、模型是否可用、额度/账单是否正常。'
-  }
-
-  if (/rate limit|too many requests|HTTP 429|requests to the .*api .*exceeded/i.test(normalized)) {
-    return '提示：这类错误是限流或并发过高；建议先把生成张数设为 1、降低并发重试，或稍后再试。'
-  }
-
-  if (/unsupported|not supported|unknown parameter|unrecognized|invalid.*parameter|invalid request|does not support/i.test(normalized)) {
-    return '提示：这类错误更像服务商能力或参数不兼容；可尝试关闭流式生成、返回 Base64、质量参数或中间步骤图像，或改用自定义服务商配置匹配该网关。'
-  }
-
-  if (/an error occurred while processing your request|processing your request|request id/i.test(normalized)) {
-    const streamingHint = profile?.streamImages
-      ? '也可先关闭流式生成和中间步骤图像，排除 SSE 或中间图参数带来的不稳定。'
-      : '如果当前经网关转发，也可切换直连或代理路径交叉验证。'
-    return `提示：上游已经接收请求但在处理阶段失败，这不是典型 API Key 无效。请保留 request ID 联系服务商；同时可降低尺寸/质量、把张数设为 1、缩短提示词或拆分复杂指令后重试。${streamingHint}`
-  }
-
-  if (/timeout|timed out|abort|aborted/i.test(normalized)) {
-    return `提示：这类错误通常是请求耗时过长、连接被浏览器或网关中断。可降低图片尺寸/质量、把张数设为 1，或检查代理超时设置。${getTimeoutStreamingHint(profile)}`
-  }
-
-  return null
-}
-
 function getApiRequestNetworkErrorHint(
   err: unknown,
   createdAt: number,
@@ -1907,13 +1875,6 @@ function getRawErrorPayload(err: unknown): Pick<Partial<TaskRecord>, 'rawImageUr
     rawImageUrls: Array.isArray(rawImageUrls) && rawImageUrls.length ? rawImageUrls.filter((url): url is string => typeof url === 'string') : undefined,
     rawResponsePayload: typeof rawResponsePayload === 'string' ? rawResponsePayload : undefined,
   }
-}
-
-function getFallbackOutputImageIdsFromPartialTask(task: TaskRecord) {
-  const ids = task.streamPartialImageIds ?? []
-  if (!ids.length) return []
-  const count = Math.max(1, Math.min(task.params.n || 1, ids.length))
-  return ids.slice(-count)
 }
 
 function clearFalRecoveryTimer(taskId: string) {
@@ -2008,16 +1969,12 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   const latest = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latest || latest.status === 'done') return
 
-  const actualParamsList = await resolveImageSizeParamsList(result.images, result.actualParamsList)
-  const outputIds: string[] = []
-  for (const dataUrl of result.images) {
-    const imgId = await storeImage(dataUrl, 'generated')
-    cacheImage(imgId, dataUrl)
-    outputIds.push(imgId)
-  }
+  const { outputIds, outputDataUrls, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const actualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList)
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
+    transparentOriginalImages: transparentOriginalImageIds,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
@@ -2274,7 +2231,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, showToast, setConfirmDialog } =
     useStore.getState()
 
-  let normalizedSettings = normalizeSettings(settings)
+  const normalizedSettings = normalizeSettings(settings)
   let activeProfile = getActiveApiProfile(settings)
   let requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
   if (normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
@@ -2298,27 +2255,6 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       activeProfile = reusedProfile
       requestSettings = createSettingsForApiProfile(normalizedSettings, reusedProfile)
     }
-  }
-
-  const ydnProfilePatch = getYdnImageProfilePatch(activeProfile)
-  if (ydnProfilePatch) {
-    const patchedProfile = { ...activeProfile, ...ydnProfilePatch }
-    if (!reusedTaskApiProfileId && normalizedSettings.profiles.some((profile) => profile.id === patchedProfile.id)) {
-      const nextSettings = normalizeSettings({
-        ...normalizedSettings,
-        profiles: normalizedSettings.profiles.map((profile) =>
-          profile.id === patchedProfile.id ? { ...profile, ...ydnProfilePatch } : profile,
-        ),
-      })
-      useStore.getState().setSettings(nextSettings)
-      normalizedSettings = nextSettings
-      activeProfile = getActiveApiProfile(nextSettings)
-      requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
-    } else {
-      activeProfile = patchedProfile
-      requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
-    }
-    showToast('已自动使用 YDN 生图推荐配置：Responses API + gpt-image-2', 'info')
   }
 
   if (validateApiProfile(activeProfile)) {
@@ -2370,7 +2306,14 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   }
 
   const normalizedParams = normalizeParamsForSettings(params, requestSettings, { hasInputImages: orderedInputImages.length > 0 })
-  const normalizedParamPatch = getChangedParams(params, normalizedParams)
+  const shouldUseTransparentOutput = normalizedParams.output_format === 'png' && normalizedParams.transparent_output
+  const taskParams = shouldUseTransparentOutput
+    ? getTransparentRequestParams(normalizedParams)
+    : { ...normalizedParams, transparent_output: false }
+  const transparentMeta = taskParams.transparent_output
+    ? createTransparentOutputMeta(prompt.trim())
+    : null
+  const normalizedParamPatch = getChangedParams(params, taskParams)
   if (Object.keys(normalizedParamPatch).length) {
     useStore.getState().setParams(normalizedParamPatch)
   }
@@ -2379,7 +2322,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const task: TaskRecord = {
     id: taskId,
     prompt: prompt.trim(),
-    params: normalizedParams,
+    params: taskParams,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
@@ -2388,6 +2331,8 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     inputImageIds: orderedInputImages.map((i) => i.id),
     maskTargetImageId,
     maskImageId,
+    transparentOutput: transparentMeta?.transparentOutput,
+    transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
     status: 'running',
     error: null,
@@ -2727,7 +2672,54 @@ function addTaskReferencedImageIds(target: Set<string>, task: TaskRecord) {
   for (const id of task.inputImageIds || []) target.add(id)
   if (task.maskImageId) target.add(task.maskImageId)
   for (const id of task.outputImages || []) target.add(id)
+  for (const id of task.transparentOriginalImages || []) {
+    if (id) target.add(id)
+  }
   for (const id of task.streamPartialImageIds || []) target.add(id)
+}
+
+async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
+  const outputIds: string[] = []
+  const outputDataUrls: string[] = []
+  const transparentOriginalImageIds: string[] = []
+  const storedImageIds: string[] = []
+
+  try {
+    for (const dataUrl of images) {
+      let outputDataUrl = dataUrl
+      if (task.transparentOutput) {
+        const originalImgId = await storeImage(dataUrl, 'generated')
+        storedImageIds.push(originalImgId)
+        cacheImage(originalImgId, dataUrl)
+
+        try {
+          outputDataUrl = await removeKeyedBackgroundFromDataUrl(dataUrl)
+          transparentOriginalImageIds.push(originalImgId)
+        } catch (err) {
+          console.warn('透明背景后处理失败，已回退为原始输出', err)
+          outputIds.push(originalImgId)
+          outputDataUrls.push(dataUrl)
+          transparentOriginalImageIds.push('')
+          continue
+        }
+      }
+
+      const imgId = await storeImage(outputDataUrl, 'generated')
+      storedImageIds.push(imgId)
+      cacheImage(imgId, outputDataUrl)
+      outputIds.push(imgId)
+      outputDataUrls.push(outputDataUrl)
+    }
+
+    return {
+      outputIds,
+      outputDataUrls,
+      transparentOriginalImageIds: transparentOriginalImageIds.length ? transparentOriginalImageIds : undefined,
+    }
+  } catch (err) {
+    await deleteUnreferencedImageIds(storedImageIds)
+    throw err
+  }
 }
 
 async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
@@ -3194,6 +3186,7 @@ export async function submitAgentMessage() {
   const normalizedParams = {
     ...normalizeParamsForSettings(params, requestSettings, { hasInputImages: inputImageIds.length > 0 }),
     n: DEFAULT_PARAMS.n,
+    transparent_output: false,
   }
   const round: AgentRound = {
     id: roundId,
@@ -3299,6 +3292,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
   const normalizedParams = {
     ...normalizeParamsForSettings(params, requestSettings, { hasInputImages: inputImageIds.length > 0 }),
     n: DEFAULT_PARAMS.n,
+    transparent_output: false,
   }
   const now = Date.now()
   if (sourceRound.status === 'error') {
@@ -4032,9 +4026,13 @@ async function executeTask(taskId: string) {
       if (!maskDataUrl) throw new Error('遮罩图片已不存在')
     }
 
+    const requestPrompt = task.transparentOutput && task.transparentPrompt
+      ? task.transparentPrompt
+      : task.prompt
+
     const result = await callImageApi({
       settings: requestSettings,
-      prompt: replaceImageMentionsForApi(task.prompt, inputDataUrls.length),
+      prompt: replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
       params: task.params,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
@@ -4066,17 +4064,12 @@ async function executeTask(taskId: string) {
     }
 
     // 存储输出图片
-    const outputIds: string[] = []
-    for (const dataUrl of result.images) {
-      const imgId = await storeImage(dataUrl, 'generated')
-      cacheImage(imgId, dataUrl)
-      outputIds.push(imgId)
-    }
+    const { outputIds, outputDataUrls, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const actualParamsList = taskProvider === 'fal'
-      ? await resolveImageSizeParamsList(result.images, result.actualParamsList)
+      ? await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList)
       : isAsyncCustomTask
-      ? await readImageSizeParamsList(result.images)
+      ? await readImageSizeParamsList(outputDataUrls)
       : result.actualParamsList
     const actualParams = (() => {
       if (taskProvider === 'fal') return firstActualParams(actualParamsList)
@@ -4091,7 +4084,7 @@ async function executeTask(taskId: string) {
       return acc
     }, {}) : undefined
     const promptWasRevised = shouldStoreRevisedPrompts && result.revisedPrompts?.some(
-      (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== task.prompt.trim(),
+      (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== requestPrompt.trim(),
     )
     const hasRevisedPromptValue = shouldStoreRevisedPrompts && result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
     if (taskProvider === 'openai' && activeProfile.apiMode === 'responses' && !activeProfile.codexCli) {
@@ -4113,6 +4106,7 @@ async function executeTask(taskId: string) {
     useStore.getState().setTaskStreamPreview(taskId)
     updateTaskInStore(taskId, {
       outputImages: outputIds,
+      transparentOriginalImages: transparentOriginalImageIds,
       streamPartialImageIds: undefined,
       rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
       actualParams,
@@ -4182,30 +4176,6 @@ async function executeTask(taskId: string) {
       const networkErrorHint = getApiRequestNetworkErrorHint(err, latestTask.createdAt, usesApiProxy, hintProfile)
       if (networkErrorHint && !errorMessage.includes(IMAGE_FETCH_CORS_HINT)) {
         errorMessage += `\n${networkErrorHint}`
-      }
-      const serverErrorHint = !networkErrorHint ? getApiRequestServerErrorHint(errorMessage, hintProfile) : null
-      if (serverErrorHint && !errorMessage.includes(serverErrorHint)) {
-        errorMessage += `\n${serverErrorHint}`
-      }
-      const fallbackOutputIds = getFallbackOutputImageIdsFromPartialTask(latestTask)
-      if (fallbackOutputIds.length > 0) {
-        const fallbackOutputSet = new Set(fallbackOutputIds)
-        const partialImageIdsToClean = (latestTask.streamPartialImageIds ?? []).filter((id) => !fallbackOutputSet.has(id))
-        updateTaskInStore(taskId, {
-          outputImages: fallbackOutputIds,
-          streamPartialImageIds: undefined,
-          actualParams: { ...latestTask.params, n: fallbackOutputIds.length },
-          status: 'done',
-          error: null,
-          falRecoverable: false,
-          customRecoverable: false,
-          finishedAt: Date.now(),
-          elapsed: Date.now() - task.createdAt,
-        })
-        void deleteUnreferencedImageIds(partialImageIdsToClean)
-        useStore.getState().showToast(`上游最终响应异常，已保留 ${fallbackOutputIds.length} 张已返回图片`, 'success')
-        useStore.getState().setDetailTaskId(taskId)
-        return
       }
       updateTaskInStore(taskId, {
         status: 'error',
@@ -4415,11 +4385,18 @@ export async function retryTask(task: TaskRecord) {
   const { settings } = useStore.getState()
   const activeProfile = getActiveApiProfile(settings)
   const normalizedParams = normalizeParamsForSettings(task.params, settings, { hasInputImages: task.inputImageIds.length > 0 })
+  const shouldUseTransparentOutput = normalizedParams.output_format === 'png' && normalizedParams.transparent_output
+  const taskParams = shouldUseTransparentOutput
+    ? getTransparentRequestParams(normalizedParams)
+    : { ...normalizedParams, transparent_output: false }
+  const transparentMeta = taskParams.transparent_output
+    ? createTransparentOutputMeta(task.prompt.trim())
+    : null
   const taskId = genId()
   const newTask: TaskRecord = {
     id: taskId,
     prompt: task.prompt,
-    params: normalizedParams,
+    params: taskParams,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
@@ -4428,6 +4405,8 @@ export async function retryTask(task: TaskRecord) {
     inputImageIds: [...task.inputImageIds],
     maskTargetImageId: task.maskTargetImageId ?? null,
     maskImageId: task.maskImageId ?? null,
+    transparentOutput: transparentMeta?.transparentOutput,
+    transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
     status: 'running',
     error: null,
@@ -4575,6 +4554,17 @@ export async function removeMultipleTasks(taskIds: string[]) {
   showToast(`已删除 ${taskIds.length} 个任务`, 'success')
 }
 
+/** 删除所有失败任务 */
+export async function clearFailedTasks(taskIds?: string[]) {
+  const targetTaskIds = taskIds ? new Set(taskIds) : null
+  const failedTaskIds = useStore.getState().tasks
+    .filter((task) => task.status === 'error' && (!targetTaskIds || targetTaskIds.has(task.id)))
+    .map((task) => task.id)
+
+  if (!failedTaskIds.length) return
+  await removeMultipleTasks(failedTaskIds)
+}
+
 /** 删除单条任务 */
 export async function removeTask(task: TaskRecord) {
   const { tasks, setTasks, inputImages, galleryInputDraft, showToast } = useStore.getState()
@@ -4584,6 +4574,7 @@ export async function removeTask(task: TaskRecord) {
     ...(task.inputImageIds || []),
     ...(task.maskImageId ? [task.maskImageId] : []),
     ...(task.outputImages || []),
+    ...(task.transparentOriginalImages || []),
     ...(task.streamPartialImageIds || []),
   ])
 
@@ -4675,16 +4666,12 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   const latest = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latest || latest.status === 'done') return
 
-  const actualParamsList = await readImageSizeParamsList(result.images)
-  const outputIds: string[] = []
-  for (const dataUrl of result.images) {
-    const imgId = await storeImage(dataUrl, 'generated')
-    cacheImage(imgId, dataUrl)
-    outputIds.push(imgId)
-  }
+  const { outputIds, outputDataUrls, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const actualParamsList = await readImageSizeParamsList(outputDataUrls)
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
+    transparentOriginalImages: transparentOriginalImageIds,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
@@ -4753,8 +4740,10 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
           ...(task.inputImageIds || []),
           ...(task.maskImageId ? [task.maskImageId] : []),
           ...(task.outputImages || []),
+          ...(task.transparentOriginalImages || []),
           ...(task.streamPartialImageIds || []),
         ]) {
+          if (!id) continue
           const prev = imageCreatedAtFallback.get(id)
           if (prev == null || task.createdAt < prev) {
             imageCreatedAtFallback.set(id, task.createdAt)

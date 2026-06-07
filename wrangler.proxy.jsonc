@@ -10,7 +10,7 @@
     }
   ],
   "vars": {
-    "IMAGE_API_PROXY_TARGET": "https://www.ydn99.com/v1",
-    "IMAGE_API_PROXY_ALLOWED_HOSTS": "www.ydn99.com"
+    "IMAGE_API_PROXY_TARGET": "https://your-gateway.example.com/v1",
+    "IMAGE_API_PROXY_ALLOWED_HOSTS": "your-gateway.example.com"
   }
 }

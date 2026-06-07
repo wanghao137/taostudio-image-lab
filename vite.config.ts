@@ -1,8 +1,6 @@
-/// <reference types="vitest" />
-
-import { readFileSync } from 'fs'
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { readFileSync } from 'fs'
 import { normalizeDevProxyConfig } from './src/lib/devProxy'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
@@ -19,25 +17,8 @@ function loadDevProxyConfig() {
   }
 }
 
-function loadEnvProxyConfig(mode: string) {
-  const env = loadEnv(mode, process.cwd(), '')
-  const target = env.IMAGE_API_PROXY_TARGET?.trim()
-  if (!target) return null
-
-  return normalizeDevProxyConfig({
-    enabled: true,
-    prefix: '/api-proxy',
-    target,
-    changeOrigin: true,
-    secure: false,
-  })
-}
-
-export default defineConfig(({ command, mode }) => {
-  const canLoadLocalProxy = command === 'serve' && mode !== 'test'
-  const fileProxyConfig = canLoadLocalProxy ? loadDevProxyConfig() : null
-  const envProxyConfig = canLoadLocalProxy && !fileProxyConfig ? loadEnvProxyConfig(mode) : null
-  const devProxyConfig = fileProxyConfig ?? envProxyConfig
+export default defineConfig(({ command }) => {
+  const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
 
   return {
     plugins: [react()],
@@ -63,9 +44,6 @@ export default defineConfig(({ command, mode }) => {
               },
             }
           : undefined,
-    },
-    test: {
-      exclude: ['**/node_modules/**', '**/dist/**', '**/.upstream/**', '**/.omx/**'],
     },
   }
 })

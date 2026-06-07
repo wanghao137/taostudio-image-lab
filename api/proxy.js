@@ -158,7 +158,7 @@ function createForwardHeaders(request, body, contentTypeOverride) {
 
   const authorization = getHeaderValue(request, 'authorization').trim()
   const proxyAuthorization = env('IMAGE_API_PROXY_AUTHORIZATION') || env('API_PROXY_AUTHORIZATION')
-  const proxyApiKey = env('YDN_API_KEY') || env('IMAGE_API_PROXY_API_KEY') || env('API_PROXY_API_KEY')
+  const proxyApiKey = env('IMAGE_API_PROXY_API_KEY') || env('API_PROXY_API_KEY')
   const fallbackAuthorization = proxyAuthorization || (proxyApiKey ? `Bearer ${proxyApiKey}` : '')
   const resolvedAuthorization = (!authorization || authorization === 'Bearer') ? fallbackAuthorization : authorization
   if (resolvedAuthorization) headers.set('authorization', resolvedAuthorization)

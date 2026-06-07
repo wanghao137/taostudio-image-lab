@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
-import { createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
+import { DEFAULT_SETTINGS } from './apiProfiles'
 import { callImageApi } from './api'
 
 describe('callImageApi', () => {
@@ -152,54 +152,6 @@ describe('callImageApi', () => {
         quality: 'high',
         size: '1024x1024',
       }],
-    })
-  })
-
-  it('uses the latest Images API partial image when the stream ends with an error', async () => {
-    const streamBody = [
-      'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"cGFydGlhbC0x"}',
-      '',
-      'data: {"type":"image_generation.partial_image","partial_image_index":1,"b64_json":"cGFydGlhbC0y"}',
-      '',
-      'data: {"type":"image_generation.failed","message":"upstream tail error"}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n')
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
-      status: 200,
-      headers: { 'Content-Type': 'text/event-stream' },
-    }))
-    const partialImages: string[] = []
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        apiKey: 'test-key',
-        streamImages: true,
-        streamPartialImages: 3,
-        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
-          ...profile,
-          apiKey: 'test-key',
-          streamImages: true,
-          streamPartialImages: 3,
-        })),
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS },
-      inputImageDataUrls: [],
-      onPartialImage: (partial: { image: string }) => partialImages.push(partial.image),
-    } as any)
-
-    expect(partialImages).toEqual([
-      'data:image/png;base64,cGFydGlhbC0x',
-      'data:image/png;base64,cGFydGlhbC0y',
-    ])
-    expect(result).toMatchObject({
-      images: ['data:image/png;base64,cGFydGlhbC0y'],
-      actualParams: { n: 1 },
-      actualParamsList: [{ n: 1 }],
-      revisedPrompts: [undefined],
     })
   })
 
@@ -392,56 +344,6 @@ describe('callImageApi', () => {
     })
   })
 
-  it('uses the latest Responses API partial image when the stream ends with an error', async () => {
-    const streamBody = [
-      'data: {"type":"response.image_generation_call.partial_image","partial_image_index":0,"partial_image_b64":"cGFydGlhbC0x"}',
-      '',
-      'data: {"type":"response.image_generation_call.partial_image","partial_image_index":1,"partial_image_b64":"cGFydGlhbC0y"}',
-      '',
-      'data: {"type":"response.failed","message":"upstream tail error"}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join('\n')
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
-      status: 200,
-      headers: { 'Content-Type': 'text/event-stream' },
-    }))
-    const partialImages: string[] = []
-
-    const result = await callImageApi({
-      settings: {
-        ...DEFAULT_SETTINGS,
-        apiKey: 'test-key',
-        apiMode: 'responses',
-        streamImages: true,
-        streamPartialImages: 2,
-        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
-          ...profile,
-          apiKey: 'test-key',
-          apiMode: 'responses',
-          streamImages: true,
-          streamPartialImages: 2,
-        })),
-      },
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS },
-      inputImageDataUrls: [],
-      onPartialImage: (partial: { image: string }) => partialImages.push(partial.image),
-    } as any)
-
-    expect(partialImages).toEqual([
-      'data:image/png;base64,cGFydGlhbC0x',
-      'data:image/png;base64,cGFydGlhbC0y',
-    ])
-    expect(result).toMatchObject({
-      images: ['data:image/png;base64,cGFydGlhbC0y'],
-      actualParams: { n: 1 },
-      actualParamsList: [{ n: 1 }],
-      revisedPrompts: [undefined],
-    })
-  })
-
   it('parses Responses API image result objects in gallery mode', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       output: [{
@@ -529,13 +431,9 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy?path=images%2Fgenerations',
+      '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
-      Authorization: 'Bearer test-key',
-      'X-TaoStudio-API-Base-URL': 'http://api.example.com/v1',
-    })
   })
 
   it('uses the same-origin API proxy path when API proxy is enabled and base URL is empty', async () => {
@@ -560,13 +458,9 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy?path=images%2Fgenerations',
+      '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
-    expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({
-      Authorization: 'Bearer test-key',
-      'X-TaoStudio-API-Base-URL': '',
-    })
   })
 
   it('uses the same-origin API proxy path for sync custom providers', async () => {
@@ -613,7 +507,7 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy?path=custom%2Fimages',
+      '/api-proxy/custom/images',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -691,7 +585,7 @@ describe('callImageApi', () => {
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api-proxy?path=images%2Fgenerations',
+      '/api-proxy/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
   })
@@ -716,121 +610,6 @@ describe('callImageApi', () => {
     expect(headers).not.toHaveProperty('Pragma')
     expect(headers).not.toHaveProperty('Cache-Control')
     expect((init as RequestInit).cache).toBe('no-store')
-  })
-
-  it('retries transient YDN Images API failures before surfacing an error', async () => {
-    vi.useFakeTimers()
-    const ydnProfile = createDefaultOpenAIProfile({
-      id: 'ydn-profile',
-      apiKey: 'test-key',
-      baseUrl: 'https://www.ydn99.com',
-      model: 'gpt-image-2',
-      apiMode: 'images',
-      codexCli: true,
-      timeout: 600,
-    })
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockRejectedValueOnce(new TypeError('fetch failed'))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        data: [{ b64_json: 'aW1hZ2U=' }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }))
-
-    const promise = callImageApi({
-      settings: normalizeSettings({
-        ...DEFAULT_SETTINGS,
-        profiles: [ydnProfile],
-        activeProfileId: ydnProfile.id,
-      }),
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, size: '2160x3840', n: 1 },
-      inputImageDataUrls: [],
-    })
-
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
-    await vi.advanceTimersByTimeAsync(1500)
-
-    await expect(promise).resolves.toEqual({
-      images: ['data:image/png;base64,aW1hZ2U='],
-      actualParams: undefined,
-      actualParamsList: [undefined],
-      revisedPrompts: [undefined],
-    })
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-  })
-
-  it('does not retry non-transient YDN request errors', async () => {
-    const ydnProfile = createDefaultOpenAIProfile({
-      id: 'ydn-profile',
-      apiKey: 'test-key',
-      baseUrl: 'https://www.ydn99.com',
-      model: 'gpt-image-2',
-      apiMode: 'images',
-      codexCli: true,
-      timeout: 600,
-    })
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
-      error: { message: 'Invalid API key' },
-    }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    }))
-
-    await expect(callImageApi({
-      settings: normalizeSettings({
-        ...DEFAULT_SETTINGS,
-        profiles: [ydnProfile],
-        activeProfileId: ydnProfile.id,
-      }),
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, size: '2160x3840', n: 1 },
-      inputImageDataUrls: [],
-    })).rejects.toThrow(/Invalid API key/)
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('queues YDN image requests instead of sending unlimited parallel browser requests', async () => {
-    const ydnProfile = createDefaultOpenAIProfile({
-      id: 'ydn-profile',
-      apiKey: 'test-key',
-      baseUrl: 'https://www.ydn99.com',
-      model: 'gpt-image-2',
-      apiMode: 'images',
-      codexCli: true,
-      timeout: 600,
-    })
-    const settings = normalizeSettings({
-      ...DEFAULT_SETTINGS,
-      profiles: [ydnProfile],
-      activeProfileId: ydnProfile.id,
-    })
-    const responses: Array<() => void> = []
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>((resolve) => {
-      responses.push(() => resolve(new Response(JSON.stringify({
-        data: [{ b64_json: 'aW1hZ2U=' }],
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      })))
-    }))
-
-    const calls = Array.from({ length: 4 }, () => callImageApi({
-      settings,
-      prompt: 'prompt',
-      params: { ...DEFAULT_PARAMS, size: '2160x3840', n: 1 },
-      inputImageDataUrls: [],
-    }))
-
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
-    expect(responses).toHaveLength(3)
-    responses.shift()?.()
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
-    while (responses.length) responses.shift()?.()
-
-    await expect(Promise.all(calls)).resolves.toHaveLength(4)
   })
 
   it('ignores stored API proxy settings when the current deployment has no proxy', async () => {

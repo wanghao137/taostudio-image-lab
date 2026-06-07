@@ -1,17 +1,13 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
 import { getActiveApiProfile } from './apiProfiles'
 import { normalizeImageSize } from './size'
-import { isYdnApiUrl } from './ydnCompatibility'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
 export const MAX_FAL_OUTPUT_IMAGES = 4
 export const MAX_OPENAI_OUTPUT_IMAGES = 10
 
 export function getOutputImageLimitForSettings(settings: AppSettings) {
-  const activeProfile = getActiveApiProfile(settings)
-  if (activeProfile.provider === 'fal') return MAX_FAL_OUTPUT_IMAGES
-  if (activeProfile.provider === 'openai' && isYdnApiUrl(activeProfile.baseUrl)) return 1
-  return MAX_OPENAI_OUTPUT_IMAGES
+  return getActiveApiProfile(settings).provider === 'fal' ? MAX_FAL_OUTPUT_IMAGES : MAX_OPENAI_OUTPUT_IMAGES
 }
 
 export function normalizeParamsForSettings(

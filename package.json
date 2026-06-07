@@ -6,15 +6,15 @@
   "scripts": {
     "dev": "vite",
     "mock:api": "node scripts/mock-image-api.mjs",
-    "upgrade:upstream": "node scripts/upgrade-upstream.mjs",
-    "verify:ui": "node scripts/verify-ui.mjs",
-    "verify:ydn": "node scripts/verify-ydn-image.mjs",
-    "lint": "eslint .",
     "build": "tsc -b && vite build",
     "deploy:cf": "npm run build && wrangler deploy",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "upgrade:upstream": "node scripts/upgrade-upstream.mjs",
+    "verify:ui": "node scripts/verify-ui.mjs",
+    "verify:image-api": "node scripts/verify-image-api.mjs",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@fal-ai/client": "^1.10.0",

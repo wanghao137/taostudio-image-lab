@@ -17,36 +17,11 @@ import {
   normalizeBase64Image,
   pickActualParams,
 } from './imageApiShared'
-import { isYdnApiUrl } from './ydnCompatibility'
 
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
-const API_PROXY_TARGET_HEADER = 'X-TaoStudio-API-Base-URL'
-const YDN_MAX_ACTIVE_IMAGE_REQUESTS = 3
-const YDN_RETRY_DELAYS_MS = [1500, 4000]
 
 function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
-}
-
-function rememberStreamPartialImage(partialImages: string[], image: string, partialImageIndex?: number) {
-  if (typeof partialImageIndex === 'number' && partialImageIndex >= 0) {
-    partialImages[partialImageIndex] = image
-    return
-  }
-  partialImages.push(image)
-}
-
-function createPartialImageFallbackResult(partialImages: string[], actualParams?: Partial<TaskParams>): CallApiResult | null {
-  const usableImages = partialImages.filter(Boolean)
-  const image = usableImages[usableImages.length - 1]
-  if (!image) return null
-  const params = mergeActualParams(actualParams ?? {}, { n: 1 })
-  return {
-    images: [image],
-    actualParams: params,
-    actualParamsList: [params],
-    revisedPrompts: [undefined],
-  }
 }
 
 function appendQuery(path: string, query?: Record<string, string>): string {
@@ -105,12 +80,10 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
   return { data: [] }
 }
 
-function createRequestHeaders(profile: ApiProfile, useApiProxy = false): Record<string, string> {
-  const headers: Record<string, string> = {}
-  const apiKey = profile.apiKey.trim()
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-  if (useApiProxy) headers[API_PROXY_TARGET_HEADER] = profile.baseUrl
-  return headers
+function createRequestHeaders(profile: ApiProfile): Record<string, string> {
+  return {
+    Authorization: `Bearer ${profile.apiKey}`,
+  }
 }
 
 function isEventStreamResponse(response: Response): boolean {
@@ -379,21 +352,16 @@ async function parseImagesApiStreamResponse(
 ): Promise<CallApiResult> {
   const completedItems: ImageResponseItem[] = []
   let resultPayload: ImageApiResponse | null = null
-  const partialImages: string[] = []
 
-  try {
-    await readJsonServerSentEvents(response, (event) => {
+  await readJsonServerSentEvents(response, (event) => {
     const type = getStringValue(event, 'type')
     const object = getStringValue(event, 'object')
     if (type === 'image_generation.partial_image' || type === 'image_edit.partial_image') {
       const b64 = getStringValue(event, 'b64_json')
       if (b64) {
-        const partialImageIndex = getNumberValue(event, 'partial_image_index')
-        const image = normalizeBase64Image(b64, mime)
-        rememberStreamPartialImage(partialImages, image, partialImageIndex)
         onPartialImage?.({
-          image,
-          partialImageIndex,
+          image: normalizeBase64Image(b64, mime),
+          partialImageIndex: getNumberValue(event, 'partial_image_index'),
         })
       }
       return
@@ -408,19 +376,12 @@ async function parseImagesApiStreamResponse(
       completedItems.push(eventToImageResponseItem(event))
     }
   })
-  } catch (err) {
-    const fallback = createPartialImageFallbackResult(partialImages)
-    if (fallback) return fallback
-    throw err
-  }
 
   if (resultPayload) {
     return parseImagesApiResponse(resultPayload, mime)
   }
 
   if (!completedItems.length) {
-    const fallback = createPartialImageFallbackResult(partialImages)
-    if (fallback) return fallback
     throw new Error('流式接口未返回最终图片数据')
   }
 
@@ -428,11 +389,7 @@ async function parseImagesApiStreamResponse(
     .map((item) => item.b64_json)
     .filter((b64): b64 is string => Boolean(b64))
     .map((b64) => normalizeBase64Image(b64, mime))
-  if (!images.length) {
-    const fallback = createPartialImageFallbackResult(partialImages)
-    if (fallback) return fallback
-    throw new Error('流式接口未返回可用图片数据')
-  }
+  if (!images.length) throw new Error('流式接口未返回可用图片数据')
 
   const actualParamsList = completedItems.map((item) => mergeActualParams(pickActualParams(item)))
   const actualParams = mergeActualParams(
@@ -466,20 +423,15 @@ async function parseResponsesApiStreamResponse(
 ): Promise<CallApiResult> {
   let completedPayload: ResponsesApiResponse | null = null
   const outputItems: ResponsesOutputItem[] = []
-  const partialImages: string[] = []
 
-  try {
-    await readJsonServerSentEvents(response, (event) => {
+  await readJsonServerSentEvents(response, (event) => {
     const type = getStringValue(event, 'type')
     if (type === 'response.image_generation_call.partial_image') {
       const b64 = getStringValue(event, 'partial_image_b64')
       if (b64) {
-        const partialImageIndex = getNumberValue(event, 'partial_image_index')
-        const image = normalizeBase64Image(b64, mime)
-        rememberStreamPartialImage(partialImages, image, partialImageIndex)
         onPartialImage?.({
-          image,
-          partialImageIndex,
+          image: normalizeBase64Image(b64, mime),
+          partialImageIndex: getNumberValue(event, 'partial_image_index'),
         })
       }
       return
@@ -495,29 +447,16 @@ async function parseResponsesApiStreamResponse(
 
     completedPayload = payload
   })
-  } catch (err) {
-    const fallback = createPartialImageFallbackResult(partialImages)
-    if (fallback) return fallback
-    throw err
-  }
 
   const payload = completedPayload ?? (outputItems.length ? { output: outputItems } : null)
-  if (!payload) {
-    const fallback = createPartialImageFallbackResult(partialImages)
-    if (fallback) return fallback
-    throw new Error('流式接口未返回最终图片数据')
-  }
+  if (!payload) throw new Error('流式接口未返回最终图片数据')
 
   let imageResults: ReturnType<typeof parseResponsesImageResults>
   try {
     imageResults = parseResponsesImageResults(payload, mime)
   } catch (err) {
     const collectedImageItems = outputItems.filter((item) => getResponsesImageResultBase64(item.result))
-    if (collectedImageItems.length === 0) {
-      const fallback = createPartialImageFallbackResult(partialImages)
-      if (fallback) return fallback
-      throw err
-    }
+    if (collectedImageItems.length === 0) throw err
     imageResults = parseResponsesImageResults({ output: collectedImageItems }, mime)
   }
   const actualParams = mergeActualParams(imageResults[0]?.actualParams ?? {})
@@ -592,87 +531,6 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
   return { images, actualParams, actualParamsList, revisedPrompts, ...(rawImageUrls.length ? { rawImageUrls } : {}) }
 }
 
-function isYdnRetryableStatus(status: number) {
-  return status === 408 || status === 429 || status >= 500
-}
-
-function isYdnRetryableError(err: unknown) {
-  if (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError') return false
-  const message = err instanceof Error ? err.message : String(err)
-  return /fetch failed|failed to fetch|load failed|network|terminated|socket|connection|timeout|temporarily|连接|断开|中断/i.test(message)
-}
-
-let ydnActiveImageRequests = 0
-const ydnImageRequestQueue: Array<() => void> = []
-
-function releaseYdnImageRequestSlot() {
-  ydnActiveImageRequests = Math.max(0, ydnActiveImageRequests - 1)
-  const next = ydnImageRequestQueue.shift()
-  if (next) next()
-}
-
-async function runWithYdnImageRequestSlot<T>(profile: ApiProfile, signal: AbortSignal, task: () => Promise<T>): Promise<T> {
-  if (profile.provider !== 'openai' || !isYdnApiUrl(profile.baseUrl)) return task()
-
-  if (ydnActiveImageRequests >= YDN_MAX_ACTIVE_IMAGE_REQUESTS) {
-    await new Promise<void>((resolve, reject) => {
-      if (signal.aborted) {
-        reject(new DOMException('Aborted', 'AbortError'))
-        return
-      }
-      const entry = () => {
-        signal.removeEventListener('abort', abort)
-        resolve()
-      }
-      const abort = () => {
-        const index = ydnImageRequestQueue.indexOf(entry)
-        if (index >= 0) ydnImageRequestQueue.splice(index, 1)
-        reject(new DOMException('Aborted', 'AbortError'))
-      }
-      signal.addEventListener('abort', abort, { once: true })
-      ydnImageRequestQueue.push(entry)
-    })
-  }
-
-  ydnActiveImageRequests += 1
-  try {
-    return await task()
-  } finally {
-    releaseYdnImageRequestSlot()
-  }
-}
-
-async function fetchImagesApiWithYdnRetryInner(profile: ApiProfile, input: RequestInfo | URL, init: RequestInit, signal: AbortSignal) {
-  const retryDelays = profile.provider === 'openai' && isYdnApiUrl(profile.baseUrl)
-    ? YDN_RETRY_DELAYS_MS
-    : []
-
-  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
-    try {
-      const response = await fetch(input, init)
-      if (!response.ok && attempt < retryDelays.length && isYdnRetryableStatus(response.status) && !signal.aborted) {
-        await response.text().catch(() => '')
-        await sleep(retryDelays[attempt], signal)
-        continue
-      }
-      return response
-    } catch (err) {
-      if (attempt >= retryDelays.length || signal.aborted || !isYdnRetryableError(err)) throw err
-      await sleep(retryDelays[attempt], signal)
-    }
-  }
-
-  return fetch(input, init)
-}
-
-async function fetchImagesApiWithYdnRetry(profile: ApiProfile, input: RequestInfo | URL, init: RequestInit, signal: AbortSignal) {
-  return runWithYdnImageRequestSlot(
-    profile,
-    signal,
-    () => fetchImagesApiWithYdnRetryInner(profile, input, init, signal),
-  )
-}
-
 async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, customProvider?: CustomProviderDefinition | null): Promise<CallApiResult> {
   const { prompt: originalPrompt, params, inputImageDataUrls } = opts
   const prompt = profile.codexCli
@@ -682,7 +540,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile)
   const paths = createOpenAICompatiblePaths(customProvider)
 
   const controller = new AbortController()
@@ -745,13 +603,13 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetchImagesApiWithYdnRetry(profile, buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
         body: formData,
         signal: controller.signal,
-      }, controller.signal)
+      })
     } else {
       const body: Record<string, unknown> = {
         model: profile.model,
@@ -779,7 +637,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetchImagesApiWithYdnRetry(profile, buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -788,7 +646,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         cache: 'no-store',
         body: JSON.stringify(body),
         signal: controller.signal,
-      }, controller.signal)
+      })
     }
 
     if (!response.ok) {
@@ -960,7 +818,7 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
-  const requestHeaders = createRequestHeaders(profile, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile)
   const context = createCustomProviderContext(opts, profile)
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
@@ -1152,7 +1010,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
 

@@ -74,16 +74,12 @@ const AGENT_TITLE_INSTRUCTIONS = [
 ].join('\n')
 
 const AGENT_TITLE_MAX_LENGTH = 28
-const API_PROXY_TARGET_HEADER = 'X-TaoStudio-API-Base-URL'
 
-function createHeaders(profile: ApiProfile, useApiProxy = false): Record<string, string> {
-  const headers: Record<string, string> = {
+function createHeaders(profile: ApiProfile): Record<string, string> {
+  return {
+    Authorization: `Bearer ${profile.apiKey}`,
     'Content-Type': 'application/json',
   }
-  const apiKey = profile.apiKey.trim()
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-  if (useApiProxy) headers[API_PROXY_TARGET_HEADER] = profile.baseUrl
-  return headers
 }
 
 function createImageTool(params: TaskParams, profile: ApiProfile, maskDataUrl?: string): Record<string, unknown> {
@@ -641,7 +637,7 @@ export async function callAgentResponsesApi(opts: {
 
     const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
-      headers: createHeaders(profile, useApiProxy),
+      headers: createHeaders(profile),
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -696,7 +692,7 @@ export async function callAgentConversationTitleApi(opts: {
 
     const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
-      headers: createHeaders(profile, useApiProxy),
+      headers: createHeaders(profile),
       cache: 'no-store',
       body: JSON.stringify({
         model: profile.model || settings.model,
@@ -813,7 +809,7 @@ export async function callBatchImageSingle(opts: {
 
     const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
-      headers: createHeaders(profile, useApiProxy),
+      headers: createHeaders(profile),
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,

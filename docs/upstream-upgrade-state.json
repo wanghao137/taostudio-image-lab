@@ -1,8 +1,7 @@
 {
   "upstreamRepo": "https://github.com/CookSleep/gpt_image_playground.git",
   "upstreamRef": "main",
-  "baselineCommit": "927451dcf14d789042ac370857227df16316928d",
-  "lastAppliedCommit": null,
-  "recordedAt": "2026-06-06",
-  "notes": "Initial upstream tracking state for TaoStudio Image Lab. The baseline commit was read from refs/heads/main before the project was first published."
+  "lastAppliedCommit": "ec413e5f1ba5aea35ae19b910e6541ddd90a9180",
+  "upgradedAt": "2026-06-07T01:49:40.291Z",
+  "notes": "Updated by scripts/upgrade-upstream.mjs. Local TaoStudio UI overlay paths were preserved."
 }

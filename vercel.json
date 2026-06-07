@@ -2,23 +2,5 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "git": {
     "deploymentEnabled": false
-  },
-  "rewrites": [
-    {
-      "source": "/api-proxy",
-      "destination": "/api/proxy"
-    },
-    {
-      "source": "/api-proxy/:path*",
-      "destination": "/api/proxy/:path*"
-    }
-  ],
-  "functions": {
-    "api/proxy.js": {
-      "maxDuration": 300
-    },
-    "api/proxy/[...path].js": {
-      "maxDuration": 300
-    }
   }
 }

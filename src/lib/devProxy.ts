@@ -10,10 +10,6 @@ export interface DevProxyConfig {
 
 const DEFAULT_PROXY_PREFIX = '/api-proxy'
 
-function getDefaultProxyPrefix(): string {
-  return readRuntimeEnv(import.meta.env.VITE_API_PROXY_PREFIX) || DEFAULT_PROXY_PREFIX
-}
-
 export function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
   if (!trimmed) return ''
@@ -68,11 +64,7 @@ export function buildApiUrl(
   const endpointPath = path.replace(/^\/+/, '')
 
   if (useApiProxy) {
-    const prefix = proxyConfig?.prefix ?? getDefaultProxyPrefix()
-    if (!proxyConfig?.enabled) {
-      return `${prefix.replace(/\/+$/, '')}?path=${encodeURIComponent(endpointPath)}`
-    }
-    return `${prefix.replace(/\/+$/, '')}/${endpointPath}`
+    return `${proxyConfig?.prefix ?? DEFAULT_PROXY_PREFIX}/${endpointPath}`
   }
 
   const apiPath = normalizedBaseUrl.endsWith('/v1')
