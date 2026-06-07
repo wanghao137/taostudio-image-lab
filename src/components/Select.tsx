@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdown'
+import { DEFAULT_DROPDOWN_MAX_HEIGHT } from '../lib/dropdown'
 import { ChevronDownIcon, EditIcon, PlusIcon, TrashIcon, DragHandleIcon } from './icons'
 
 interface Option {
@@ -29,6 +29,11 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
   const [isOpen, setIsOpen] = useState(false)
   const [menuMaxHeight, setMenuMaxHeight] = useState(DEFAULT_DROPDOWN_MAX_HEIGHT)
   const [placement, setPlacement] = useState<'bottom' | 'top'>('bottom')
+  const [menuPosition, setMenuPosition] = useState<{ left: number; width: number; top?: number; bottom?: number }>({
+    left: 0,
+    width: 0,
+    top: 0,
+  })
   const [draggedValue, setDraggedValue] = useState<string | number | null>(null)
   const [dragOverValue, setDragOverValue] = useState<string | number | null>(null)
   const [dragDropPosition, setDragDropPosition] = useState<'before' | 'after' | null>(null)
@@ -45,6 +50,7 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
   const dragScrollIntervalRef = useRef<number | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   const selectedOption = options.find((o) => o.value === value)
 
@@ -81,7 +87,12 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(target) &&
+        !menuRef.current?.contains(target)
+      ) {
         setIsOpen(false)
       }
     }
@@ -89,27 +100,17 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isOpen) return
 
     const updateMenuMaxHeight = () => {
       if (!triggerRef.current) return
       const trigger = triggerRef.current
       const rect = trigger.getBoundingClientRect()
-      
-      let availableBelow = window.innerHeight - rect.bottom - 8
-      let availableAbove = rect.top - 8
-      
-      let parent = trigger.parentElement
-      while (parent && parent !== document.body) {
-        const style = window.getComputedStyle(parent)
-        if (/(auto|scroll|hidden|clip)/.test(`${style.overflow} ${style.overflowY}`)) {
-          const parentRect = parent.getBoundingClientRect()
-          availableBelow = Math.min(availableBelow, parentRect.bottom - rect.bottom - 8)
-          availableAbove = Math.min(availableAbove, rect.top - parentRect.top - 8)
-        }
-        parent = parent.parentElement
-      }
+      const gap = 6
+      const viewportPadding = 8
+      const availableBelow = window.innerHeight - rect.bottom - viewportPadding
+      const availableAbove = rect.top - viewportPadding
       
       let newPlacement: 'bottom' | 'top' = 'bottom'
       let maxHeight = DEFAULT_DROPDOWN_MAX_HEIGHT
@@ -121,9 +122,23 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
         newPlacement = 'bottom'
         maxHeight = Math.min(DEFAULT_DROPDOWN_MAX_HEIGHT, Math.floor(availableBelow))
       }
-      
+
+      const width = Math.max(rect.width, 120)
+      const left = Math.min(
+        Math.max(viewportPadding, rect.left),
+        Math.max(viewportPadding, window.innerWidth - width - viewportPadding),
+      )
+      const boundedMaxHeight = Math.max(80, maxHeight)
+
       setPlacement(newPlacement)
-      setMenuMaxHeight(Math.max(0, maxHeight))
+      setMenuMaxHeight(boundedMaxHeight)
+      setMenuPosition({
+        left,
+        width,
+        ...(newPlacement === 'top'
+          ? { bottom: window.innerHeight - rect.top + gap, top: undefined }
+          : { top: rect.bottom + gap, bottom: undefined }),
+      })
     }
 
     updateMenuMaxHeight()
@@ -168,12 +183,21 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
         <ChevronDownIcon className={`w-3.5 h-3.5 flex-shrink-0 text-gray-400 dark:text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
       </div>
 
-      {isOpen && (
+      {isOpen && createPortal(
         <div
-          className={`absolute z-50 w-full overflow-hidden overflow-y-auto rounded-xl border border-gray-200/60 bg-white/95 py-1 shadow-[0_8px_30px_rgb(0,0,0,0.12)] ring-1 ring-black/5 backdrop-blur-xl dark:border-white/[0.08] dark:bg-gray-900/95 dark:shadow-[0_8px_30px_rgb(0,0,0,0.3)] dark:ring-white/10 custom-scrollbar ${
-            placement === 'top' ? 'bottom-full mb-1.5 animate-dropdown-up' : 'top-full mt-1.5 animate-dropdown-down'
+          ref={menuRef}
+          className={`fixed z-[220] overflow-hidden overflow-y-auto rounded-xl border border-gray-200/60 bg-white/95 py-1 shadow-[0_8px_30px_rgb(0,0,0,0.12)] ring-1 ring-black/5 backdrop-blur-xl dark:border-white/[0.08] dark:bg-gray-900/95 dark:shadow-[0_8px_30px_rgb(0,0,0,0.3)] dark:ring-white/10 custom-scrollbar ${
+            placement === 'top' ? 'animate-dropdown-up' : 'animate-dropdown-down'
           }`}
-          style={{ maxHeight: menuMaxHeight }}
+          style={{
+            left: menuPosition.left,
+            width: menuPosition.width,
+            top: menuPosition.top,
+            bottom: menuPosition.bottom,
+            maxHeight: menuMaxHeight,
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
         >
           {options.map((option) => (
             <div
@@ -402,7 +426,8 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
               )}
             </div>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
 
       {touchDragPreview && createPortal(

@@ -27,6 +27,18 @@ export default defineConfig(({ command }) => {
       __APP_VERSION__: JSON.stringify(pkg.version),
       __DEV_PROXY_CONFIG__: JSON.stringify(devProxyConfig),
     },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            'react-vendor': ['react', 'react-dom', 'zustand'],
+            'markdown-vendor': ['streamdown', 'react-markdown', 'remark-gfm'],
+            'icons-vendor': ['lucide-react'],
+            'image-api-vendor': ['@fal-ai/client', 'fflate'],
+          },
+        },
+      },
+    },
     server: {
       host: true,
       proxy:

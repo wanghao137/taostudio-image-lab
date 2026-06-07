@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { lazy, Suspense, useEffect, useMemo } from 'react'
 import { initStore } from './store'
 import { useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, hasUrlSettingParams } from './lib/urlSettings'
@@ -7,21 +7,29 @@ import { getCustomProviderConfigUrl, loadCustomProviderSettingsFromUrl } from '.
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
-import TaskGrid from './components/TaskGrid'
-import AgentWorkspace from './components/AgentWorkspace'
 import InputBar from './components/InputBar'
-import DetailModal from './components/DetailModal'
-import Lightbox from './components/Lightbox'
-import SettingsModal from './components/SettingsModal'
-import ConfirmDialog from './components/ConfirmDialog'
 import Toast from './components/Toast'
-import MaskEditorModal from './components/MaskEditorModal'
 import ImageContextMenu from './components/ImageContextMenu'
-import SupportPromptModal from './components/SupportPromptModal'
-import { FavoriteCollectionPickerModal, FavoriteCollectionsView, ManageCollectionsModal } from './components/FavoriteCollections'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
 
 let customProviderConfigUrlImportStarted = false
+const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
+const TaskGrid = lazy(() => import('./components/TaskGrid'))
+const DetailModal = lazy(() => import('./components/DetailModal'))
+const Lightbox = lazy(() => import('./components/Lightbox'))
+const SettingsModal = lazy(() => import('./components/SettingsModal'))
+const ConfirmDialog = lazy(() => import('./components/ConfirmDialog'))
+const MaskEditorModal = lazy(() => import('./components/MaskEditorModal'))
+const SupportPromptModal = lazy(() => import('./components/SupportPromptModal'))
+const FavoriteCollectionsView = lazy(() =>
+  import('./components/FavoriteCollections').then((module) => ({ default: module.FavoriteCollectionsView })),
+)
+const FavoriteCollectionPickerModal = lazy(() =>
+  import('./components/FavoriteCollections').then((module) => ({ default: module.FavoriteCollectionPickerModal })),
+)
+const ManageCollectionsModal = lazy(() =>
+  import('./components/FavoriteCollections').then((module) => ({ default: module.ManageCollectionsModal })),
+)
 
 function GalleryWorkspaceHeader() {
   const tasks = useStore((s) => s.tasks)
@@ -110,6 +118,14 @@ export default function App() {
   const appMode = useStore((s) => s.appMode)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const detailTaskId = useStore((s) => s.detailTaskId)
+  const lightboxImageId = useStore((s) => s.lightboxImageId)
+  const showSettings = useStore((s) => s.showSettings)
+  const confirmDialog = useStore((s) => s.confirmDialog)
+  const supportPromptOpen = useStore((s) => s.supportPromptOpen)
+  const maskEditorImageId = useStore((s) => s.maskEditorImageId)
+  const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
+  const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
   useDockerApiUrlMigrationNotice()
   useGlobalClickSuppression()
 
@@ -159,26 +175,38 @@ export default function App() {
     <>
       <Header />
       {appMode === 'agent' ? (
-        <AgentWorkspace />
+        <Suspense fallback={null}>
+          <AgentWorkspace />
+        </Suspense>
       ) : (
         <main data-home-main data-drag-select-surface className="pb-48">
           <div className="safe-area-x max-w-7xl mx-auto">
             <GalleryWorkspaceHeader />
             <SearchBar />
-            {filterFavorite && !activeFavoriteCollectionId ? <FavoriteCollectionsView /> : <TaskGrid />}
+            {filterFavorite && !activeFavoriteCollectionId ? (
+              <Suspense fallback={null}>
+                <FavoriteCollectionsView />
+              </Suspense>
+            ) : (
+              <Suspense fallback={<div className="min-h-[220px]" />}>
+                <TaskGrid />
+              </Suspense>
+            )}
           </div>
         </main>
       )}
       <InputBar />
-      <DetailModal />
-      <Lightbox />
-      <SettingsModal />
-      <ConfirmDialog />
-      <SupportPromptModal />
-      <FavoriteCollectionPickerModal />
-      <ManageCollectionsModal />
+      <Suspense fallback={null}>
+        {detailTaskId ? <DetailModal /> : null}
+        {lightboxImageId ? <Lightbox /> : null}
+        {showSettings ? <SettingsModal /> : null}
+        {confirmDialog ? <ConfirmDialog /> : null}
+        {supportPromptOpen ? <SupportPromptModal /> : null}
+        {maskEditorImageId ? <MaskEditorModal /> : null}
+        {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}
+        {isManageCollectionsModalOpen ? <ManageCollectionsModal /> : null}
+      </Suspense>
       <Toast />
-      <MaskEditorModal />
       <ImageContextMenu />
     </>
   )

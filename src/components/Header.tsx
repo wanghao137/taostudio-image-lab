@@ -1,13 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Monitor, Moon, Sun } from 'lucide-react'
-import { useStore } from '../store'
+import { getFavoriteCollectionTitle, useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { useTooltip } from '../hooks/useTooltip'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import ViewportTooltip from './ViewportTooltip'
-import HelpModal from './HelpModal'
-import HistoryModal from './HistoryModal'
-import { useFavoriteCollectionTitle } from './FavoriteCollections'
 import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, SettingsIcon } from './icons'
 
 type BeforeInstallPromptEvent = Event & {
@@ -19,6 +16,8 @@ type ThemeMode = 'system' | 'light' | 'dark'
 type ThemeValue = 'light' | 'dark'
 
 const THEME_KEY = 'taostudio.imageLab.theme'
+const HelpModal = lazy(() => import('./HelpModal'))
+const HistoryModal = lazy(() => import('./HistoryModal'))
 
 function getSystemTheme(): ThemeValue {
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -53,10 +52,11 @@ export default function Header() {
   const activeAgentConversationId = useStore((s) => s.activeAgentConversationId)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const favoriteCollections = useStore((s) => s.favoriteCollections)
   const setAgentEditingConversationId = useStore((s) => s.setAgentEditingConversationId)
   const setAgentSidebarCollapsed = useStore((s) => s.setAgentSidebarCollapsed)
   const activeConversation = agentConversations.find((item) => item.id === activeAgentConversationId)
-  const favoriteCollectionTitle = useFavoriteCollectionTitle()
+  const favoriteCollectionTitle = activeFavoriteCollectionId ? getFavoriteCollectionTitle(activeFavoriteCollectionId, favoriteCollections) : ''
   const showFavoriteCollectionTitle = appMode === 'gallery' && Boolean(activeFavoriteCollectionId)
   const { hasUpdate, latestRelease, dismiss } = useVersionCheck()
   const [showHelp, setShowHelp] = useState(false)
@@ -249,7 +249,9 @@ export default function Header() {
                 <EditIcon className="w-5 h-5" />
               </button>
               {showHistoryModal && (
-                <HistoryModal onClose={() => setShowHistoryModal(false)} ignoreOutsideClickRef={historyButtonRef} />
+                <Suspense fallback={null}>
+                  <HistoryModal onClose={() => setShowHistoryModal(false)} ignoreOutsideClickRef={historyButtonRef} />
+                </Suspense>
               )}
             </div>}
           </div>
@@ -422,7 +424,11 @@ export default function Header() {
           </div>
         </div>
       </div>
-      {showHelp && <HelpModal appMode={appMode} isFavoriteCollectionOverview={appMode === 'gallery' && filterFavorite && !activeFavoriteCollectionId} onClose={() => setShowHelp(false)} />}
+      {showHelp && (
+        <Suspense fallback={null}>
+          <HelpModal appMode={appMode} isFavoriteCollectionOverview={appMode === 'gallery' && filterFavorite && !activeFavoriteCollectionId} onClose={() => setShowHelp(false)} />
+        </Suspense>
+      )}
     </>
   )
 }
