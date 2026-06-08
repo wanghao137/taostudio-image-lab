@@ -46,6 +46,7 @@ import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSin
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, replaceAgentPromptImageReferencesForApi } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
+import { extractApiDiagnosticsFromError, stripApiDiagnosticsFromMessage } from './lib/apiDiagnostics'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
@@ -2859,6 +2860,11 @@ function createAgentBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[],
   }
 }
 
+function getApiDiagnosticsPatch(err: unknown): Pick<Partial<TaskRecord>, 'apiDiagnostics'> {
+  const apiDiagnostics = extractApiDiagnosticsFromError(err)
+  return apiDiagnostics ? { apiDiagnostics } : {}
+}
+
 function collectAgentGeneratedImageRefsForTaskIds(round: AgentRound, tasks: TaskRecord[], taskIds: string[]) {
   const targetTaskIds = new Set(taskIds)
   const orderedTaskIds = [...round.outputTaskIds]
@@ -4321,7 +4327,7 @@ async function executeTask(taskId: string) {
       })
       scheduleCustomRecovery(taskId)
     } else {
-      let errorMessage = err instanceof Error ? err.message : String(err)
+      let errorMessage = stripApiDiagnosticsFromMessage(err instanceof Error ? err.message : String(err))
       const settings = useStore.getState().settings
       const profile = getTaskApiProfile(settings, latestTask)
       const usesApiProxy = profile?.apiProxy ?? settings.apiProxy
@@ -4339,6 +4345,7 @@ async function executeTask(taskId: string) {
       updateTaskInStore(taskId, {
         status: 'error',
         error: errorMessage,
+        ...getApiDiagnosticsPatch(err),
         ...getRawErrorPayload(err),
         falRecoverable: false,
         customRecoverable: false,

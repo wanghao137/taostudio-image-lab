@@ -287,6 +287,56 @@ describe('mask draft lifecycle in store actions', () => {
     expect(state.showToast).toHaveBeenCalledWith('任务已提交', 'success')
   })
 
+  it('stores provider-neutral API diagnostics on failed gallery tasks', async () => {
+    const { callImageApi } = await import('./lib/api')
+    vi.mocked(callImageApi).mockClear()
+    const apiDiagnostics = {
+      endpoint: 'images/generations',
+      apiMode: 'images',
+      method: 'POST',
+      bodyKind: 'json',
+      proxy: false,
+      urlHost: 'api.example.com',
+      model: 'gpt-image-2',
+      timeout: 600,
+      size: '2160x3840',
+      outputFormat: 'png',
+      responseFormat: 'b64_json',
+      stream: false,
+      inputImageCount: 0,
+      hasMask: false,
+      attempts: 2,
+      elapsedMs: 535098,
+      retryable: true,
+      status: 500,
+      errorName: 'Error',
+      errorMessage: 'upstream failed',
+    }
+    const error = new Error(`upstream failed\nAPI request diagnostics: ${JSON.stringify(apiDiagnostics)}`) as Error & { apiDiagnostics?: unknown }
+    error.apiDiagnostics = apiDiagnostics
+    vi.mocked(callImageApi).mockRejectedValueOnce(error)
+    useStore.setState({
+      prompt: 'generate one 4k image',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+    })
+
+    await submitTask()
+    for (let i = 0; i < 10; i += 1) {
+      const task = useStore.getState().tasks[0]
+      if (task?.status === 'error') break
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    const [task] = useStore.getState().tasks
+    expect(task).toMatchObject({
+      status: 'error',
+      error: 'upstream failed',
+      apiDiagnostics,
+    })
+    expect(task.error).not.toContain('API request diagnostics')
+    expect(useStore.getState().detailTaskId).toBe(task.id)
+  })
+
   it('stores transparent background output after local post-processing', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockClear()

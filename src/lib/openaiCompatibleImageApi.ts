@@ -1,4 +1,4 @@
-import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type ApiRequestDiagnostics, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
 import { buildApiUrl, isApiProxyAvailable, isApiProxyLocked, normalizeBaseUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
@@ -42,29 +42,6 @@ interface ApiFetchContext {
   stream?: boolean
   inputImageCount?: number
   hasMask?: boolean
-}
-
-interface ApiRequestDiagnostics {
-  endpoint: string
-  apiMode: ApiFetchContext['apiMode']
-  method: string
-  bodyKind: ApiFetchContext['bodyKind']
-  proxy: boolean
-  urlHost?: string
-  model: string
-  timeout: number
-  size?: string
-  outputFormat?: string
-  responseFormat?: string
-  stream?: boolean
-  inputImageCount?: number
-  hasMask?: boolean
-  attempts: number
-  elapsedMs: number
-  retryable: boolean
-  status?: number
-  errorName?: string
-  errorMessage?: string
 }
 
 function getStreamPartialImages(profile: ApiProfile): number {

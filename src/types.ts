@@ -152,6 +152,29 @@ export interface MaskDraft {
 
 export type TaskStatus = 'running' | 'done' | 'error'
 
+export interface ApiRequestDiagnostics {
+  endpoint: string
+  apiMode: ApiMode | 'custom'
+  method: string
+  bodyKind: 'json' | 'multipart'
+  proxy: boolean
+  urlHost?: string
+  model: string
+  timeout: number
+  size?: string
+  outputFormat?: string
+  responseFormat?: string
+  stream?: boolean
+  inputImageCount?: number
+  hasMask?: boolean
+  attempts: number
+  elapsedMs: number
+  retryable: boolean
+  status?: number
+  errorName?: string
+  errorMessage?: string
+}
+
 export interface TaskRecord {
   id: string
   prompt: string
@@ -200,6 +223,8 @@ export interface TaskRecord {
   rawImageUrls?: string[]
   /** 发生解析错误时的原始响应 JSON */
   rawResponsePayload?: string
+  /** API request diagnostics without secrets or prompt text. */
+  apiDiagnostics?: ApiRequestDiagnostics
   status: TaskStatus
   error: string | null
   createdAt: number

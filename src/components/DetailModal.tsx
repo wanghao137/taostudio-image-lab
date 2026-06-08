@@ -11,6 +11,7 @@ import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from '../lib/downloadImages'
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { replaceImageMentionsForApi } from '../lib/promptImageMentions'
+import { formatApiDiagnosticsForCopy, formatApiDiagnosticsSummary } from '../lib/apiDiagnostics'
 import { CloseIcon, CodeIcon, CopyIcon, DownloadIcon, EditIcon, LinkIcon, TrashIcon } from './icons'
 
 import ViewportTooltip from './ViewportTooltip'
@@ -63,6 +64,10 @@ export default function DetailModal() {
   const task = useMemo(
     () => tasks.find((t) => t.id === detailTaskId) ?? null,
     [tasks, detailTaskId],
+  )
+  const apiDiagnosticRows = useMemo(
+    () => task?.apiDiagnostics ? formatApiDiagnosticsSummary(task.apiDiagnostics) : [],
+    [task?.apiDiagnostics],
   )
   const streamPreviewItems = useMemo(() => {
     const slotEntries = streamPreviewSlots
@@ -288,7 +293,10 @@ export default function DetailModal() {
   }
 
   const handleCopyError = async () => {
-    const errorText = task.error || '生成失败'
+    const errorText = [
+      task.error || '生成失败',
+      task.apiDiagnostics ? `API request diagnostics:\n${formatApiDiagnosticsForCopy(task.apiDiagnostics)}` : null,
+    ].filter(Boolean).join('\n\n')
     try {
       await copyTextToClipboard(errorText)
       showToast('完整报错已复制', 'success')
@@ -656,6 +664,19 @@ export default function DetailModal() {
               >
                 {task.error || '生成失败'}
               </p>
+              {apiDiagnosticRows.length > 0 && (
+                <div className="mt-3 rounded-lg border border-red-200/80 bg-red-50/70 p-3 text-left dark:border-red-500/20 dark:bg-red-500/10">
+                  <div className="mb-2 text-xs font-semibold text-red-600 dark:text-red-300">API 请求诊断</div>
+                  <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+                    {apiDiagnosticRows.map((row) => (
+                      <div key={row.label} className="min-w-0">
+                        <dt className="text-red-400 dark:text-red-300/70">{row.label}</dt>
+                        <dd className="truncate font-medium text-red-700 dark:text-red-100" title={row.value}>{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
               <div className="mt-3 flex items-center justify-center gap-2">
                 <div className="relative group">
                   <button
