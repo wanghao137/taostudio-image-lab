@@ -1,5 +1,5 @@
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
-import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
+import { buildApiUrl, isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import { getApiErrorMessage, MIME_MAP, normalizeBase64Image, pickActualParams } from './imageApiShared'
 
 export interface AgentApiMessage {
@@ -32,6 +32,7 @@ const AGENT_IMAGE_INSTRUCTIONS = [
   '  1. **Base Reference First:** If the images need to share a consistent style, character, or layout (e.g. PPT slides, storyboards), generate ONE primary image first to establish the visual baseline, then call continue_generation to get another round.',
   '  2. **Batch Remaining Tasks:** Once the base reference is available, list all remaining images to be generated. The app will generate them concurrently for you. In your descriptions, explicitly instruct to reference the base image to maintain consistency.',
   '  3. **Independent Images:** If the requested images are completely independent (e.g. "3 different cats"), generate them together in ONE response. Do NOT generate them one by one across multiple responses.',
+  '  4. **Explicit Batch Requests:** If the user explicitly asks you to use generate_image_batch, call generate_image_batch only. Do not also call the built-in image_generation tool in that response.',
   'As the turn continues, output a brief progress note before each tool call.',
   'For single-image requests, generate directly without any listing.',
   '',
@@ -74,11 +75,249 @@ const AGENT_TITLE_INSTRUCTIONS = [
 ].join('\n')
 
 const AGENT_TITLE_MAX_LENGTH = 28
+const AGENT_API_STATUS_MAX_ATTEMPTS = 3
+const AGENT_API_FETCH_ERROR_MAX_ATTEMPTS = 2
+const AGENT_API_REQUEST_RETRY_DELAY_MS = 1000
+const LONG_PROMPT_API_PROXY_THRESHOLD = 1800
+const LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD = 8_000_000
+const RETRYABLE_AGENT_API_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 523, 524])
+const PROXY_GATEWAY_FALLBACK_STATUSES = new Set([502, 504, 524])
 
-function createHeaders(profile: ApiProfile): Record<string, string> {
-  return {
+function getImageSizePixels(size?: string): number {
+  const match = size?.match(/^\s*(\d+)\s*[xX]\s*(\d+)\s*$/)
+  if (!match) return 0
+  const width = Number(match[1])
+  const height = Number(match[2])
+  return Number.isFinite(width) && Number.isFinite(height) ? width * height : 0
+}
+
+function isBrowserHttpOrigin(): boolean {
+  if (typeof window === 'undefined') return false
+  const protocol = window.location?.protocol
+  return protocol === 'http:' || protocol === 'https:'
+}
+
+function getTextLength(value: unknown): number {
+  if (typeof value === 'string') return Array.from(value).length
+  if (Array.isArray(value)) return value.reduce((sum, item) => sum + getTextLength(item), 0)
+  if (value && typeof value === 'object') {
+    let total = 0
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      total += getTextLength(item)
+    }
+    return total
+  }
+  return 0
+}
+
+function collectTextFragments(value: unknown, fragments: string[] = []): string[] {
+  if (typeof value === 'string') {
+    fragments.push(value)
+    return fragments
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectTextFragments(item, fragments)
+    return fragments
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'image_url') continue
+      collectTextFragments(item, fragments)
+    }
+  }
+  return fragments
+}
+
+function shouldUseBatchOnlyAgentTools(input: unknown, maskDataUrl?: string): boolean {
+  if (maskDataUrl) return false
+  const text = collectTextFragments(input).join('\n')
+  if (/\bgenerate_image_batch\b/i.test(text)) return true
+
+  const requestsMultipleImages = /(?:\b[2-9]\s*(?:images?|pictures?|pics?)\b|\b[2-9]\b[\s\S]{0,80}\b(?:images?|pictures?|pics?)\b|[2-9]\s*张|[两二三四五六七八九十]+张)/i.test(text)
+  if (!requestsMultipleImages) return false
+
+  return /(?:独立|分别|单独|依次|不要四宫格|不是四宫格|不要拼|不是拼图|不要合并|不要.*总图|separate|independent|not a collage|no collage|do not.*collage)/i.test(text)
+}
+
+function shouldPreferApiProxyForAgentRequest(
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+  input: unknown,
+  params: TaskParams,
+): boolean {
+  const riskyRequest = getTextLength(input) >= LONG_PROMPT_API_PROXY_THRESHOLD ||
+    getImageSizePixels(params.size) >= LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD
+  if (!riskyRequest) return false
+  void isApiProxyAvailable(proxyConfig)
+  void isBrowserHttpOrigin()
+  return false
+}
+
+function createHeaders(
+  profile: ApiProfile,
+  useApiProxy = false,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig> = readClientDevProxyConfig(),
+): Record<string, string> {
+  const headers: Record<string, string> = {
     Authorization: `Bearer ${profile.apiKey}`,
     'Content-Type': 'application/json',
+  }
+  if (useApiProxy && !isApiProxyLocked(proxyConfig) && profile.baseUrl.trim()) {
+    headers['x-taostudio-api-base-url'] = profile.baseUrl.trim()
+  }
+  return headers
+}
+
+function getErrorName(error: unknown): string | undefined {
+  return error instanceof Error ? error.name : undefined
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isRetryableAgentApiStatus(status: number): boolean {
+  return RETRYABLE_AGENT_API_STATUSES.has(status)
+}
+
+function isRetryableAgentFetchError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false
+  const name = getErrorName(error) ?? ''
+  const message = getErrorMessage(error)
+  if (name === 'AbortError') return false
+  return error instanceof TypeError ||
+    /network|failed to fetch|fetch failed|load failed|socket|econnreset|etimedout|timeout|连接|断开|中断/i.test(message)
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }, { once: true })
+  })
+}
+
+async function fetchAgentApi(url: string, init: RequestInit): Promise<Response> {
+  let attempts = 0
+
+  while (attempts < AGENT_API_STATUS_MAX_ATTEMPTS) {
+    attempts += 1
+
+    try {
+      const response = await fetch(url, init)
+      if (response.ok) return response
+      if (isRetryableAgentApiStatus(response.status) && attempts < AGENT_API_STATUS_MAX_ATTEMPTS) {
+        await sleep(AGENT_API_REQUEST_RETRY_DELAY_MS, init.signal as AbortSignal | undefined)
+        continue
+      }
+      return response
+    } catch (error) {
+      if (isRetryableAgentFetchError(error, init.signal as AbortSignal | undefined) && attempts < AGENT_API_FETCH_ERROR_MAX_ATTEMPTS) {
+        await sleep(AGENT_API_REQUEST_RETRY_DELAY_MS, init.signal as AbortSignal | undefined)
+        continue
+      }
+      throw error
+    }
+  }
+
+  throw new Error('Agent API request failed without a final response.')
+}
+
+function shouldFallbackToAgentApiProxy(
+  error: unknown,
+  useApiProxy: boolean,
+  _proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (useApiProxy || !isRetryableAgentFetchError(error)) return false
+  // A stale client bundle may not include VITE_API_PROXY_AVAILABLE even though
+  // the deployed same-origin proxy exists. Network failures are worth one proxy try.
+  return true
+}
+
+function isHtmlResponse(response: Response): boolean {
+  return response.headers.get('Content-Type')?.toLowerCase().includes('text/html') ?? false
+}
+
+function headersToRecord(headers: HeadersInit | undefined): Record<string, string> {
+  if (!headers) return {}
+  if (headers instanceof Headers) {
+    const record: Record<string, string> = {}
+    headers.forEach((value, key) => {
+      record[key] = value
+    })
+    return record
+  }
+  if (Array.isArray(headers)) return Object.fromEntries(headers.map(([key, value]) => [key, value]))
+  return { ...headers }
+}
+
+function createDirectRetryInit(init: RequestInit, profile: ApiProfile, proxyConfig: ReturnType<typeof readClientDevProxyConfig>): RequestInit {
+  const headers = {
+    ...headersToRecord(init.headers),
+    ...createHeaders(profile, false, proxyConfig),
+  }
+  delete headers['x-taostudio-api-base-url']
+  delete headers['X-TaoStudio-Api-Base-Url']
+
+  return {
+    ...init,
+    headers,
+  }
+}
+
+function shouldFallbackFromOptimisticProxyResponse(
+  response: Response,
+  useApiProxy: boolean,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (!useApiProxy || isApiProxyAvailable(proxyConfig)) return false
+  return isHtmlResponse(response) || response.status === 404 || response.status === 405
+}
+
+function shouldFallbackFromProxyGatewayResponse(
+  response: Response,
+  useApiProxy: boolean,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (!useApiProxy || isApiProxyLocked(proxyConfig)) return false
+  return PROXY_GATEWAY_FALLBACK_STATUSES.has(response.status)
+}
+
+async function fetchAgentApiWithProxyFallback(
+  profile: ApiProfile,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+  init: RequestInit,
+  useApiProxy: boolean,
+): Promise<Response> {
+  try {
+    const response = await fetchAgentApi(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), init)
+    if (shouldFallbackFromOptimisticProxyResponse(response, useApiProxy, proxyConfig)) {
+      return fetchAgentApi(
+        buildApiUrl(profile.baseUrl, 'responses', proxyConfig, false),
+        createDirectRetryInit(init, profile, proxyConfig),
+      )
+    }
+    if (shouldFallbackFromProxyGatewayResponse(response, useApiProxy, proxyConfig)) {
+      return fetchAgentApi(
+        buildApiUrl(profile.baseUrl, 'responses', proxyConfig, false),
+        createDirectRetryInit(init, profile, proxyConfig),
+      )
+    }
+    return response
+  } catch (error) {
+    if (!shouldFallbackToAgentApiProxy(error, useApiProxy, proxyConfig)) throw error
+
+    const proxyResponse = await fetchAgentApi(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, true), {
+      ...init,
+      headers: createHeaders(profile, true, proxyConfig),
+    })
+    if (!isApiProxyAvailable(proxyConfig) && isHtmlResponse(proxyResponse)) throw error
+    return proxyResponse
   }
 }
 
@@ -110,8 +349,14 @@ function createImageTool(params: TaskParams, profile: ApiProfile, maskDataUrl?: 
   return tool
 }
 
-function createAgentTools(params: TaskParams, profile: ApiProfile, settings: AppSettings, maskDataUrl?: string): Array<Record<string, unknown>> {
-  const tools: Array<Record<string, unknown>> = [createImageTool(params, profile, maskDataUrl)]
+function createAgentTools(
+  params: TaskParams,
+  profile: ApiProfile,
+  settings: AppSettings,
+  maskDataUrl?: string,
+  options: { batchOnly?: boolean } = {},
+): Array<Record<string, unknown>> {
+  const tools: Array<Record<string, unknown>> = options.batchOnly ? [] : [createImageTool(params, profile, maskDataUrl)]
 
   // generate_image_batch: custom function tool for concurrent multi-image generation
   tools.push({
@@ -617,7 +862,7 @@ export async function callAgentResponsesApi(opts: {
   const { settings, profile, params, input, maskDataUrl, signal, onTextDelta, onOutputItems, onImageToolStarted, onImagePartialImage, onImageToolCompleted } = opts
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
-  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
+  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForAgentRequest(proxyConfig, input, params)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
   const abortFromCaller = () => controller.abort()
@@ -625,23 +870,27 @@ export async function callAgentResponsesApi(opts: {
   signal?.addEventListener('abort', abortFromCaller, { once: true })
 
   try {
+    const batchOnlyTools = shouldUseBatchOnlyAgentTools(input, maskDataUrl)
     const body: Record<string, unknown> = {
       model: profile.model || settings.model,
       instructions: createAgentInstructions(settings),
       input,
-      tools: createAgentTools(params, profile, settings, maskDataUrl),
+      tools: createAgentTools(params, profile, settings, maskDataUrl, { batchOnly: batchOnlyTools }),
     }
     if (profile.streamImages) {
       body.stream = true
     }
+    if (batchOnlyTools) {
+      body.tool_choice = { type: 'function', name: 'generate_image_batch' }
+    }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const response = await fetchAgentApiWithProxyFallback(profile, proxyConfig, {
       method: 'POST',
-      headers: createHeaders(profile),
+      headers: createHeaders(profile, useApiProxy, proxyConfig),
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
-    })
+    }, useApiProxy)
 
     if (!response.ok) {
       throw new Error(await getApiErrorMessage(response))
@@ -690,9 +939,9 @@ export async function callAgentConversationTitleApi(opts: {
       content.push({ type: 'input_image', image_url: dataUrl })
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const response = await fetchAgentApiWithProxyFallback(profile, proxyConfig, {
       method: 'POST',
-      headers: createHeaders(profile),
+      headers: createHeaders(profile, useApiProxy, proxyConfig),
       cache: 'no-store',
       body: JSON.stringify({
         model: profile.model || settings.model,
@@ -701,7 +950,7 @@ export async function callAgentConversationTitleApi(opts: {
         max_output_tokens: 32,
       }),
       signal: controller.signal,
-    })
+    }, useApiProxy)
 
     if (!response.ok) {
       throw new Error(await getApiErrorMessage(response))
@@ -752,7 +1001,7 @@ export async function callBatchImageSingle(opts: {
   const { profile, params, batchItemId, prompt, referenceImageDataUrls, referenceIds, signal, onImageToolStarted, onPartialImage, onImageToolCompleted } = opts
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
-  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
+  const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForAgentRequest(proxyConfig, prompt, params)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
   const abortFromCaller = () => controller.abort()
@@ -807,13 +1056,13 @@ export async function callBatchImageSingle(opts: {
       body.stream = true
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const response = await fetchAgentApiWithProxyFallback(profile, proxyConfig, {
       method: 'POST',
-      headers: createHeaders(profile),
+      headers: createHeaders(profile, useApiProxy, proxyConfig),
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
-    })
+    }, useApiProxy)
 
     if (!response.ok) {
       const errorMsg = await getApiErrorMessage(response)

@@ -10,7 +10,6 @@
     }
   ],
   "vars": {
-    "IMAGE_API_PROXY_TARGET": "https://your-gateway.example.com/v1",
-    "IMAGE_API_PROXY_ALLOWED_HOSTS": "your-gateway.example.com"
+    "IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS": "true"
   }
 }

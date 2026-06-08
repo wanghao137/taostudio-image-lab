@@ -1,5 +1,6 @@
 const APP_VERSION = new URL(self.location.href).searchParams.get('v') || 'dev'
-const CACHE_NAME = `taostudio-image-lab-${APP_VERSION}`
+const BUILD_ID = new URL(self.location.href).searchParams.get('build') || APP_VERSION
+const CACHE_NAME = `taostudio-image-lab-${APP_VERSION}-${BUILD_ID}`
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './pwa-icon.svg']
 
 self.addEventListener('install', (event) => {
@@ -25,6 +26,7 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
+  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/api-proxy')) return
 
   if (request.mode === 'navigate') {
     event.respondWith(
@@ -39,17 +41,7 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
-  event.respondWith(
-    caches.match(request).then((cached) => {
-      if (cached) return cached
+  if (!APP_SHELL.includes(`.${url.pathname}`)) return
 
-      return fetch(request).then((response) => {
-        if (response.ok) {
-          const copy = response.clone()
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy))
-        }
-        return response
-      })
-    }),
-  )
+  event.respondWith(caches.match(request).then((cached) => cached || fetch(request)))
 })

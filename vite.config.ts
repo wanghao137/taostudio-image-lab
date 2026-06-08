@@ -4,6 +4,10 @@ import { readFileSync } from 'fs'
 import { normalizeDevProxyConfig } from './src/lib/devProxy'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
+const buildId = process.env.VERCEL_GIT_COMMIT_SHA ||
+  process.env.CF_PAGES_COMMIT_SHA ||
+  process.env.GITHUB_SHA ||
+  `${pkg.version}-${Date.now()}`
 
 function loadDevProxyConfig() {
   try {
@@ -25,6 +29,7 @@ export default defineConfig(({ command }) => {
     base: './',
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
+      __BUILD_ID__: JSON.stringify(buildId),
       __DEV_PROXY_CONFIG__: JSON.stringify(devProxyConfig),
     },
     build: {

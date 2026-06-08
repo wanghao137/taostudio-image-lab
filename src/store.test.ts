@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import { DEFAULT_PARAMS } from './types'
 import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, normalizeSettings } from './lib/apiProfiles'
@@ -1712,8 +1712,13 @@ describe('agent batch reference resolution', () => {
     await clearImages()
     await putImage(imageA)
     await putImage(imageB)
-    vi.mocked(callAgentResponsesApi).mockClear()
-    vi.mocked(callBatchImageSingle).mockClear()
+    vi.mocked(callAgentResponsesApi).mockReset()
+    vi.mocked(callBatchImageSingle).mockReset()
+    vi.mocked(callBatchImageSingle).mockImplementation(async (opts: Parameters<typeof callBatchImageSingle>[0]) => ({
+      batchItemId: opts.batchItemId,
+      image: { dataUrl: 'data:image/png;base64,batch-output', revisedPrompt: opts.prompt },
+      error: null,
+    }))
     useStore.setState({
       settings: normalizeSettings({
         ...DEFAULT_SETTINGS,
@@ -1794,6 +1799,11 @@ describe('agent batch reference resolution', () => {
     })
   })
 
+  afterEach(() => {
+    vi.mocked(callAgentResponsesApi).mockReset()
+    vi.mocked(callBatchImageSingle).mockReset()
+  })
+
   it('resolves batch references from the active branch path only', async () => {
     vi.mocked(callAgentResponsesApi)
       .mockResolvedValueOnce({
@@ -1866,6 +1876,294 @@ describe('agent batch reference resolution', () => {
     const batchArgs = vi.mocked(callBatchImageSingle).mock.calls[0][0]
     expect(batchArgs.referenceImageDataUrls).toEqual([imageA.dataUrl])
     expect(batchArgs.referenceIds).toEqual(['round-3-reference-1'])
+  })
+
+  it('finishes same-turn batch locally with text refs after saving generated images', async () => {
+    useStore.setState({
+      prompt: 'generate three independent images',
+      inputImages: [],
+      tasks: [],
+      agentConversations: [agentConversation({
+        id: 'conversation-a',
+        activeRoundId: null,
+        rounds: [],
+        messages: [],
+      })],
+      activeAgentConversationId: 'conversation-a',
+      agentEditingRoundId: null,
+    })
+    vi.mocked(callBatchImageSingle).mockImplementation(async (opts: Parameters<typeof callBatchImageSingle>[0]) => {
+      const image = { dataUrl: `data:image/png;base64,${opts.batchItemId}-bytes`, revisedPrompt: opts.prompt }
+      await opts.onImageToolCompleted?.(image)
+      return {
+        batchItemId: opts.batchItemId,
+        image,
+        error: null,
+      }
+    })
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({
+        text: '',
+        images: [],
+        outputItems: [{
+          type: 'function_call',
+          name: 'generate_image_batch',
+          call_id: 'batch-call',
+          arguments: JSON.stringify({
+            images: [
+              { id: 'image-1', prompt: 'poster one' },
+              { id: 'image-2', prompt: 'poster two' },
+              { id: 'image-3', prompt: 'poster three' },
+            ],
+          }),
+        }],
+        responseId: 'response-1',
+      })
+      .mockResolvedValueOnce({
+        text: 'unexpected continuation',
+        images: [],
+        outputItems: [{ type: 'message', content: [{ type: 'output_text', text: 'unexpected continuation' }] }],
+        responseId: 'response-2',
+      })
+
+    await submitAgentMessage()
+
+    for (let i = 0; i < 20; i++) {
+      const activeConversation = useStore.getState().agentConversations[0]
+      const activeRound = activeConversation.rounds.find((round) => round.id === activeConversation.activeRoundId)
+      if (activeRound?.status === 'done') break
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    expect(callBatchImageSingle).toHaveBeenCalledTimes(3)
+    expect(callAgentResponsesApi).toHaveBeenCalledTimes(1)
+
+    const state = useStore.getState()
+    const activeRound = state.agentConversations[0].rounds.find((round) => round.id === state.agentConversations[0].activeRoundId)
+    expect(activeRound?.status).toBe('done')
+    expect(activeRound?.outputTaskIds).toHaveLength(3)
+    expect(state.tasks.map((item) => item.outputImages.length)).toEqual([1, 1, 1])
+
+    const functionOutput = activeRound?.responseOutput?.find((item) => item.type === 'function_call_output')?.output ?? ''
+    expect(functionOutput).toContain('round-1-image-1')
+    expect(functionOutput).toContain('round-1-image-2')
+    expect(functionOutput).toContain('round-1-image-3')
+    expect(functionOutput).not.toContain('image-1-bytes')
+    expect(functionOutput).not.toContain('image-2-bytes')
+    expect(functionOutput).not.toContain('image-3-bytes')
+  })
+
+  it('continues batch generation when the model emits fewer images than the prompt requested', async () => {
+    useStore.setState({
+      prompt: '请分别生成4张独立图片，不要四宫格，也不要拼成一张总图。',
+      inputImages: [],
+      tasks: [],
+      agentConversations: [agentConversation({
+        id: 'conversation-a',
+        activeRoundId: null,
+        rounds: [],
+        messages: [],
+      })],
+      activeAgentConversationId: 'conversation-a',
+      agentEditingRoundId: null,
+    })
+    vi.mocked(callBatchImageSingle).mockImplementation(async (opts: Parameters<typeof callBatchImageSingle>[0]) => {
+      const image = { dataUrl: `data:image/png;base64,${opts.batchItemId}-bytes`, revisedPrompt: opts.prompt }
+      await opts.onImageToolCompleted?.(image)
+      return {
+        batchItemId: opts.batchItemId,
+        image,
+        error: null,
+      }
+    })
+    vi.mocked(callAgentResponsesApi)
+      .mockResolvedValueOnce({
+        text: '',
+        images: [],
+        outputItems: [{
+          type: 'function_call',
+          name: 'generate_image_batch',
+          call_id: 'batch-call-1',
+          arguments: JSON.stringify({
+            images: [
+              { id: 'image-1', prompt: 'poster one' },
+            ],
+          }),
+        }],
+        responseId: 'response-1',
+      })
+      .mockResolvedValueOnce({
+        text: '',
+        images: [],
+        outputItems: [{
+          type: 'function_call',
+          name: 'generate_image_batch',
+          call_id: 'batch-call-2',
+          arguments: JSON.stringify({
+            images: [
+              { id: 'image-2', prompt: 'poster two' },
+              { id: 'image-3', prompt: 'poster three' },
+              { id: 'image-4', prompt: 'poster four' },
+            ],
+          }),
+        }],
+        responseId: 'response-2',
+      })
+
+    await submitAgentMessage()
+
+    for (let i = 0; i < 30; i++) {
+      const activeConversation = useStore.getState().agentConversations[0]
+      const activeRound = activeConversation.rounds.find((round) => round.id === activeConversation.activeRoundId)
+      if (activeRound?.status === 'done') break
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    expect(callAgentResponsesApi).toHaveBeenCalledTimes(2)
+    expect(callBatchImageSingle).toHaveBeenCalledTimes(4)
+
+    const state = useStore.getState()
+    const activeRound = state.agentConversations[0].rounds.find((round) => round.id === state.agentConversations[0].activeRoundId)
+    expect(activeRound?.status).toBe('done')
+    expect(activeRound?.outputTaskIds).toHaveLength(4)
+    expect(state.tasks.map((item) => item.outputImages.length)).toEqual([1, 1, 1, 1])
+    const serializedSecondInput = JSON.stringify(vi.mocked(callAgentResponsesApi).mock.calls[1][0].input)
+    expect(serializedSecondInput).toContain('round-1-image-1')
+    expect(serializedSecondInput).not.toContain('image-1-bytes')
+  })
+
+  it('marks failed batch child tasks as error instead of leaving them running', async () => {
+    useStore.setState({
+      prompt: 'Use generate_image_batch for one image.',
+      inputImages: [],
+      tasks: [],
+      agentConversations: [agentConversation({
+        id: 'conversation-a',
+        activeRoundId: null,
+        rounds: [],
+        messages: [],
+      })],
+      activeAgentConversationId: 'conversation-a',
+      agentEditingRoundId: null,
+    })
+    vi.mocked(callBatchImageSingle).mockResolvedValue({
+      batchItemId: 'image-1',
+      image: null,
+      error: '503 service unavailable',
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+      text: '',
+      images: [],
+      outputItems: [{
+        type: 'function_call',
+        name: 'generate_image_batch',
+        call_id: 'batch-call-1',
+        arguments: JSON.stringify({
+          images: [
+            { id: 'image-1', prompt: 'poster one' },
+          ],
+        }),
+      }],
+      responseId: 'response-1',
+    })
+
+    await submitAgentMessage()
+
+    for (let i = 0; i < 20; i++) {
+      const task = useStore.getState().tasks[0]
+      if (task?.status === 'error') break
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    const task = useStore.getState().tasks[0]
+    expect(task).toMatchObject({
+      status: 'error',
+      error: '503 service unavailable',
+      outputImages: [],
+    })
+    expect(task.finishedAt).toEqual(expect.any(Number))
+  })
+
+  it('limits concurrent batch image requests while keeping all task cards visible', async () => {
+    useStore.setState({
+      prompt: 'generate four independent images',
+      inputImages: [],
+      tasks: [],
+      agentConversations: [agentConversation({
+        id: 'conversation-a',
+        activeRoundId: null,
+        rounds: [],
+        messages: [],
+      })],
+      activeAgentConversationId: 'conversation-a',
+      agentEditingRoundId: null,
+    })
+    const releases: Array<() => void> = []
+    let activeCalls = 0
+    let maxActiveCalls = 0
+    vi.mocked(callBatchImageSingle).mockImplementation(async (opts: Parameters<typeof callBatchImageSingle>[0]) => {
+      activeCalls += 1
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls)
+      await new Promise<void>((resolve) => releases.push(resolve))
+      activeCalls -= 1
+      const image = { dataUrl: `data:image/png;base64,${opts.batchItemId}-bytes`, revisedPrompt: opts.prompt }
+      await opts.onImageToolCompleted?.(image)
+      return {
+        batchItemId: opts.batchItemId,
+        image,
+        error: null,
+      }
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+      text: '',
+      images: [],
+      outputItems: [{
+        type: 'function_call',
+        name: 'generate_image_batch',
+        call_id: 'batch-call-1',
+        arguments: JSON.stringify({
+          images: [
+            { id: 'image-1', prompt: 'poster one' },
+            { id: 'image-2', prompt: 'poster two' },
+            { id: 'image-3', prompt: 'poster three' },
+            { id: 'image-4', prompt: 'poster four' },
+          ],
+        }),
+      }],
+      responseId: 'response-1',
+    })
+
+    await submitAgentMessage()
+
+    for (let i = 0; i < 20 && vi.mocked(callBatchImageSingle).mock.calls.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    expect(useStore.getState().tasks).toHaveLength(4)
+    expect(vi.mocked(callBatchImageSingle).mock.calls).toHaveLength(2)
+    expect(maxActiveCalls).toBeLessThanOrEqual(2)
+
+    releases.shift()?.()
+    for (let i = 0; i < 20 && vi.mocked(callBatchImageSingle).mock.calls.length < 3; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    expect(vi.mocked(callBatchImageSingle).mock.calls).toHaveLength(3)
+    expect(maxActiveCalls).toBeLessThanOrEqual(2)
+
+    while (releases.length > 0) releases.shift()?.()
+    for (let i = 0; i < 40; i++) {
+      const activeConversation = useStore.getState().agentConversations[0]
+      const activeRound = activeConversation.rounds.find((round) => round.id === activeConversation.activeRoundId)
+      if (activeRound?.status === 'done') break
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      while (releases.length > 0) releases.shift()?.()
+    }
+
+    const state = useStore.getState()
+    const activeRound = state.agentConversations[0].rounds.find((round) => round.id === state.agentConversations[0].activeRoundId)
+    expect(callBatchImageSingle).toHaveBeenCalledTimes(4)
+    expect(maxActiveCalls).toBeLessThanOrEqual(2)
+    expect(activeRound?.status).toBe('done')
+    expect(state.tasks.map((item) => item.status)).toEqual(['done', 'done', 'done', 'done'])
   })
 })
 

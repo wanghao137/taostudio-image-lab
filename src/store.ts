@@ -73,6 +73,7 @@ const MAX_THUMBNAIL_BACKFILL_CONCURRENT = 4
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
 const SUPPORT_PROMPT_IMAGE_THRESHOLD = 50
+const AGENT_BATCH_IMAGE_CONCURRENCY = 2
 const AGENT_INPUT_DRAFT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
 const AGENT_ROUND_IMAGE_MENTION_RE = /@(?:第)?(\d+)轮图(\d+)/g
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -92,6 +93,38 @@ type AgentInputDraft = {
   maskDraft: MaskDraft | null
   maskEditorImageId: string | null
   updatedAt?: number
+}
+
+async function runLimitedSettledQueue<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R>>> {
+  const results: Array<PromiseSettledResult<R>> = new Array(items.length)
+  const workerCount = Math.min(items.length, Math.max(1, Math.trunc(limit)))
+  let nextIndex = 0
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) return
+
+      try {
+        results[index] = {
+          status: 'fulfilled',
+          value: await worker(items[index] as T, index),
+        }
+      } catch (error) {
+        results[index] = {
+          status: 'rejected',
+          reason: error,
+        }
+      }
+    }
+  }))
+
+  return results
 }
 
 export function getErrorToastMessage(message: string): string {
@@ -2811,33 +2844,52 @@ async function createAgentGeneratedImagesInputItem(round: AgentRound, tasks: Tas
   return { role: 'user', content: contentParts }
 }
 
-async function createAgentBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[], batchTaskIds: string[]) {
-  const contentParts: Array<{ type: string; text?: string; image_url?: string }> = []
-  // Count existing images in the round to compute correct imageIndex offset
-  let baseImageIndex = 0
-  for (const taskId of round.outputTaskIds) {
-    if (batchTaskIds.includes(taskId)) break
-    const task = tasks.find((item) => item.id === taskId)
-    baseImageIndex += task ? task.outputImages.length : 1
+function createAgentBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[], batchTaskIds: string[]) {
+  const refs = collectAgentGeneratedImageRefsForTaskIds(round, tasks, batchTaskIds)
+  if (refs.length === 0) return null
+  return {
+    role: 'user',
+    content: [{
+      type: 'input_text',
+      text: [
+        '[System] Batch image outputs were saved. Use these refs if a later image prompt needs them:',
+        ...refs.map((ref) => ref.refTag),
+      ].join('\n'),
+    }],
   }
-  let imageIndex = baseImageIndex
-  for (const taskId of batchTaskIds) {
+}
+
+function collectAgentGeneratedImageRefsForTaskIds(round: AgentRound, tasks: TaskRecord[], taskIds: string[]) {
+  const targetTaskIds = new Set(taskIds)
+  const orderedTaskIds = [...round.outputTaskIds]
+  for (const taskId of taskIds) {
+    if (!orderedTaskIds.includes(taskId)) orderedTaskIds.push(taskId)
+  }
+
+  const refs: Array<{ taskId: string; imageId: string; refId: string; refTag: string }> = []
+  let imageIndex = 0
+  for (const taskId of orderedTaskIds) {
     const task = tasks.find((item) => item.id === taskId)
-    if (!task || task.status !== 'done') continue
-    for (const imgId of task.outputImages) {
-      const dataUrl = await ensureImageCached(imgId)
-      if (dataUrl) {
-        contentParts.push({ type: 'input_image', image_url: dataUrl })
-      }
+    if (!task) {
+      imageIndex += 1
+      continue
+    }
+    for (const imageId of task.outputImages) {
       const refId = getAgentGeneratedImageReferenceId(round, imageIndex)
       const prompt = truncateAgentReferencePrompt(task.prompt || '')
       const promptAttribute = prompt ? ` prompt="${escapeXmlAttribute(prompt)}"` : ''
-      contentParts.push({ type: 'input_text', text: `<ref id="${refId}"${promptAttribute} />` })
+      if (targetTaskIds.has(taskId)) {
+        refs.push({
+          taskId,
+          imageId,
+          refId,
+          refTag: `<ref id="${refId}"${promptAttribute} />`,
+        })
+      }
       imageIndex += 1
     }
   }
-  if (contentParts.length === 0) return null
-  return { role: 'user', content: contentParts }
+  return refs
 }
 
 function escapeXmlAttribute(value: string) {
@@ -2851,6 +2903,53 @@ function escapeXmlAttribute(value: string) {
 function truncateAgentReferencePrompt(prompt: string) {
   const normalized = prompt.replace(/\s+/g, ' ').trim()
   return normalized.length > 1200 ? `${normalized.slice(0, 1200)}...` : normalized
+}
+
+function parseRequestedAgentBatchImageCount(prompt: string): number | null {
+  if (!/(?:独立|分别|单独|依次|不要四宫格|不是四宫格|不要拼|不是拼图|不要合并|不要.*总图|separate|independent|not a collage|no collage|do not.*collage)/i.test(prompt)) {
+    return null
+  }
+
+  const arabicMatch = prompt.match(/(?:\b([2-9])\s*(?:images?|pictures?|pics?)\b|([2-9])\s*张)/i)
+  const arabicCount = Number(arabicMatch?.[1] ?? arabicMatch?.[2])
+  if (Number.isInteger(arabicCount) && arabicCount >= 2) return arabicCount
+
+  const chineseMatch = prompt.match(/([两二三四五六七八九十]+)张/)
+  const chineseCount = chineseMatch ? parseSmallChineseNumber(chineseMatch[1]) : null
+  return chineseCount && chineseCount >= 2 ? chineseCount : null
+}
+
+function parseSmallChineseNumber(value: string): number | null {
+  const digits: Record<string, number> = {
+    两: 2,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  }
+  if (value === '十') return 10
+  if (value.endsWith('十') && value.length === 2) {
+    const tens = digits[value[0]]
+    return tens ? tens * 10 : null
+  }
+  if (value.startsWith('十') && value.length === 2) {
+    const ones = digits[value[1]]
+    return ones ? 10 + ones : null
+  }
+  if (value.includes('十') && value.length === 3) {
+    const tens = digits[value[0]]
+    const ones = digits[value[2]]
+    return tens && ones ? tens * 10 + ones : null
+  }
+  return digits[value] ?? null
+}
+
+function countAgentRoundOutputImages(round: AgentRound, tasks: TaskRecord[]) {
+  return collectAgentRoundOutputImageSlots(round, tasks).filter(Boolean).length
 }
 
 function createAgentAssistantFallbackItem(text: string) {
@@ -3016,13 +3115,23 @@ function countResponseImageCalls(output: ResponsesOutputItem[]) {
   return output.filter((item) => item.type === 'image_generation_call').length
 }
 
-function createAgentContinuationInputItem(newImageRefs: string[], toolCallsUsed: number, maxToolCalls: number) {
+function createAgentContinuationInputItem(
+  newImageRefs: string[],
+  toolCallsUsed: number,
+  maxToolCalls: number,
+  batchProgress?: { requested: number; completed: number },
+) {
   const lines = [
     '[System] The app has saved your generated outputs and is continuing the same Agent turn.',
   ]
   if (newImageRefs.length > 0) {
     lines.push(
       `The following image ref ids are now available for you to reference in subsequent image_generation prompts: ${newImageRefs.join(', ')}`,
+    )
+  }
+  if (batchProgress && batchProgress.completed < batchProgress.requested) {
+    lines.push(
+      `The user requested ${batchProgress.requested} separate images, but only ${batchProgress.completed} are saved so far. Call generate_image_batch for the remaining ${batchProgress.requested - batchProgress.completed} image(s).`,
     )
   }
   lines.push(
@@ -3039,12 +3148,20 @@ function createAgentContinuationInputItem(newImageRefs: string[], toolCallsUsed:
   }
 }
 
-function buildAgentContinuationInput(baseInput: unknown[], round: AgentRound, tasks: TaskRecord[], currentRoundOutput: ResponsesOutputItem[], toolCallsUsed: number, maxToolCalls: number) {
+function buildAgentContinuationInput(
+  baseInput: unknown[],
+  round: AgentRound,
+  tasks: TaskRecord[],
+  currentRoundOutput: ResponsesOutputItem[],
+  toolCallsUsed: number,
+  maxToolCalls: number,
+  batchProgress?: { requested: number; completed: number },
+) {
   const input = [...baseInput, ...sanitizeResponseOutputForInput(currentRoundOutput, { allowPendingFunctionCalls: true })]
   const newImageRefs = collectAgentRoundOutputImageSlots(round, tasks)
     .map((imageId, index) => imageId ? `<ref id="${getAgentGeneratedImageReferenceId(round, index)}" />` : null)
     .filter((ref): ref is string => Boolean(ref))
-  input.push(createAgentContinuationInputItem(newImageRefs, toolCallsUsed, maxToolCalls))
+  input.push(createAgentContinuationInputItem(newImageRefs, toolCallsUsed, maxToolCalls, batchProgress))
   return input
 }
 
@@ -3493,6 +3610,21 @@ async function executeAgentRound(
       return taskId
     }
 
+    const failAgentImageTask = async (toolCallId: string, error: string) => {
+      const taskId = await ensureStreamingAgentTask(toolCallId)
+      const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
+      if (!latestTask || latestTask.status === 'done') return taskId
+
+      updateTaskInStore(taskId, {
+        status: 'error',
+        error,
+        finishedAt: Date.now(),
+        elapsed: Date.now() - (latestTask.createdAt ?? startedAt),
+      })
+      useStore.getState().setTaskStreamPreview(taskId)
+      return taskId
+    }
+
     if (shouldStreamAssistantMessage) {
       updateAgentConversation(conversationId, (current) => ({
         ...current,
@@ -3585,9 +3717,7 @@ async function executeAgentRound(
         batchExecutionItems.push({ item, batchToolCallId, references, referenceIds })
       }
 
-      // Fire all batch items concurrently after all cards are visible.
-      const batchPromises = batchExecutionItems.map(async ({ item, batchToolCallId, references, referenceIds }) => {
-
+      const batchResults = await runLimitedSettledQueue(batchExecutionItems, AGENT_BATCH_IMAGE_CONCURRENCY, async ({ item, batchToolCallId, references, referenceIds }) => {
         const batchResult = await callBatchImageSingle({
           profile: activeProfile,
           params,
@@ -3624,26 +3754,45 @@ async function executeAgentRound(
         // If not streaming and we have an image, complete the pre-created task.
         if (batchResult.image && !shouldStreamAssistantMessage) {
           await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
+        } else if (batchResult.error) {
+          await failAgentImageTask(batchToolCallId, batchResult.error)
         }
 
         return batchResult
       })
 
-      const batchResults = await Promise.allSettled(batchPromises)
-
-      // Build function_call_output
-      const outputImages: Array<{ id: string; status: string; error?: string }> = []
+      // Build function_call_output with lightweight refs instead of full image data.
+      const latestConversationForRefs = useStore.getState().agentConversations.find((item) => item.id === conversationId)
+      const latestRoundForRefs = latestConversationForRefs?.rounds.find((item) => item.id === roundId) ?? round
+      const batchTaskIds = batchExecutionItems
+        .map((item) => taskIdByToolCallId.get(item.batchToolCallId))
+        .filter((taskId): taskId is string => Boolean(taskId))
+      const refsByTaskId = collectAgentGeneratedImageRefsForTaskIds(latestRoundForRefs, useStore.getState().tasks, batchTaskIds)
+        .reduce((map, ref) => {
+          const list = map.get(ref.taskId) ?? []
+          list.push(ref)
+          map.set(ref.taskId, list)
+          return map
+        }, new Map<string, Array<{ refId: string; refTag: string }>>())
+      const outputImages: Array<{ id: string; status: string; error?: string; ref_id?: string; ref?: string }> = []
       for (let i = 0; i < batchItems.length; i++) {
         const settled = batchResults[i]
         const batchItem = batchItems[i]
+        const taskId = taskIdByToolCallId.get(batchExecutionItems[i]?.batchToolCallId ?? '')
+        const ref = taskId ? refsByTaskId.get(taskId)?.shift() : null
         if (settled.status === 'fulfilled') {
           const r = settled.value
           outputImages.push({
             id: r.batchItemId,
             status: r.image ? 'done' : 'error',
+            ...(r.image && ref ? { ref_id: ref.refId, ref: ref.refTag } : {}),
             ...(r.error ? { error: r.error } : {}),
           })
         } else {
+          await failAgentImageTask(
+            batchExecutionItems[i]?.batchToolCallId ?? genId(),
+            settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
+          )
           outputImages.push({
             id: batchItem.id,
             status: 'error',
@@ -3860,6 +4009,13 @@ async function executeAgentRound(
       const latestRound = latestConversation?.rounds.find((item) => item.id === roundId)
       if (!latestRound) break
 
+      const requestedBatchImageCount = parseRequestedAgentBatchImageCount(round.prompt || userMessage.content)
+      const completedBatchImageCount = countAgentRoundOutputImages(latestRound, useStore.getState().tasks)
+      if (batchFunctionCalls.length > 0 && continueFunctionCalls.length === 0) {
+        accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
+        if (!requestedBatchImageCount || completedBatchImageCount >= requestedBatchImageCount) break
+      }
+
       const continuationBase = buildAgentContinuationInput(
         apiInput,
         latestRound,
@@ -3867,11 +4023,14 @@ async function executeAgentRound(
         accumulatedOutputItems,
         toolCallsUsed,
         maxToolCalls,
+        requestedBatchImageCount
+          ? { requested: requestedBatchImageCount, completed: completedBatchImageCount }
+          : undefined,
       )
       // Insert function_call_output items before the continuation system message
       continuationBase.splice(continuationBase.length - 1, 0, ...functionCallOutputs)
-      // Inject batch-generated images as input_image user message for model visibility
-      const batchImagesItem = await createAgentBatchImagesInputItem(latestRound, useStore.getState().tasks, streamingTaskIds)
+      // Report batch-generated refs without sending full image data back into the continuation request.
+      const batchImagesItem = createAgentBatchImagesInputItem(latestRound, useStore.getState().tasks, streamingTaskIds)
       if (batchImagesItem) continuationBase.splice(continuationBase.length - 1, 0, batchImagesItem)
       apiInputForTurn = continuationBase
       accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs

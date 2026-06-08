@@ -61,9 +61,69 @@ function getAllowedHosts(defaultTargetUrl) {
   return hosts
 }
 
-function isDynamicTargetAllowed(targetUrl, defaultTargetUrl) {
-  if (env('IMAGE_API_PROXY_ALLOW_DYNAMIC_TARGETS').toLowerCase() === 'true') return true
-  return getAllowedHosts(defaultTargetUrl).has(targetUrl.hostname.toLowerCase())
+function isTruthy(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase())
+}
+
+function normalizeHostname(hostname) {
+  return hostname.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '')
+}
+
+function isPrivateIpv4(hostname) {
+  const parts = hostname.split('.')
+  if (parts.length !== 4) return false
+  const octets = parts.map((part) => Number(part))
+  if (octets.some((octet, index) => !/^\d+$/.test(parts[index]) || !Number.isInteger(octet) || octet < 0 || octet > 255)) return false
+  const [a, b] = octets
+  return a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+}
+
+function isPrivateIpv6(hostname) {
+  const normalized = normalizeHostname(hostname)
+  return normalized === '::' ||
+    normalized === '::1' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe80:') ||
+    normalized.startsWith('::ffff:127.') ||
+    normalized.startsWith('::ffff:10.') ||
+    normalized.startsWith('::ffff:192.168.')
+}
+
+function isPrivateOrLocalHostname(hostname) {
+  const normalized = normalizeHostname(hostname)
+  return normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    normalized.endsWith('.local') ||
+    isPrivateIpv4(normalized) ||
+    isPrivateIpv6(normalized)
+}
+
+function getDynamicTargetErrorMessage(targetUrl, defaultTargetUrl) {
+  const allowedHosts = getAllowedHosts(defaultTargetUrl)
+  const hostname = targetUrl.hostname.toLowerCase()
+  if (allowedHosts.has(hostname)) return ''
+
+  if (isPrivateOrLocalHostname(hostname)) {
+    return 'API proxy target host is local or private. Use a public HTTPS API base URL, or run the app locally to reach a local service.'
+  }
+
+  const allowPublicTargets = isTruthy(env('IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS'))
+  const allowDynamicTargets = isTruthy(env('IMAGE_API_PROXY_ALLOW_DYNAMIC_TARGETS'))
+  if (!allowPublicTargets && !allowDynamicTargets) {
+    return 'API proxy target host is not allowed.'
+  }
+
+  if (targetUrl.protocol !== 'https:') {
+    return 'API proxy dynamic targets must use HTTPS.'
+  }
+
+  return ''
 }
 
 function resolveTargetUrl(request) {
@@ -89,10 +149,11 @@ function resolveTargetUrl(request) {
     }
   }
 
-  if (requestedTarget && !isDynamicTargetAllowed(targetUrl, defaultTargetUrl)) {
+  const dynamicTargetErrorMessage = requestedTarget ? getDynamicTargetErrorMessage(targetUrl, defaultTargetUrl) : ''
+  if (dynamicTargetErrorMessage) {
     return {
       errorStatus: 403,
-      errorMessage: 'API proxy target host is not allowed.',
+      errorMessage: dynamicTargetErrorMessage,
     }
   }
 

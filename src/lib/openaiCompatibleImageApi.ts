@@ -1,6 +1,6 @@
 import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
-import { buildApiUrl, isApiProxyAvailable, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
+import { buildApiUrl, isApiProxyAvailable, isApiProxyLocked, normalizeBaseUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
   assertImageInputPayloadSize,
   assertMaskEditFileSize,
@@ -20,10 +20,14 @@ import {
 
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
 const API_REQUEST_MAX_ATTEMPTS = 2
+const RESPONSES_API_REQUEST_MAX_ATTEMPTS = 3
 const API_REQUEST_RETRY_DELAY_MS = 1000
 const LONG_PROMPT_API_PROXY_THRESHOLD = 1800
 const LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD = 8_000_000
 const RETRYABLE_API_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 523, 524])
+const PROXY_GATEWAY_FALLBACK_STATUSES = new Set([502, 504, 524])
+const MULTIPART_COMPATIBILITY_ERROR_PATTERN = /failed to parse multipart form|parse multipart|multipart form/i
+const imagesJsonResponsesFallbackKeys = new Set<string>()
 
 interface ApiFetchContext {
   endpoint: string
@@ -109,14 +113,26 @@ function getImageSizePixels(size?: string): number {
   return Number.isFinite(width) && Number.isFinite(height) ? width * height : 0
 }
 
+function isBrowserHttpOrigin(): boolean {
+  if (typeof window === 'undefined') return false
+  const protocol = window.location?.protocol
+  return protocol === 'http:' || protocol === 'https:'
+}
+
+function isLongOrLargeImageRequest(prompt: string, params: TaskParams): boolean {
+  return Array.from(prompt).length >= LONG_PROMPT_API_PROXY_THRESHOLD ||
+    getImageSizePixels(params.size) >= LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD
+}
+
 function shouldPreferApiProxyForRequest(
   proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
   prompt: string,
   params: TaskParams,
 ): boolean {
-  if (!isApiProxyAvailable(proxyConfig)) return false
-  return Array.from(prompt).length >= LONG_PROMPT_API_PROXY_THRESHOLD ||
-    getImageSizePixels(params.size) >= LARGE_IMAGE_API_PROXY_PIXEL_THRESHOLD
+  if (!isLongOrLargeImageRequest(prompt, params)) return false
+  void isApiProxyAvailable(proxyConfig)
+  void isBrowserHttpOrigin()
+  return false
 }
 
 function headersToRecord(headers: HeadersInit | undefined): Record<string, string> {
@@ -137,8 +153,58 @@ function shouldFallbackToApiProxy(
   useApiProxy: boolean,
   proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
 ): boolean {
-  if (useApiProxy || !isApiProxyAvailable(proxyConfig) || !isApiDiagnosticError(error)) return false
+  if (useApiProxy || !isApiDiagnosticError(error)) return false
+  if (!error.apiDiagnostics.retryable || error.apiDiagnostics.status != null) return false
+  // Deployed app caches can outlive VITE_API_PROXY_AVAILABLE. If direct fetch is blocked
+  // by CORS/network, an opportunistic same-origin proxy attempt can still recover.
+  if (!isApiProxyAvailable(proxyConfig)) return true
   return error.apiDiagnostics.retryable && error.apiDiagnostics.status == null
+}
+
+function isHtmlResponse(response: Response): boolean {
+  return response.headers.get('Content-Type')?.toLowerCase().includes('text/html') ?? false
+}
+
+function createDirectRetryInit(init: RequestInit, profile: ApiProfile, proxyConfig: ReturnType<typeof readClientDevProxyConfig>): RequestInit {
+  const headers = {
+    ...headersToRecord(init.headers),
+    ...createRequestHeaders(profile, false, proxyConfig),
+  }
+  delete headers['x-taostudio-api-base-url']
+  delete headers['X-TaoStudio-Api-Base-Url']
+
+  return {
+    ...init,
+    headers,
+  }
+}
+
+function shouldFallbackFromOptimisticProxyError(
+  error: unknown,
+  useApiProxy: boolean,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (!useApiProxy || isApiProxyAvailable(proxyConfig) || !isApiDiagnosticError(error)) return false
+  return error.apiDiagnostics.status === 404 || error.apiDiagnostics.status === 405
+}
+
+function shouldFallbackFromProxyGatewayResponse(
+  response: Response,
+  useApiProxy: boolean,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (!useApiProxy || isApiProxyLocked(proxyConfig)) return false
+  return PROXY_GATEWAY_FALLBACK_STATUSES.has(response.status)
+}
+
+function shouldFallbackFromProxyGatewayError(
+  error: unknown,
+  useApiProxy: boolean,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig>,
+): boolean {
+  if (!useApiProxy || isApiProxyLocked(proxyConfig) || !isApiDiagnosticError(error)) return false
+  const status = error.apiDiagnostics.status
+  return typeof status === 'number' && PROXY_GATEWAY_FALLBACK_STATUSES.has(status)
 }
 
 function createApiRequestDiagnostics(
@@ -176,11 +242,77 @@ function createApiRequestError(message: string, diagnostics: ApiRequestDiagnosti
   return error
 }
 
+function isResponseFormatCompatibilityError(error: unknown): boolean {
+  if (!isApiDiagnosticError(error)) return false
+  const message = getErrorMessage(error)
+  return isImagesJsonGenerationError(error) &&
+    error.apiDiagnostics.responseFormat === 'b64_json' &&
+    (MULTIPART_COMPATIBILITY_ERROR_PATTERN.test(message) || /response_format|b64_json/i.test(message))
+}
+
+function isImagesJsonGenerationError(error: unknown): error is Error & { apiDiagnostics: ApiRequestDiagnostics } {
+  return isApiDiagnosticError(error) &&
+    error.apiDiagnostics.endpoint === 'images/generations' &&
+    error.apiDiagnostics.bodyKind === 'json' &&
+    (error.apiDiagnostics.inputImageCount ?? 0) === 0
+}
+
+function isImagesJsonMultipartCompatibilityError(error: unknown): boolean {
+  if (!isImagesJsonGenerationError(error)) return false
+  return MULTIPART_COMPATIBILITY_ERROR_PATTERN.test(getErrorMessage(error))
+}
+
+function isImagesEditRetryableFallbackError(error: unknown): boolean {
+  return isApiDiagnosticError(error) &&
+    error.apiDiagnostics.endpoint === 'images/edits' &&
+    error.apiDiagnostics.bodyKind === 'multipart' &&
+    (error.apiDiagnostics.inputImageCount ?? 0) > 0 &&
+    error.apiDiagnostics.retryable
+}
+
+function createResponsesFallbackProfile(profile: ApiProfile): ApiProfile {
+  return {
+    ...profile,
+    apiMode: 'responses',
+  }
+}
+
+function getImagesJsonResponsesFallbackKey(profile: ApiProfile): string {
+  return JSON.stringify([
+    profile.provider,
+    normalizeBaseUrl(profile.baseUrl),
+    profile.model.trim(),
+  ])
+}
+
+async function callResponsesFallbackAndRemember(opts: CallApiOptions, profile: ApiProfile, fallbackKey: string): Promise<CallApiResult> {
+  const result = await callResponsesImageApiSingle(opts, createResponsesFallbackProfile(profile))
+  imagesJsonResponsesFallbackKeys.add(fallbackKey)
+  return result
+}
+
+function isImagesJsonGenerationContext(context: ApiFetchContext): boolean {
+  return context.endpoint === 'images/generations' &&
+    context.bodyKind === 'json' &&
+    (context.inputImageCount ?? 0) === 0
+}
+
+function shouldSkipApiRetry(context: ApiFetchContext, message: string): boolean {
+  return isImagesJsonGenerationContext(context) && MULTIPART_COMPATIBILITY_ERROR_PATTERN.test(message)
+}
+
+function getApiRequestMaxAttempts(context: ApiFetchContext): number {
+  return context.endpoint === 'responses'
+    ? RESPONSES_API_REQUEST_MAX_ATTEMPTS
+    : API_REQUEST_MAX_ATTEMPTS
+}
+
 async function fetchOpenAICompatibleApi(url: string, init: RequestInit, context: ApiFetchContext): Promise<Response> {
   const startedAt = Date.now()
   let attempts = 0
+  const maxAttempts = getApiRequestMaxAttempts(context)
 
-  while (attempts < API_REQUEST_MAX_ATTEMPTS) {
+  while (attempts < maxAttempts) {
     attempts += 1
 
     try {
@@ -188,12 +320,16 @@ async function fetchOpenAICompatibleApi(url: string, init: RequestInit, context:
       if (response.ok) return response
 
       const retryable = isRetryableApiStatus(response.status)
-      if (retryable && attempts < API_REQUEST_MAX_ATTEMPTS) {
+      const shouldReadMessageBeforeRetry = retryable && attempts < maxAttempts
+      const earlyMessage = shouldReadMessageBeforeRetry
+        ? await getApiErrorMessage(response.clone())
+        : ''
+      if (retryable && attempts < maxAttempts && !shouldSkipApiRetry(context, earlyMessage)) {
         await sleep(API_REQUEST_RETRY_DELAY_MS, init.signal as AbortSignal)
         continue
       }
 
-      const message = await getApiErrorMessage(response)
+      const message = earlyMessage || await getApiErrorMessage(response)
       const diagnostics = createApiRequestDiagnostics(context, url, init, attempts, startedAt, {
         retryable,
         status: response.status,
@@ -203,7 +339,7 @@ async function fetchOpenAICompatibleApi(url: string, init: RequestInit, context:
       if (isApiDiagnosticError(error)) throw error
 
       const retryable = isRetryableApiFetchError(error, init.signal as AbortSignal)
-      if (retryable && attempts < API_REQUEST_MAX_ATTEMPTS) {
+      if (retryable && attempts < maxAttempts) {
         await sleep(API_REQUEST_RETRY_DELAY_MS, init.signal as AbortSignal)
         continue
       }
@@ -229,21 +365,62 @@ async function fetchOpenAICompatibleApiWithProxyFallback(
 ): Promise<Response> {
   const useApiProxy = context.useApiProxy
   try {
-    return await fetchOpenAICompatibleApi(
+    const response = await fetchOpenAICompatibleApi(
       buildApiUrl(profile.baseUrl, path, proxyConfig, useApiProxy),
       init,
       context,
     )
+    if (useApiProxy && !isApiProxyAvailable(proxyConfig) && isHtmlResponse(response)) {
+      return fetchOpenAICompatibleApi(
+        buildApiUrl(profile.baseUrl, path, proxyConfig, false),
+        createDirectRetryInit(init, profile, proxyConfig),
+        {
+          ...context,
+          useApiProxy: false,
+        },
+      )
+    }
+    if (shouldFallbackFromProxyGatewayResponse(response, useApiProxy, proxyConfig)) {
+      return fetchOpenAICompatibleApi(
+        buildApiUrl(profile.baseUrl, path, proxyConfig, false),
+        createDirectRetryInit(init, profile, proxyConfig),
+        {
+          ...context,
+          useApiProxy: false,
+        },
+      )
+    }
+    return response
   } catch (error) {
+    if (shouldFallbackFromProxyGatewayError(error, useApiProxy, proxyConfig)) {
+      return fetchOpenAICompatibleApi(
+        buildApiUrl(profile.baseUrl, path, proxyConfig, false),
+        createDirectRetryInit(init, profile, proxyConfig),
+        {
+          ...context,
+          useApiProxy: false,
+        },
+      )
+    }
+    if (shouldFallbackFromOptimisticProxyError(error, useApiProxy, proxyConfig)) {
+      return fetchOpenAICompatibleApi(
+        buildApiUrl(profile.baseUrl, path, proxyConfig, false),
+        createDirectRetryInit(init, profile, proxyConfig),
+        {
+          ...context,
+          useApiProxy: false,
+        },
+      )
+    }
     if (!shouldFallbackToApiProxy(error, useApiProxy, proxyConfig)) throw error
 
-    return fetchOpenAICompatibleApi(
+    const proxyResponse = await fetchOpenAICompatibleApi(
       buildApiUrl(profile.baseUrl, path, proxyConfig, true),
       {
         ...init,
         headers: {
           ...headersToRecord(init.headers),
-          ...createRequestHeaders(profile, true),
+          ...createRequestHeaders(profile, true, proxyConfig),
         },
       },
       {
@@ -251,6 +428,8 @@ async function fetchOpenAICompatibleApiWithProxyFallback(
         useApiProxy: true,
       },
     )
+    if (!isApiProxyAvailable(proxyConfig) && isHtmlResponse(proxyResponse)) throw error
+    return proxyResponse
   }
 }
 
@@ -310,11 +489,15 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
   return { data: [] }
 }
 
-function createRequestHeaders(profile: ApiProfile, useApiProxy = false): Record<string, string> {
+function createRequestHeaders(
+  profile: ApiProfile,
+  useApiProxy = false,
+  proxyConfig: ReturnType<typeof readClientDevProxyConfig> = readClientDevProxyConfig(),
+): Record<string, string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${profile.apiKey}`,
   }
-  if (useApiProxy && profile.baseUrl.trim()) {
+  if (useApiProxy && !isApiProxyLocked(proxyConfig) && profile.baseUrl.trim()) {
     headers['x-taostudio-api-base-url'] = profile.baseUrl.trim()
   }
   return headers
@@ -730,14 +913,29 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
       ...(profile.codexCli ? { quality: 'auto' as const } : {}),
     },
   }
-  const results = await Promise.allSettled(
-    Array.from({ length: n }).map((_, requestIndex) => callImagesApiSingle({
-      ...singleOpts,
-      onPartialImage: opts.onPartialImage
-        ? (partial) => opts.onPartialImage?.({ ...partial, requestIndex })
-        : undefined,
-    }, profile, customProvider)),
-  )
+  const fallbackKey = getImagesJsonResponsesFallbackKey(profile)
+  const shouldProbeBeforeConcurrent = !customProvider &&
+    opts.inputImageDataUrls.length === 0 &&
+    !imagesJsonResponsesFallbackKeys.has(fallbackKey)
+  const runSingle = (requestIndex: number) => callImagesApiSingle({
+    ...singleOpts,
+    onPartialImage: opts.onPartialImage
+      ? (partial) => opts.onPartialImage?.({ ...partial, requestIndex })
+      : undefined,
+  }, profile, customProvider)
+  const results: PromiseSettledResult<CallApiResult>[] = []
+
+  if (shouldProbeBeforeConcurrent) {
+    results.push(await Promise.resolve(runSingle(0)).then(
+      (value): PromiseFulfilledResult<CallApiResult> => ({ status: 'fulfilled', value }),
+      (reason): PromiseRejectedResult => ({ status: 'rejected', reason }),
+    ))
+  }
+
+  const startIndex = results.length
+  results.push(...await Promise.allSettled(
+    Array.from({ length: n - startIndex }).map((_, offset) => runSingle(startIndex + offset)),
+  ))
 
   const successfulResults = results
     .filter((r): r is PromiseFulfilledResult<CallApiResult> => r.status === 'fulfilled')
@@ -774,8 +972,13 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForRequest(proxyConfig, originalPrompt, params)
-  const requestHeaders = createRequestHeaders(profile, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy, proxyConfig)
   const paths = createOpenAICompatiblePaths(customProvider)
+  const responsesFallbackKey = getImagesJsonResponsesFallbackKey(profile)
+
+  if (!isEdit && imagesJsonResponsesFallbackKeys.has(responsesFallbackKey)) {
+    return callResponsesImageApiSingle(opts, createResponsesFallbackProfile(profile))
+  }
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
@@ -837,26 +1040,33 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, paths.editPath, {
-        method: 'POST',
-        headers: requestHeaders,
-        cache: 'no-store',
-        body: formData,
-        signal: controller.signal,
-      }, {
-        endpoint: paths.editPath,
-        apiMode: profile.apiMode,
-        bodyKind: 'multipart',
-        useApiProxy,
-        model: profile.model,
-        timeout: profile.timeout,
-        size: params.size,
-        outputFormat: params.output_format,
-        responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
-        stream: Boolean(profile.streamImages),
-        inputImageCount: inputImageDataUrls.length,
-        hasMask: Boolean(opts.maskDataUrl),
-      })
+      try {
+        response = await fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, paths.editPath, {
+          method: 'POST',
+          headers: requestHeaders,
+          cache: 'no-store',
+          body: formData,
+          signal: controller.signal,
+        }, {
+          endpoint: paths.editPath,
+          apiMode: profile.apiMode,
+          bodyKind: 'multipart',
+          useApiProxy,
+          model: profile.model,
+          timeout: profile.timeout,
+          size: params.size,
+          outputFormat: params.output_format,
+          responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
+          stream: Boolean(profile.streamImages),
+          inputImageCount: inputImageDataUrls.length,
+          hasMask: Boolean(opts.maskDataUrl),
+        })
+      } catch (error) {
+        if (!customProvider && isImagesEditRetryableFallbackError(error)) {
+          return callResponsesImageApiSingle(opts, createResponsesFallbackProfile(profile))
+        }
+        throw error
+      }
     } else {
       const body: Record<string, unknown> = {
         model: profile.model,
@@ -884,29 +1094,52 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, paths.generationPath, {
-        method: 'POST',
-        headers: {
-          ...requestHeaders,
-          'Content-Type': 'application/json',
-        },
-        cache: 'no-store',
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      }, {
-        endpoint: paths.generationPath,
-        apiMode: profile.apiMode,
-        bodyKind: 'json',
-        useApiProxy,
-        model: profile.model,
-        timeout: profile.timeout,
-        size: params.size,
-        outputFormat: params.output_format,
-        responseFormat: profile.responseFormatB64Json ? 'b64_json' : undefined,
-        stream: Boolean(profile.streamImages),
-        inputImageCount: 0,
-        hasMask: false,
-      })
+      const requestGeneration = (requestBody: Record<string, unknown>, responseFormat?: string) =>
+        fetchOpenAICompatibleApiWithProxyFallback(profile, proxyConfig, paths.generationPath, {
+          method: 'POST',
+          headers: {
+            ...requestHeaders,
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        }, {
+          endpoint: paths.generationPath,
+          apiMode: profile.apiMode,
+          bodyKind: 'json',
+          useApiProxy,
+          model: profile.model,
+          timeout: profile.timeout,
+          size: params.size,
+          outputFormat: params.output_format,
+          responseFormat,
+          stream: Boolean(profile.streamImages),
+          inputImageCount: 0,
+          hasMask: false,
+        })
+
+      try {
+        response = await requestGeneration(body, profile.responseFormatB64Json ? 'b64_json' : undefined)
+      } catch (error) {
+        if (!profile.responseFormatB64Json || !isResponseFormatCompatibilityError(error)) {
+          if (isImagesJsonMultipartCompatibilityError(error)) {
+            return callResponsesFallbackAndRemember(opts, profile, responsesFallbackKey)
+          }
+          throw error
+        }
+
+        const fallbackBody = { ...body }
+        delete fallbackBody.response_format
+        try {
+          response = await requestGeneration(fallbackBody)
+        } catch (fallbackError) {
+          if (isImagesJsonMultipartCompatibilityError(fallbackError)) {
+            return callResponsesFallbackAndRemember(opts, profile, responsesFallbackKey)
+          }
+          throw fallbackError
+        }
+      }
     }
 
     if (!response.ok) {
@@ -1078,7 +1311,7 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
-  const requestHeaders = createRequestHeaders(profile, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy, proxyConfig)
   const context = createCustomProviderContext(opts, profile)
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
@@ -1283,7 +1516,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForRequest(proxyConfig, prompt, params)
-  const requestHeaders = createRequestHeaders(profile, useApiProxy)
+  const requestHeaders = createRequestHeaders(profile, useApiProxy, proxyConfig)
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
 

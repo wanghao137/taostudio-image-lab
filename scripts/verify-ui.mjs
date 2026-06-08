@@ -30,7 +30,12 @@ const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 })
 
 try {
-  await page.goto(url, { waitUntil: 'networkidle' })
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+  await page.waitForFunction(
+    () => document.body?.innerText.includes('TaoStudio 生图工作台'),
+    undefined,
+    { timeout: 60_000 },
+  )
   await page.screenshot({ path: `${screenshotDir}/desktop-studio-console.png`, fullPage: true })
 
   const bodyText = await page.locator('body').innerText()

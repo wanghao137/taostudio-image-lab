@@ -66,6 +66,13 @@ When this variable is present, Vite exposes the same-origin proxy at:
 
 The API key should be entered in the app settings or kept in ignored local configuration. Do not commit real API keys, bearer tokens, cookies, or gateway credentials.
 
+For deployed same-origin proxy usage, dynamic browser-selected API targets are controlled by deployment environment variables:
+
+- `IMAGE_API_PROXY_ALLOWED_HOSTS`: comma-separated host allow-list. The configured default `IMAGE_API_PROXY_TARGET` host is always allowed.
+- `IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS=true`: allow any public HTTPS OpenAI-compatible API base URL passed by the browser through `x-taostudio-api-base-url`.
+
+Localhost and private network targets such as `http://127.0.0.1:7892` are rejected by the deployed proxy even when public dynamic targets are enabled. Use a real public HTTPS API base URL in production, or run the app locally when the target only exists on your computer.
+
 ## Theme
 
 The header theme control supports:

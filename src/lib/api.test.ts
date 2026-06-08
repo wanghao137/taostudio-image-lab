@@ -3,10 +3,65 @@ import { DEFAULT_PARAMS } from '../types'
 import { DEFAULT_SETTINGS } from './apiProfiles'
 import { callImageApi } from './api'
 
+const TEST_IMAGE_DATA_URL = 'data:image/png;base64,aW1hZ2U='
+const TEST_MASK_DATA_URL = 'data:image/png;base64,bWFzaw=='
+
+function createDataUrlBlobResponse(type = 'image/png') {
+  return new Response(new Uint8Array([1, 2, 3]), {
+    status: 200,
+    headers: { 'Content-Type': type },
+  })
+}
+
+function createOpenAISettings(overrides: Partial<typeof DEFAULT_SETTINGS> = {}) {
+  return {
+    ...DEFAULT_SETTINGS,
+    apiKey: 'test-key',
+    baseUrl: 'https://api.example.com/v1',
+    profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+      ...profile,
+      apiKey: 'test-key',
+      baseUrl: 'https://api.example.com/v1',
+    })),
+    ...overrides,
+  }
+}
+
+function installImageToPngTestStubs() {
+  class TestImage {
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    naturalWidth = 1
+    naturalHeight = 1
+
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.())
+    }
+  }
+
+  vi.stubGlobal('Image', TestImage)
+  vi.stubGlobal('document', {
+    createElement: (tagName: string) => {
+      if (tagName !== 'canvas') throw new Error(`Unsupported test element: ${tagName}`)
+      return {
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage: () => undefined,
+        }),
+        toBlob: (callback: (blob: Blob | null) => void, type?: string) => {
+          callback(new Blob([new Uint8Array([1, 2, 3])], { type: type || 'image/png' }))
+        },
+      }
+    },
+  })
+}
+
 describe('callImageApi', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
@@ -295,6 +350,77 @@ describe('callImageApi', () => {
     ])
   })
 
+  it('learns Responses fallback before launching remaining concurrent Images API requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'Zmlyc3Q=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'c2Vjb25k',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'dGhpcmQ=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://concurrent-fallback.example.com/v1',
+        responseFormatB64Json: true,
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          baseUrl: 'https://concurrent-fallback.example.com/v1',
+          responseFormatB64Json: true,
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 3, size: '2160x3840' },
+      inputImageDataUrls: [],
+    } as any)
+
+    expect(result.images).toEqual([
+      'data:image/png;base64,Zmlyc3Q=',
+      'data:image/png;base64,c2Vjb25k',
+      'data:image/png;base64,dGhpcmQ=',
+    ])
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://concurrent-fallback.example.com/v1/images/generations',
+      'https://concurrent-fallback.example.com/v1/images/generations',
+      'https://concurrent-fallback.example.com/v1/responses',
+      'https://concurrent-fallback.example.com/v1/responses',
+      'https://concurrent-fallback.example.com/v1/responses',
+    ])
+  })
+
   it('streams Responses API partial images and resolves the completed response image', async () => {
     const streamBody = [
       'data: {"type":"response.image_generation_call.partial_image","partial_image_index":0,"partial_image_b64":"cGFydGlhbA=="}',
@@ -368,6 +494,50 @@ describe('callImageApi', () => {
       actualParams: { size: '1024x1024' },
       actualParamsList: [{ size: '1024x1024' }],
     })
+  })
+
+  it('recovers Responses API image generation after two transient 502 responses', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'openai_error' } }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'openai_error' } }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'aW1hZ2U=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'responses',
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
   })
 
   it('keeps Responses API stream output item images when completed response omits result', async () => {
@@ -618,7 +788,39 @@ describe('callImageApi', () => {
     )
   })
 
-  it('prefers the same-origin API proxy for long 4K Images API requests when proxy is available', async () => {
+  it('does not pass the configured API URL as a dynamic proxy target when API proxy is locked', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    vi.stubEnv('VITE_API_PROXY_LOCKED', 'true')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      output: [{
+        type: 'image_generation_call',
+        result: 'aW1hZ2U=',
+      }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiMode: 'responses',
+        apiProxy: false,
+        baseUrl: 'http://127.0.0.1:7892',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    const headers = (init as RequestInit).headers as Record<string, string>
+    expect(url).toBe('/api-proxy/responses')
+    expect(headers['x-taostudio-api-base-url']).toBeUndefined()
+  })
+
+  it('does not force the API proxy for long 4K Images API requests when proxy is available', async () => {
     vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       data: [{ b64_json: 'aW1hZ2U=' }],
@@ -641,8 +843,8 @@ describe('callImageApi', () => {
 
     const [url, init] = fetchMock.mock.calls[0]
     const headers = (init as RequestInit).headers as Record<string, string>
-    expect(url).toBe('/api-proxy/images/generations')
-    expect(headers['x-taostudio-api-base-url']).toBe('https://api.example.com/v1')
+    expect(url).toBe('https://api.example.com/v1/images/generations')
+    expect(headers['x-taostudio-api-base-url']).toBeUndefined()
   })
 
   it('does not add cache request headers that require extra CORS allow-list entries', async () => {
@@ -692,6 +894,241 @@ describe('callImageApi', () => {
       'http://api.example.com/v1/images/generations',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('tries the same-origin API proxy after direct network failures even when proxy availability was not embedded', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'false')
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: false,
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[2][0]).toBe('/api-proxy/images/generations')
+    const headers = fetchMock.mock.calls[2][1]?.headers as Record<string, string>
+    expect(headers['x-taostudio-api-base-url']).toBe('https://api.example.com/v1')
+  })
+
+  it('does not optimistically proxy long browser requests when proxy availability was not embedded', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'false')
+    vi.stubGlobal('window', {
+      location: {
+        protocol: 'https:',
+        origin: 'https://image.taostudioai.com',
+      },
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: false,
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'brand proposal '.repeat(180),
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    const headers = (init as RequestInit).headers as Record<string, string>
+    expect(url).toBe('https://api.example.com/v1/images/generations')
+    expect(headers['x-taostudio-api-base-url']).toBeUndefined()
+  })
+
+  it('falls back to direct fetch when an enabled proxy returns gateway timeout', async () => {
+    vi.stubEnv('VITE_API_PROXY_AVAILABLE', 'true')
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'gateway timeout' } }), {
+        status: 524,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'gateway timeout' } }), {
+        status: 524,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        apiProxy: true,
+        baseUrl: 'https://api.example.com/v1',
+      },
+      prompt: 'brand proposal '.repeat(180),
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api-proxy/images/generations')
+    expect(fetchMock.mock.calls[1][0]).toBe('/api-proxy/images/generations')
+    expect(fetchMock.mock.calls[2][0]).toBe('https://api.example.com/v1/images/generations')
+    const directHeaders = fetchMock.mock.calls[2][1]?.headers as Record<string, string>
+    expect(directHeaders['x-taostudio-api-base-url']).toBeUndefined()
+  })
+
+  it('falls back to Responses edit when Images edits returns retryable errors', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.startsWith('data:')) return createDataUrlBlobResponse()
+      if (url.endsWith('/images/edits')) {
+        return new Response(JSON.stringify({ error: { message: 'openai_error' } }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url.endsWith('/responses')) {
+        return new Response(JSON.stringify({
+          output: [{
+            type: 'image_generation_call',
+            result: 'ZWRpdA==',
+          }],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('{}', { status: 404 })
+    })
+
+    const promise = callImageApi({
+      settings: createOpenAISettings(),
+      prompt: 'edit prompt',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [TEST_IMAGE_DATA_URL],
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,ZWRpdA=='],
+    }))
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      TEST_IMAGE_DATA_URL,
+      'https://api.example.com/v1/images/edits',
+      'https://api.example.com/v1/images/edits',
+      'https://api.example.com/v1/responses',
+    ])
+    const responsesBody = JSON.parse(String(fetchMock.mock.calls[3][1]?.body))
+    expect(responsesBody.tools[0]).toMatchObject({
+      type: 'image_generation',
+      action: 'edit',
+      size: '1024x1024',
+    })
+    expect(responsesBody.tools[0].input_image_mask).toBeUndefined()
+    expect(responsesBody.input[0].content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'input_image', image_url: TEST_IMAGE_DATA_URL }),
+    ]))
+  })
+
+  it('preserves the mask when falling back from Images edits to Responses edit', async () => {
+    vi.useFakeTimers()
+    installImageToPngTestStubs()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.startsWith('data:')) return createDataUrlBlobResponse()
+      if (url.endsWith('/images/edits')) {
+        return new Response(JSON.stringify({ error: { message: 'openai_error' } }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url.endsWith('/responses')) {
+        return new Response(JSON.stringify({
+          output: [{
+            type: 'image_generation_call',
+            result: 'bWFza2Vk',
+          }],
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response('{}', { status: 404 })
+    })
+
+    const promise = callImageApi({
+      settings: createOpenAISettings(),
+      prompt: 'masked edit prompt',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [TEST_IMAGE_DATA_URL],
+      maskDataUrl: TEST_MASK_DATA_URL,
+    })
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,bWFza2Vk'],
+    }))
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      TEST_MASK_DATA_URL,
+      'https://api.example.com/v1/images/edits',
+      'https://api.example.com/v1/images/edits',
+      'https://api.example.com/v1/responses',
+    ])
+    const responsesBody = JSON.parse(String(fetchMock.mock.calls[3][1]?.body))
+    expect(responsesBody.tools[0]).toMatchObject({
+      type: 'image_generation',
+      action: 'edit',
+      input_image_mask: {
+        image_url: TEST_MASK_DATA_URL,
+      },
+    })
+    expect(responsesBody.input[0].content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'input_image', image_url: TEST_IMAGE_DATA_URL }),
+    ]))
   })
 
   it('retries transient Images API network failures before returning the generated image', async () => {
@@ -756,6 +1193,177 @@ describe('callImageApi', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.example.com/v1/images/generations')
     expect(fetchMock.mock.calls[1][0]).toBe('https://api.example.com/v1/images/generations')
     expect(fetchMock.mock.calls[2][0]).toBe('/api-proxy/images/generations')
+  })
+
+  it('falls back to Images API generation without b64_json response_format when the provider rejects JSON as multipart', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://api.example.com/v1',
+        responseFormatB64Json: true,
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          baseUrl: 'https://api.example.com/v1',
+          responseFormatB64Json: true,
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    } as any)
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).response_format).toBe('b64_json')
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).response_format).toBeUndefined()
+  })
+
+  it('falls back to Responses API when Images API JSON generation keeps failing with multipart compatibility errors', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'aW1hZ2U=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const promise = callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://fallback.example.com/v1',
+        responseFormatB64Json: true,
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          baseUrl: 'https://fallback.example.com/v1',
+          responseFormatB64Json: true,
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [],
+    } as any)
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+
+    await expect(promise).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,aW1hZ2U='],
+    }))
+    expect(fetchMock.mock.calls[0][0]).toBe('https://fallback.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[1][0]).toBe('https://fallback.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[2][0]).toBe('https://fallback.example.com/v1/responses')
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).response_format).toBe('b64_json')
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).response_format).toBeUndefined()
+    const responsesBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body))
+    expect(responsesBody.tools[0].type).toBe('image_generation')
+    expect(responsesBody.tools[0].size).toBe('1024x1024')
+  })
+
+  it('reuses a successful Responses fallback for the same Images API provider in the current session', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'Zmlyc3Q=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'c2Vjb25k',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      apiKey: 'test-key',
+      baseUrl: 'https://session-cache.example.com/v1',
+      responseFormatB64Json: true,
+      profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+        ...profile,
+        apiKey: 'test-key',
+        baseUrl: 'https://session-cache.example.com/v1',
+        responseFormatB64Json: true,
+      })),
+    }
+
+    const first = callImageApi({
+      settings,
+      prompt: 'first prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    } as any)
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    await expect(first).resolves.toEqual(expect.objectContaining({
+      images: ['data:image/png;base64,Zmlyc3Q='],
+    }))
+
+    const second = await callImageApi({
+      settings,
+      prompt: 'second prompt',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImageDataUrls: [],
+    } as any)
+
+    expect(second.images).toEqual(['data:image/png;base64,c2Vjb25k'])
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://session-cache.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[1][0]).toBe('https://session-cache.example.com/v1/images/generations')
+    expect(fetchMock.mock.calls[2][0]).toBe('https://session-cache.example.com/v1/responses')
+    expect(fetchMock.mock.calls[3][0]).toBe('https://session-cache.example.com/v1/responses')
   })
 
   it('adds redacted request diagnostics when a retryable Images API response still fails', async () => {

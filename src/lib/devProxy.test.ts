@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import { buildApiUrl } from './devProxy'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { buildApiUrl, normalizeDevProxyConfig } from './devProxy'
 
 describe('buildApiUrl', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it('uses the same-origin proxy prefix when API proxy is enabled', () => {
     expect(buildApiUrl('http://api.example.com/v1', 'images/edits', null, true)).toBe(
       '/api-proxy/images/edits',
@@ -29,6 +33,27 @@ describe('buildApiUrl', () => {
         true,
       ),
     ).toBe('/openai-proxy/responses')
+  })
+
+  it('supports an absolute configured proxy prefix', () => {
+    const proxyConfig = normalizeDevProxyConfig({
+      enabled: true,
+      prefix: 'https://image-proxy.taostudioai.com/api-proxy/',
+      target: 'https://api.example.com/v1',
+    })
+
+    expect(proxyConfig?.prefix).toBe('https://image-proxy.taostudioai.com/api-proxy')
+    expect(buildApiUrl('https://api.example.com/v1', 'responses', proxyConfig, true)).toBe(
+      'https://image-proxy.taostudioai.com/api-proxy/responses',
+    )
+  })
+
+  it('uses the build-time proxy prefix when proxying in production', () => {
+    vi.stubEnv('VITE_API_PROXY_PREFIX', 'https://image-proxy.taostudioai.com/api-proxy/')
+
+    expect(buildApiUrl('https://api.example.com/v1', 'responses', null, true)).toBe(
+      'https://image-proxy.taostudioai.com/api-proxy/responses',
+    )
   })
 
   it('uses the configured API URL directly when API proxy is disabled', () => {
