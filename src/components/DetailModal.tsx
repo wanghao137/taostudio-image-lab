@@ -21,7 +21,6 @@ export default function DetailModal() {
   const detailTaskId = useStore((s) => s.detailTaskId)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
-  const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const showToast = useStore((s) => s.showToast)
   const openFavoritePicker = useStore((s) => s.openFavoritePicker)
@@ -269,13 +268,6 @@ export default function DetailModal() {
 
   const handleEdit = () => {
     editOutputs(task)
-    setDetailTaskId(null)
-  }
-
-  const handleMaskEditCurrentOutput = () => {
-    const imgId = task.outputImages?.[imageIndex]
-    if (!imgId) return
-    setMaskEditorImageId(imgId)
     setDetailTaskId(null)
   }
 
@@ -682,7 +674,7 @@ export default function DetailModal() {
                   <button
                     type="button"
                     {...copyErrorTooltip.handlers}
-                    onClick={(e) => {
+                    onClick={() => {
                       copyErrorTooltip.handlers.onClick()
                       handleCopyError()
                     }}
@@ -700,7 +692,7 @@ export default function DetailModal() {
                     <button
                       type="button"
                       {...viewRawResponseTooltip.handlers}
-                      onClick={(e) => {
+                      onClick={() => {
                         dismissAllTooltips()
                         setShowRawResponseModal(true)
                       }}
@@ -719,7 +711,7 @@ export default function DetailModal() {
                     <button
                       type="button"
                       {...copyRawUrlsTooltip.handlers}
-                      onClick={async (e) => {
+                      onClick={async () => {
                         if (task.rawImageUrls!.length === 1) {
                           copyRawUrlsTooltip.handlers.onClick()
                           try {
@@ -748,7 +740,7 @@ export default function DetailModal() {
                     <button
                       type="button"
                       {...downloadPartialImagesTooltip.handlers}
-                      onClick={(e) => {
+                      onClick={() => {
                         downloadPartialImagesTooltip.handlers.onClick()
                         void handleDownloadPartialImages()
                       }}
@@ -766,7 +758,7 @@ export default function DetailModal() {
                   <button
                     type="button"
                     {...retryTooltip.handlers}
-                    onClick={(e) => {
+                    onClick={() => {
                       retryTooltip.handlers.onClick()
                       handleRetry()
                     }}

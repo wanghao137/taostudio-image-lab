@@ -47,11 +47,13 @@ function writeJson(filePath, value) {
 }
 
 function run(command, commandArgs, options = {}) {
-  const result = spawnSync(command, commandArgs, {
+  const isWindowsNpm = process.platform === 'win32' && command === 'npm'
+  const executable = isWindowsNpm ? 'npm.cmd' : command
+  const result = spawnSync(executable, commandArgs, {
     cwd: options.cwd ?? projectRoot,
     stdio: options.capture ? 'pipe' : 'inherit',
     encoding: 'utf8',
-    shell: false,
+    shell: isWindowsNpm,
   })
 
   if (result.status !== 0) {
@@ -183,7 +185,7 @@ function mergePackageJson(upstreamPackagePath, localPackagePath, dryRun) {
 
   merged.name = localPackage.name ?? 'taostudio-image-lab'
   merged.private = localPackage.private ?? true
-  merged.version = localPackage.version ?? upstreamPackage.version
+  merged.version = upstreamPackage.version ?? localPackage.version
 
   const next = `${JSON.stringify(merged, null, 2)}\n`
   const current = fs.readFileSync(localPackagePath, 'utf8')

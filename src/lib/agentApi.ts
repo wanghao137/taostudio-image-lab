@@ -579,25 +579,6 @@ async function readJsonServerSentEvents(response: Response, onEvent: (event: Rec
   }
 }
 
-function createInput(messages: AgentApiMessage[]) {
-  return messages.map((message) => {
-    const content: Array<Record<string, string>> = [
-      { type: message.role === 'user' ? 'input_text' : 'output_text', text: message.text },
-    ]
-
-    if (message.role === 'user') {
-      for (const dataUrl of message.imageDataUrls ?? []) {
-        content.push({ type: 'input_image', image_url: dataUrl })
-      }
-    }
-
-    return {
-      role: message.role,
-      content,
-    }
-  })
-}
-
 function extractText(payload: ResponsesApiResponse) {
   const chunks: string[] = []
 

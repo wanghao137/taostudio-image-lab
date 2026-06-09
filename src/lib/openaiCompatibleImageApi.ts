@@ -417,7 +417,7 @@ function appendQuery(path: string, query?: Record<string, string>): string {
   return `${path}${path.includes('?') ? '&' : '?'}${params.toString()}`
 }
 
-function createOpenAICompatiblePaths(customProvider?: CustomProviderDefinition | null) {
+function createOpenAICompatiblePaths() {
   return {
     generationPath: 'images/generations',
     editPath: 'images/edits',
@@ -874,7 +874,11 @@ export async function callOpenAICompatibleImageApi(opts: CallApiOptions, profile
 
 async function callImagesApi(opts: CallApiOptions, profile: ApiProfile, customProvider?: CustomProviderDefinition | null): Promise<CallApiResult> {
   const n = opts.params.n > 0 ? opts.params.n : 1
-  if ((profile.codexCli || (profile.streamImages && n > 1)) && n > 1) {
+  const shouldSplitB64JsonGeneration =
+    profile.responseFormatB64Json &&
+    opts.inputImageDataUrls.length === 0 &&
+    !customProvider
+  if ((profile.codexCli || profile.streamImages || shouldSplitB64JsonGeneration) && n > 1) {
     return callImagesApiConcurrent(opts, profile, n, customProvider)
   }
 
@@ -950,7 +954,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile, cu
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig) || shouldPreferApiProxyForRequest(proxyConfig, originalPrompt, params)
   const requestHeaders = createRequestHeaders(profile, useApiProxy, proxyConfig)
-  const paths = createOpenAICompatiblePaths(customProvider)
+  const paths = createOpenAICompatiblePaths()
   const responsesFallbackKey = getImagesJsonResponsesFallbackKey(profile)
 
   if (!isEdit && imagesJsonResponsesFallbackKeys.has(responsesFallbackKey)) {
