@@ -18,15 +18,23 @@ docs/plans/2026-06-05-gpt-image-playground-ui-only-migration.md
 
 ## Start
 
+Windows one-click startup:
+
+```text
+start-local.cmd
+```
+
+Or run the same local dev server from a terminal:
+
 ```bash
 npm install
-npm run dev -- --host 127.0.0.1 --port 5174
+npm run start:local
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:5174/
+http://127.0.0.1:5173/
 ```
 
 ## Upstream Upgrade
@@ -52,7 +60,9 @@ docs/upstream-upgrade.md
 
 ## Local API Proxy
 
-For local development, either create `dev-proxy.config.json` from `dev-proxy.config.example.json`, or use the target project's convenience environment variable:
+For local development, create `dev-proxy.config.json` from `dev-proxy.config.example.json`.
+`start-local.cmd` creates this file automatically when it is missing and never overwrites an existing local config.
+You can also use the target project's convenience environment variable:
 
 ```text
 IMAGE_API_PROXY_TARGET=https://your-gateway.example.com/v1
@@ -63,6 +73,8 @@ When this variable is present, Vite exposes the same-origin proxy at:
 ```text
 /api-proxy
 ```
+
+When `allowBrowserTarget` is `true` in `dev-proxy.config.json`, the local Vite proxy reads the API URL selected in the app settings through `x-taostudio-api-base-url`. This keeps local testing provider-neutral: change the API URL in the frontend settings, keep API proxy enabled, and the local proxy will route to that selected OpenAI-compatible base URL. Set `allowBrowserTarget` to `false` only when you want the local proxy locked to `dev-proxy.config.json.target`.
 
 The API key should be entered in the app settings or kept in ignored local configuration. Do not commit real API keys, bearer tokens, cookies, or gateway credentials.
 

@@ -350,6 +350,70 @@ describe('callImageApi', () => {
     ])
   })
 
+  it('fills missing Images API outputs when the provider ignores native n', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        size: '1024x1024',
+        output_format: 'jpeg',
+        data: [{ b64_json: 'Zmlyc3Q=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        size: '1024x1024',
+        output_format: 'jpeg',
+        data: [{ b64_json: 'c2Vjb25k' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        size: '1024x1024',
+        output_format: 'jpeg',
+        data: [{ b64_json: 'dGhpcmQ=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const result = await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        apiKey: 'test-key',
+        baseUrl: 'https://native-n.example.com/v1',
+        profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({
+          ...profile,
+          apiKey: 'test-key',
+          baseUrl: 'https://native-n.example.com/v1',
+        })),
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, output_format: 'jpeg', n: 3 },
+      inputImageDataUrls: [],
+    } as any)
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).n).toBe(3)
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).n).toBeUndefined()
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body)).n).toBeUndefined()
+    expect(result.images).toEqual([
+      'data:image/jpeg;base64,Zmlyc3Q=',
+      'data:image/jpeg;base64,c2Vjb25k',
+      'data:image/jpeg;base64,dGhpcmQ=',
+    ])
+    expect(result.actualParams).toEqual({
+      size: '1024x1024',
+      output_format: 'jpeg',
+      n: 3,
+    })
+    expect(result.actualParamsList).toEqual([
+      { size: '1024x1024', output_format: 'jpeg' },
+      { size: '1024x1024', output_format: 'jpeg' },
+      { size: '1024x1024', output_format: 'jpeg' },
+    ])
+  })
+
   it('learns Responses fallback before launching remaining concurrent Images API requests', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'failed to parse multipart form' } }), {

@@ -6,6 +6,7 @@ export interface DevProxyConfig {
   target: string
   changeOrigin: boolean
   secure: boolean
+  allowBrowserTarget: boolean
 }
 
 const DEFAULT_PROXY_PREFIX = '/api-proxy'
@@ -53,11 +54,42 @@ export function normalizeBaseUrl(baseUrl: string): string {
   }
 }
 
+export function normalizeApiProxyTargetUrl(baseUrl: string): string {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+  if (!normalizedBaseUrl) return ''
+
+  try {
+    const url = new URL(normalizedBaseUrl)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return ''
+
+    const pathSegments = url.pathname.split('/').filter(Boolean)
+    const v1Index = pathSegments.indexOf('v1')
+    const normalizedSegments = v1Index >= 0
+      ? pathSegments.slice(0, v1Index + 1)
+      : [...pathSegments, 'v1']
+    url.pathname = `/${normalizedSegments.join('/')}`
+    url.search = ''
+    url.hash = ''
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    return ''
+  }
+}
+
+export function resolveDevProxyTarget(headerValue: unknown, fallbackTarget: string): string {
+  const rawHeaderValue = Array.isArray(headerValue) ? headerValue[0] : headerValue
+  const browserTarget = typeof rawHeaderValue === 'string'
+    ? normalizeApiProxyTargetUrl(rawHeaderValue)
+    : ''
+
+  return browserTarget || normalizeApiProxyTargetUrl(fallbackTarget)
+}
+
 export function normalizeDevProxyConfig(input: unknown): DevProxyConfig | null {
   if (!input || typeof input !== 'object') return null
 
   const record = input as Record<string, unknown>
-  const target = normalizeBaseUrl(typeof record.target === 'string' ? record.target : '')
+  const target = normalizeApiProxyTargetUrl(typeof record.target === 'string' ? record.target : '')
   if (!target) return null
 
   const rawPrefix = typeof record.prefix === 'string' ? record.prefix : DEFAULT_PROXY_PREFIX
@@ -69,6 +101,7 @@ export function normalizeDevProxyConfig(input: unknown): DevProxyConfig | null {
     target,
     changeOrigin: record.changeOrigin !== false,
     secure: Boolean(record.secure),
+    allowBrowserTarget: record.allowBrowserTarget !== false,
   }
 }
 

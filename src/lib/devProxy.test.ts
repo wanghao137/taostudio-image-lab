@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { buildApiUrl, normalizeDevProxyConfig } from './devProxy'
+import {
+  buildApiUrl,
+  normalizeApiProxyTargetUrl,
+  normalizeDevProxyConfig,
+  resolveDevProxyTarget,
+} from './devProxy'
 
 describe('buildApiUrl', () => {
   afterEach(() => {
@@ -29,6 +34,7 @@ describe('buildApiUrl', () => {
           target: 'http://api.example.com/v1',
           changeOrigin: true,
           secure: false,
+          allowBrowserTarget: true,
         },
         true,
       ),
@@ -60,5 +66,63 @@ describe('buildApiUrl', () => {
     expect(buildApiUrl('http://api.example.com/v1', 'responses', null, false)).toBe(
       'http://api.example.com/v1/responses',
     )
+  })
+})
+
+describe('normalizeApiProxyTargetUrl', () => {
+  it('normalizes a root API host into an OpenAI-compatible /v1 proxy target', () => {
+    expect(normalizeApiProxyTargetUrl('http://127.0.0.1:8317')).toBe('http://127.0.0.1:8317/v1')
+  })
+
+  it('preserves an existing /v1 proxy target and removes extra path after it', () => {
+    expect(normalizeApiProxyTargetUrl('https://api.example.com/openai/v1/images/generations')).toBe(
+      'https://api.example.com/openai/v1',
+    )
+  })
+
+  it('appends /v1 after custom base paths', () => {
+    expect(normalizeApiProxyTargetUrl('https://gateway.example.com/openai')).toBe(
+      'https://gateway.example.com/openai/v1',
+    )
+  })
+
+  it('rejects invalid proxy targets', () => {
+    expect(normalizeApiProxyTargetUrl('http://')).toBe('')
+  })
+})
+
+describe('resolveDevProxyTarget', () => {
+  it('uses the browser-selected API URL header when local proxy dynamic targets are allowed', () => {
+    expect(resolveDevProxyTarget('http://127.0.0.1:8317', 'https://fallback.example.com/v1')).toBe(
+      'http://127.0.0.1:8317/v1',
+    )
+  })
+
+  it('falls back to the configured target when the browser-selected target is invalid', () => {
+    expect(resolveDevProxyTarget('http://', 'https://fallback.example.com')).toBe(
+      'https://fallback.example.com/v1',
+    )
+  })
+
+  it('normalizes the static dev proxy target the same way as dynamic targets', () => {
+    const proxyConfig = normalizeDevProxyConfig({
+      enabled: true,
+      prefix: '/api-proxy',
+      target: 'http://127.0.0.1:8317',
+    })
+
+    expect(proxyConfig?.target).toBe('http://127.0.0.1:8317/v1')
+    expect(proxyConfig?.allowBrowserTarget).toBe(true)
+  })
+
+  it('keeps static-only dev proxy mode available for locked local setups', () => {
+    const proxyConfig = normalizeDevProxyConfig({
+      enabled: true,
+      prefix: '/api-proxy',
+      target: 'https://fallback.example.com/v1',
+      allowBrowserTarget: false,
+    })
+
+    expect(proxyConfig?.allowBrowserTarget).toBe(false)
   })
 })

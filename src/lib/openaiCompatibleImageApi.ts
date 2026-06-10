@@ -882,7 +882,41 @@ async function callImagesApi(opts: CallApiOptions, profile: ApiProfile, customPr
     return callImagesApiConcurrent(opts, profile, n, customProvider)
   }
 
-  return callImagesApiSingle(opts, profile, customProvider)
+  const result = await callImagesApiSingle(opts, profile, customProvider)
+  if (n <= 1 || result.images.length >= n) return result
+
+  const missingCount = n - result.images.length
+  try {
+    const remaining = await callImagesApiConcurrent({
+      ...opts,
+      params: {
+        ...opts.params,
+        n: missingCount,
+      },
+    }, profile, missingCount, customProvider)
+
+    const images = [...result.images, ...remaining.images]
+    const actualParamsList = [
+      ...(result.actualParamsList?.length ? result.actualParamsList : result.images.map(() => result.actualParams)),
+      ...(remaining.actualParamsList?.length ? remaining.actualParamsList : remaining.images.map(() => remaining.actualParams)),
+    ]
+    const revisedPrompts = [
+      ...(result.revisedPrompts?.length ? result.revisedPrompts : result.images.map(() => undefined)),
+      ...(remaining.revisedPrompts?.length ? remaining.revisedPrompts : remaining.images.map(() => undefined)),
+    ]
+    const rawImageUrls = [...(result.rawImageUrls ?? []), ...(remaining.rawImageUrls ?? [])]
+    const actualParams = mergeActualParams(
+      result.actualParams ?? {},
+      { n: images.length },
+    )
+
+    return { images, actualParams, actualParamsList, revisedPrompts, ...(rawImageUrls.length ? { rawImageUrls } : {}) }
+  } catch {
+    return {
+      ...result,
+      actualParams: mergeActualParams(result.actualParams ?? {}, { n: result.images.length }),
+    }
+  }
 }
 
 async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile, n: number, customProvider?: CustomProviderDefinition | null): Promise<CallApiResult> {
