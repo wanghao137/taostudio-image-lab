@@ -32,7 +32,7 @@ import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdo
 import Select from './Select'
 import { Checkbox } from './Checkbox'
 import ViewportTooltip from './ViewportTooltip'
-import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon, RefreshIcon, ExternalLinkIcon } from './icons'
+import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon } from './icons'
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -40,11 +40,6 @@ function newId(prefix: string) {
 
 const ADD_CUSTOM_PROVIDER_VALUE = '__add_custom_provider__'
 const COPY_IMPORT_URL_OPTIONS_STORAGE_KEY = 'gpt-image-playground.copy-import-url-options'
-const UPSTREAM_REPO_URL = 'https://github.com/CookSleep/gpt_image_playground'
-const UPSTREAM_UPGRADE_COMMAND = 'npm run upgrade:upstream -- --install --verify'
-const UPSTREAM_UPGRADE_DRY_RUN_COMMAND = 'npm run upgrade:upstream -- --dry-run'
-const UPSTREAM_UPGRADE_CMD_FILE = 'upstream-upgrade.cmd'
-const UPSTREAM_UPGRADE_DOC_PATH = 'docs/upstream-upgrade.md'
 
 const DEFAULT_COPY_IMPORT_URL_OPTIONS = {
   includeApiKey: false,
@@ -626,15 +621,6 @@ export default function SettingsModal() {
       setCopyImportUrlProfile(null)
     } catch (err) {
       showToast(getClipboardFailureMessage('复制导入 URL 失败', err), 'error')
-    }
-  }
-
-  const copyUpgradeText = async (text: string, successMessage: string) => {
-    try {
-      await copyTextToClipboard(text)
-      showToast(successMessage, 'success')
-    } catch (err) {
-      showToast(getClipboardFailureMessage('复制失败', err), 'error')
     }
   }
 
@@ -1399,6 +1385,24 @@ export default function SettingsModal() {
                     开启后，在 Agent 模式发送消息成功后会自动滚动到对话底部。
                   </div>
                 </div>
+                <div className="block">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">公式输出提示</span>
+                    <button
+                      type="button"
+                      onClick={() => commitSettings({ ...draft, agentMathFormattingPrompt: !draft.agentMathFormattingPrompt })}
+                      className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${draft.agentMathFormattingPrompt ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                      role="switch"
+                      aria-checked={draft.agentMathFormattingPrompt}
+                      aria-label="公式输出提示"
+                    >
+                      <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${draft.agentMathFormattingPrompt ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+                    </button>
+                  </div>
+                  <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+                    开启后，Agent 会被要求使用 <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[0.9em] text-gray-700 dark:bg-white/10 dark:text-gray-200">$...$</code> 和 <code className="rounded bg-gray-100 px-1 py-0.5 font-mono text-[0.9em] text-gray-700 dark:bg-white/10 dark:text-gray-200">$$...$$</code> 输出数学公式，确保渲染效果正常。
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1664,15 +1668,13 @@ export default function SettingsModal() {
                     onChange={(e) => updateActiveProfile({ baseUrl: e.target.value })}
                     onBlur={(e) => commitActiveProfilePatch({ baseUrl: e.target.value })}
                     type="text"
-                    disabled={apiProxyLocked}
+                    disabled={apiProxyEnabled}
                     placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_BASE_URL : DEFAULT_SETTINGS.baseUrl}
-                    className={`w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50 ${apiProxyLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    className={`w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50 ${apiProxyEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                   />
                   <div data-selectable-text className="mt-1.5 min-h-[22px] flex items-center text-xs text-gray-500 dark:text-gray-500">
-                    {apiProxyLocked ? (
-                      <span className="text-yellow-600 dark:text-yellow-500">部署端已锁定代理目标，此处设置会被忽略。</span>
-                    ) : apiProxyEnabled ? (
-                      <span>已开启代理，请求会经服务器转发；此处 URL 会作为上游目标传给代理。</span>
+                    {apiProxyEnabled ? (
+                      <span className="text-yellow-600 dark:text-yellow-500">已开启代理，实际请求目标由部署端决定，此处设置被忽略。</span>
                     ) : activeProfile.provider === 'fal' ? (
                       <span>默认使用 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">{DEFAULT_FAL_BASE_URL}</code>；填写自定义地址时将作为 fal.ai 代理 URL。</span>
                     ) : (
@@ -1702,7 +1704,7 @@ export default function SettingsModal() {
                     </button>
                   </div>
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
-                    {apiProxyLocked ? '部署端已锁定代理开启，请求经服务器转发到上游 API。' : '开启后请求经服务器转发到上游 API，可绕过浏览器跨域限制；上方 URL 会作为代理目标传给服务器，并按允许域名校验。'}
+                    {apiProxyLocked ? '部署端已锁定代理开启，请求经服务器转发到上游 API，上方 URL 设置将失效。' : '开启后请求经服务器转发到上游 API，可绕过浏览器跨域限制，上方 URL 设置将失效。'}
                   </div>
                 </div>
               )}
@@ -2093,60 +2095,6 @@ export default function SettingsModal() {
                     赞助作者
                   </a>
                 </div>
-
-                <section className="mt-6 w-full max-w-2xl rounded-2xl border border-gray-200/70 bg-white/70 p-4 text-left shadow-sm dark:border-white/[0.08] dark:bg-white/[0.03]">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-blue-100 bg-blue-50 text-blue-600 dark:border-blue-400/20 dark:bg-blue-400/10 dark:text-blue-300">
-                      <RefreshIcon className="h-5 w-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">系统更新</h4>
-                      <p className="mt-1.5 text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
-                        底层功能跟随 CookSleep/gpt_image_playground。升级脚本会同步上游底层文件，并保留 TaoStudio 的品牌界面、配置文件和本地数据。
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                    <button
-                      type="button"
-                      onClick={() => copyUpgradeText(UPSTREAM_UPGRADE_COMMAND, '升级命令已复制')}
-                      className="flex items-center justify-center gap-2 rounded-xl bg-gray-900 px-3 py-2.5 text-sm font-medium text-white transition hover:bg-black dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
-                    >
-                      <CopyIcon className="h-4 w-4" />
-                      复制正式升级命令
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => copyUpgradeText(UPSTREAM_UPGRADE_DRY_RUN_COMMAND, '预检查命令已复制')}
-                      className="flex items-center justify-center gap-2 rounded-xl border border-gray-200/70 bg-white px-3 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
-                    >
-                      <CopyIcon className="h-4 w-4" />
-                      复制预检查命令
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => copyUpgradeText(UPSTREAM_UPGRADE_CMD_FILE, '双击升级脚本名已复制')}
-                      className="flex items-center justify-center gap-2 rounded-xl border border-gray-200/70 bg-white px-3 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
-                    >
-                      <LinkIcon className="h-4 w-4" />
-                      双击升级脚本
-                    </button>
-                    <a
-                      href={UPSTREAM_REPO_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center justify-center gap-2 rounded-xl border border-gray-200/70 bg-white px-3 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:bg-white/[0.08]"
-                    >
-                      <ExternalLinkIcon className="h-4 w-4" />
-                      查看上游项目
-                    </a>
-                  </div>
-
-                  <p className="mt-3 text-[12px] leading-relaxed text-gray-400 dark:text-gray-500">
-                    详细说明见 {UPSTREAM_UPGRADE_DOC_PATH}。正式升级前可先复制预检查命令确认差异。
-                  </p>
-                </section>
               </div>
             )}
           </div>

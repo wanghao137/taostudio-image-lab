@@ -28,6 +28,19 @@ const forbiddenText = [
 
 const browser = await chromium.launch()
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 1 })
+await page.route('**/*', (route) => {
+  const request = route.request()
+  const url = request.url()
+  if (
+    request.resourceType() === 'font' ||
+    url.includes('fontsapi.zeoseven.com') ||
+    url.includes('@lobehub/webfont-harmony-sans-sc')
+  ) {
+    route.abort()
+    return
+  }
+  route.continue()
+})
 
 try {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })

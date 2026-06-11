@@ -46,7 +46,6 @@ import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSin
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId, replaceAgentPromptImageReferencesForApi } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
-import { extractApiDiagnosticsFromError, stripApiDiagnosticsFromMessage } from './lib/apiDiagnostics'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
@@ -74,7 +73,6 @@ const MAX_THUMBNAIL_BACKFILL_CONCURRENT = 4
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
 const SUPPORT_PROMPT_IMAGE_THRESHOLD = 50
-const AGENT_BATCH_IMAGE_CONCURRENCY = 2
 const AGENT_INPUT_DRAFT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
 const AGENT_ROUND_IMAGE_MENTION_RE = /@(?:第)?(\d+)轮图(\d+)/g
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -94,38 +92,6 @@ type AgentInputDraft = {
   maskDraft: MaskDraft | null
   maskEditorImageId: string | null
   updatedAt?: number
-}
-
-async function runLimitedSettledQueue<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>,
-): Promise<Array<PromiseSettledResult<R>>> {
-  const results: Array<PromiseSettledResult<R>> = new Array(items.length)
-  const workerCount = Math.min(items.length, Math.max(1, Math.trunc(limit)))
-  let nextIndex = 0
-
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (true) {
-      const index = nextIndex
-      nextIndex += 1
-      if (index >= items.length) return
-
-      try {
-        results[index] = {
-          status: 'fulfilled',
-          value: await worker(items[index] as T, index),
-        }
-      } catch (error) {
-        results[index] = {
-          status: 'rejected',
-          reason: error,
-        }
-      }
-    }
-  }))
-
-  return results
 }
 
 export function getErrorToastMessage(message: string): string {
@@ -1782,6 +1748,32 @@ function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number, profile?
   openAIWatchdogTimers.set(taskId, timer)
 }
 
+function usesConcurrentOpenAIImageRequests(profile: ApiProfile, params: TaskParams) {
+  const n = params.n > 0 ? params.n : 1
+  if (profile.provider !== 'openai' || n <= 1) return false
+  if (profile.apiMode === 'responses') return true
+  return profile.apiMode === 'images' && (profile.codexCli || profile.streamImages)
+}
+
+export function taskHasOutputErrors(task: Pick<TaskRecord, 'outputErrors'>) {
+  return Boolean(task.outputErrors?.length)
+}
+
+export function taskMatchesFilterStatus(task: TaskRecord, filterStatus: AppState['filterStatus']) {
+  if (filterStatus === 'all') return true
+  if (filterStatus === 'error') return task.status === 'error' || taskHasOutputErrors(task)
+  return task.status === filterStatus
+}
+
+export function taskMatchesSearchQuery(task: TaskRecord, query: string) {
+  const q = query.trim().toLowerCase()
+  if (!q) return true
+  const prompt = (task.prompt || '').toLowerCase()
+  const paramStr = JSON.stringify(task.params).toLowerCase()
+  const errorStr = [task.error, ...(task.outputErrors ?? []).map((item) => item.error)].filter(Boolean).join('\n').toLowerCase()
+  return prompt.includes(q) || paramStr.includes(q) || errorStr.includes(q)
+}
+
 export function showCodexCliPrompt(force = false, reason = '接口返回的提示词已被改写') {
   const state = useStore.getState()
   const settings = state.settings
@@ -2442,6 +2434,36 @@ function markAgentRoundTasksStopped(conversationId: string, roundId: string, now
   return runningTasks.length > 0
 }
 
+function markAgentRoundTasksFailed(
+  conversationId: string,
+  roundId: string,
+  error: string,
+  rawResponsePayload?: string,
+  shouldFailTask: (task: TaskRecord) => boolean = () => true,
+  now = Date.now(),
+) {
+  const runningTasks = useStore.getState().tasks.filter((task) =>
+    task.status === 'running' &&
+    task.agentConversationId === conversationId &&
+    task.agentRoundId === roundId &&
+    shouldFailTask(task),
+  )
+
+  for (const task of runningTasks) {
+    useStore.getState().setTaskStreamPreview(task.id)
+    updateTaskInStore(task.id, {
+      status: 'error',
+      error,
+      ...(rawResponsePayload ? { rawResponsePayload } : {}),
+      falRecoverable: false,
+      customRecoverable: false,
+      finishedAt: now,
+      elapsed: Math.max(0, now - task.createdAt),
+    })
+  }
+  return runningTasks.length > 0
+}
+
 function markAgentRoundStopped(conversationId: string, roundId: string) {
   const now = Date.now()
   const stoppedTasks = markAgentRoundTasksStopped(conversationId, roundId, now)
@@ -2845,57 +2867,33 @@ async function createAgentGeneratedImagesInputItem(round: AgentRound, tasks: Tas
   return { role: 'user', content: contentParts }
 }
 
-function createAgentBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[], batchTaskIds: string[]) {
-  const refs = collectAgentGeneratedImageRefsForTaskIds(round, tasks, batchTaskIds)
-  if (refs.length === 0) return null
-  return {
-    role: 'user',
-    content: [{
-      type: 'input_text',
-      text: [
-        '[System] Batch image outputs were saved. Use these refs if a later image prompt needs them:',
-        ...refs.map((ref) => ref.refTag),
-      ].join('\n'),
-    }],
-  }
-}
-
-function getApiDiagnosticsPatch(err: unknown): Pick<Partial<TaskRecord>, 'apiDiagnostics'> {
-  const apiDiagnostics = extractApiDiagnosticsFromError(err)
-  return apiDiagnostics ? { apiDiagnostics } : {}
-}
-
-function collectAgentGeneratedImageRefsForTaskIds(round: AgentRound, tasks: TaskRecord[], taskIds: string[]) {
-  const targetTaskIds = new Set(taskIds)
-  const orderedTaskIds = [...round.outputTaskIds]
-  for (const taskId of taskIds) {
-    if (!orderedTaskIds.includes(taskId)) orderedTaskIds.push(taskId)
-  }
-
-  const refs: Array<{ taskId: string; imageId: string; refId: string; refTag: string }> = []
-  let imageIndex = 0
-  for (const taskId of orderedTaskIds) {
+async function createAgentBatchImagesInputItem(round: AgentRound, tasks: TaskRecord[], batchTaskIds: string[]) {
+  const contentParts: Array<{ type: string; text?: string; image_url?: string }> = []
+  // Count existing images in the round to compute correct imageIndex offset
+  let baseImageIndex = 0
+  for (const taskId of round.outputTaskIds) {
+    if (batchTaskIds.includes(taskId)) break
     const task = tasks.find((item) => item.id === taskId)
-    if (!task) {
-      imageIndex += 1
-      continue
-    }
-    for (const imageId of task.outputImages) {
+    baseImageIndex += task ? task.outputImages.length : 1
+  }
+  let imageIndex = baseImageIndex
+  for (const taskId of batchTaskIds) {
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task || task.status !== 'done') continue
+    for (const imgId of task.outputImages) {
+      const dataUrl = await ensureImageCached(imgId)
+      if (dataUrl) {
+        contentParts.push({ type: 'input_image', image_url: dataUrl })
+      }
       const refId = getAgentGeneratedImageReferenceId(round, imageIndex)
       const prompt = truncateAgentReferencePrompt(task.prompt || '')
       const promptAttribute = prompt ? ` prompt="${escapeXmlAttribute(prompt)}"` : ''
-      if (targetTaskIds.has(taskId)) {
-        refs.push({
-          taskId,
-          imageId,
-          refId,
-          refTag: `<ref id="${refId}"${promptAttribute} />`,
-        })
-      }
+      contentParts.push({ type: 'input_text', text: `<ref id="${refId}"${promptAttribute} />` })
       imageIndex += 1
     }
   }
-  return refs
+  if (contentParts.length === 0) return null
+  return { role: 'user', content: contentParts }
 }
 
 function escapeXmlAttribute(value: string) {
@@ -2909,53 +2907,6 @@ function escapeXmlAttribute(value: string) {
 function truncateAgentReferencePrompt(prompt: string) {
   const normalized = prompt.replace(/\s+/g, ' ').trim()
   return normalized.length > 1200 ? `${normalized.slice(0, 1200)}...` : normalized
-}
-
-function parseRequestedAgentBatchImageCount(prompt: string): number | null {
-  if (!/(?:独立|分别|单独|依次|不要四宫格|不是四宫格|不要拼|不是拼图|不要合并|不要.*总图|separate|independent|not a collage|no collage|do not.*collage)/i.test(prompt)) {
-    return null
-  }
-
-  const arabicMatch = prompt.match(/(?:\b([2-9])\s*(?:images?|pictures?|pics?)\b|([2-9])\s*张)/i)
-  const arabicCount = Number(arabicMatch?.[1] ?? arabicMatch?.[2])
-  if (Number.isInteger(arabicCount) && arabicCount >= 2) return arabicCount
-
-  const chineseMatch = prompt.match(/([两二三四五六七八九十]+)张/)
-  const chineseCount = chineseMatch ? parseSmallChineseNumber(chineseMatch[1]) : null
-  return chineseCount && chineseCount >= 2 ? chineseCount : null
-}
-
-function parseSmallChineseNumber(value: string): number | null {
-  const digits: Record<string, number> = {
-    两: 2,
-    二: 2,
-    三: 3,
-    四: 4,
-    五: 5,
-    六: 6,
-    七: 7,
-    八: 8,
-    九: 9,
-  }
-  if (value === '十') return 10
-  if (value.endsWith('十') && value.length === 2) {
-    const tens = digits[value[0]]
-    return tens ? tens * 10 : null
-  }
-  if (value.startsWith('十') && value.length === 2) {
-    const ones = digits[value[1]]
-    return ones ? 10 + ones : null
-  }
-  if (value.includes('十') && value.length === 3) {
-    const tens = digits[value[0]]
-    const ones = digits[value[2]]
-    return tens && ones ? tens * 10 + ones : null
-  }
-  return digits[value] ?? null
-}
-
-function countAgentRoundOutputImages(round: AgentRound, tasks: TaskRecord[]) {
-  return collectAgentRoundOutputImageSlots(round, tasks).filter(Boolean).length
 }
 
 function createAgentAssistantFallbackItem(text: string) {
@@ -3117,23 +3068,13 @@ function countResponseToolCalls(output: ResponsesOutputItem[]) {
   return output.filter((item) => item.type === 'image_generation_call').length
 }
 
-function createAgentContinuationInputItem(
-  newImageRefs: string[],
-  toolCallsUsed: number,
-  maxToolCalls: number,
-  batchProgress?: { requested: number; completed: number },
-) {
+function createAgentContinuationInputItem(newImageRefs: string[], toolCallsUsed: number, maxToolCalls: number) {
   const lines = [
     '[System] The app has saved your generated outputs and is continuing the same Agent turn.',
   ]
   if (newImageRefs.length > 0) {
     lines.push(
       `The following image ref ids are now available for you to reference in subsequent image_generation prompts: ${newImageRefs.join(', ')}`,
-    )
-  }
-  if (batchProgress && batchProgress.completed < batchProgress.requested) {
-    lines.push(
-      `The user requested ${batchProgress.requested} separate images, but only ${batchProgress.completed} are saved so far. Call generate_image_batch for the remaining ${batchProgress.requested - batchProgress.completed} image(s).`,
     )
   }
   lines.push(
@@ -3150,20 +3091,12 @@ function createAgentContinuationInputItem(
   }
 }
 
-function buildAgentContinuationInput(
-  baseInput: unknown[],
-  round: AgentRound,
-  tasks: TaskRecord[],
-  currentRoundOutput: ResponsesOutputItem[],
-  toolCallsUsed: number,
-  maxToolCalls: number,
-  batchProgress?: { requested: number; completed: number },
-) {
+function buildAgentContinuationInput(baseInput: unknown[], round: AgentRound, tasks: TaskRecord[], currentRoundOutput: ResponsesOutputItem[], toolCallsUsed: number, maxToolCalls: number) {
   const input = [...baseInput, ...sanitizeResponseOutputForInput(currentRoundOutput, { allowPendingFunctionCalls: true })]
   const newImageRefs = collectAgentRoundOutputImageSlots(round, tasks)
     .map((imageId, index) => imageId ? `<ref id="${getAgentGeneratedImageReferenceId(round, index)}" />` : null)
     .filter((ref): ref is string => Boolean(ref))
-  input.push(createAgentContinuationInputItem(newImageRefs, toolCallsUsed, maxToolCalls, batchProgress))
+  input.push(createAgentContinuationInputItem(newImageRefs, toolCallsUsed, maxToolCalls))
   return input
 }
 
@@ -3612,19 +3545,22 @@ async function executeAgentRound(
       return taskId
     }
 
-    const failAgentImageTask = async (toolCallId: string, error: string) => {
-      const taskId = await ensureStreamingAgentTask(toolCallId)
+    const failAgentImageTask = (toolCallId: string, error: string, rawResponsePayload?: string) => {
+      const taskId = taskIdByToolCallId.get(toolCallId)
+      if (!taskId) return
       const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
-      if (!latestTask || latestTask.status === 'done') return taskId
+      if (!latestTask || latestTask.status !== 'running') return
 
+      useStore.getState().setTaskStreamPreview(taskId)
       updateTaskInStore(taskId, {
         status: 'error',
         error,
+        rawResponsePayload,
+        falRecoverable: false,
+        customRecoverable: false,
         finishedAt: Date.now(),
-        elapsed: Date.now() - (latestTask.createdAt ?? startedAt),
+        elapsed: Date.now() - latestTask.createdAt,
       })
-      useStore.getState().setTaskStreamPreview(taskId)
-      return taskId
     }
 
     if (shouldStreamAssistantMessage) {
@@ -3719,7 +3655,9 @@ async function executeAgentRound(
         batchExecutionItems.push({ item, batchToolCallId, references, referenceIds })
       }
 
-      const batchResults = await runLimitedSettledQueue(batchExecutionItems, AGENT_BATCH_IMAGE_CONCURRENCY, async ({ item, batchToolCallId, references, referenceIds }) => {
+      // Fire all batch items concurrently after all cards are visible.
+      const batchPromises = batchExecutionItems.map(async ({ item, batchToolCallId, references, referenceIds }) => {
+
         const batchResult = await callBatchImageSingle({
           profile: activeProfile,
           params,
@@ -3756,49 +3694,35 @@ async function executeAgentRound(
         // If not streaming and we have an image, complete the pre-created task.
         if (batchResult.image && !shouldStreamAssistantMessage) {
           await completeAgentImageTask({ ...batchResult.image, toolCallId: batchToolCallId }, batchResult.rawResponsePayload)
-        } else if (batchResult.error) {
-          await failAgentImageTask(batchToolCallId, batchResult.error)
         }
 
         return batchResult
       })
 
-      // Build function_call_output with lightweight refs instead of full image data.
-      const latestConversationForRefs = useStore.getState().agentConversations.find((item) => item.id === conversationId)
-      const latestRoundForRefs = latestConversationForRefs?.rounds.find((item) => item.id === roundId) ?? round
-      const batchTaskIds = batchExecutionItems
-        .map((item) => taskIdByToolCallId.get(item.batchToolCallId))
-        .filter((taskId): taskId is string => Boolean(taskId))
-      const refsByTaskId = collectAgentGeneratedImageRefsForTaskIds(latestRoundForRefs, useStore.getState().tasks, batchTaskIds)
-        .reduce((map, ref) => {
-          const list = map.get(ref.taskId) ?? []
-          list.push(ref)
-          map.set(ref.taskId, list)
-          return map
-        }, new Map<string, Array<{ refId: string; refTag: string }>>())
-      const outputImages: Array<{ id: string; status: string; error?: string; ref_id?: string; ref?: string }> = []
+      const batchResults = await Promise.allSettled(batchPromises)
+
+      // Build function_call_output
+      const outputImages: Array<{ id: string; status: string; error?: string }> = []
       for (let i = 0; i < batchItems.length; i++) {
         const settled = batchResults[i]
         const batchItem = batchItems[i]
-        const taskId = taskIdByToolCallId.get(batchExecutionItems[i]?.batchToolCallId ?? '')
-        const ref = taskId ? refsByTaskId.get(taskId)?.shift() : null
         if (settled.status === 'fulfilled') {
           const r = settled.value
+          if (!r.image) {
+            failAgentImageTask(batchExecutionItems[i].batchToolCallId, r.error ?? '接口未返回图片数据', r.rawResponsePayload)
+          }
           outputImages.push({
             id: r.batchItemId,
             status: r.image ? 'done' : 'error',
-            ...(r.image && ref ? { ref_id: ref.refId, ref: ref.refTag } : {}),
             ...(r.error ? { error: r.error } : {}),
           })
         } else {
-          await failAgentImageTask(
-            batchExecutionItems[i]?.batchToolCallId ?? genId(),
-            settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
-          )
+          const error = settled.reason instanceof Error ? settled.reason.message : String(settled.reason)
+          failAgentImageTask(batchExecutionItems[i].batchToolCallId, error)
           outputImages.push({
             id: batchItem.id,
             status: 'error',
-            error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
+            error,
           })
         }
       }
@@ -3863,6 +3787,14 @@ async function executeAgentRound(
           ? async (image) => {
               if (controller.signal.aborted) return
               await completeAgentImageTask(image)
+            }
+          : undefined,
+        onImageToolFailed: shouldStreamAssistantMessage
+          ? async ({ toolCallId, error }) => {
+              if (controller.signal.aborted) return
+              await ensureStreamingAgentTask(toolCallId)
+              if (controller.signal.aborted) return
+              failAgentImageTask(toolCallId, error)
             }
           : undefined,
       })
@@ -4011,13 +3943,6 @@ async function executeAgentRound(
       const latestRound = latestConversation?.rounds.find((item) => item.id === roundId)
       if (!latestRound) break
 
-      const requestedBatchImageCount = parseRequestedAgentBatchImageCount(round.prompt || userMessage.content)
-      const completedBatchImageCount = countAgentRoundOutputImages(latestRound, useStore.getState().tasks)
-      if (batchFunctionCalls.length > 0 && continueFunctionCalls.length === 0) {
-        accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
-        if (!requestedBatchImageCount || completedBatchImageCount >= requestedBatchImageCount) break
-      }
-
       const continuationBase = buildAgentContinuationInput(
         apiInput,
         latestRound,
@@ -4025,19 +3950,24 @@ async function executeAgentRound(
         accumulatedOutputItems,
         toolCallsUsed,
         maxToolCalls,
-        requestedBatchImageCount
-          ? { requested: requestedBatchImageCount, completed: completedBatchImageCount }
-          : undefined,
       )
       // Insert function_call_output items before the continuation system message
       continuationBase.splice(continuationBase.length - 1, 0, ...functionCallOutputs)
-      // Report batch-generated refs without sending full image data back into the continuation request.
-      const batchImagesItem = createAgentBatchImagesInputItem(latestRound, useStore.getState().tasks, streamingTaskIds)
+      // Inject batch-generated images as input_image user message for model visibility
+      const batchImagesItem = await createAgentBatchImagesInputItem(latestRound, useStore.getState().tasks, streamingTaskIds)
       if (batchImagesItem) continuationBase.splice(continuationBase.length - 1, 0, batchImagesItem)
       apiInputForTurn = continuationBase
       accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
       pendingToolTextSeparator = true
     }
+
+    markAgentRoundTasksFailed(
+      conversationId,
+      roundId,
+      '内置 image_generation 工具未返回图片',
+      undefined,
+      (task) => Boolean(task.agentToolCallId && !task.agentBatchCallId),
+    )
 
     const taskIds: string[] = [...streamingTaskIds]
     const outputIds = taskIds.flatMap((taskId) => useStore.getState().tasks.find((task) => task.id === taskId)?.outputImages ?? [])
@@ -4098,6 +4028,8 @@ async function executeAgentRound(
     if (networkErrorHint && !message.includes(IMAGE_FETCH_CORS_HINT)) {
       message += `\n${networkErrorHint}`
     }
+
+    markAgentRoundTasksFailed(conversationId, roundId, message, getRawErrorPayload(err).rawResponsePayload)
 
     updateAgentConversation(conversationId, (current) => {
       const failedRound = current.rounds.find((round) => round.id === roundId)
@@ -4169,7 +4101,11 @@ async function executeTask(taskId: string) {
     ? { taskId: task.customTaskId }
     : null
 
-  if (taskProvider !== 'fal' && !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0)) {
+  if (
+    taskProvider !== 'fal' &&
+    !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&
+    !usesConcurrentOpenAIImageRequests(activeProfile, task.params)
+  ) {
     scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)
   }
 
@@ -4268,6 +4204,7 @@ async function executeTask(taskId: string) {
     updateTaskInStore(taskId, {
       outputImages: outputIds,
       transparentOriginalImages: transparentOriginalImageIds,
+      outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       streamPartialImageIds: undefined,
       rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
       actualParams,
@@ -4281,8 +4218,12 @@ async function executeTask(taskId: string) {
     })
     void deleteUnreferencedImageIds(partialImageIdsToClean)
 
-    useStore.getState().showToast(`生成完成，共 ${outputIds.length} 张图片`, 'success')
-    if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `生成完成，共 ${outputIds.length} 张图片。`)
+    const failedCount = result.failedRequests?.length ?? 0
+    const completionMessage = failedCount > 0
+      ? `生成完成：成功 ${outputIds.length} 张，失败 ${failedCount} 张`
+      : `生成完成，共 ${outputIds.length} 张图片`
+    useStore.getState().showToast(completionMessage, failedCount > 0 ? 'error' : 'success')
+    if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
     const currentMask = useStore.getState().maskDraft
     if (
       maskDataUrl &&
@@ -4323,7 +4264,7 @@ async function executeTask(taskId: string) {
       })
       scheduleCustomRecovery(taskId)
     } else {
-      let errorMessage = stripApiDiagnosticsFromMessage(err instanceof Error ? err.message : String(err))
+      let errorMessage = err instanceof Error ? err.message : String(err)
       const settings = useStore.getState().settings
       const profile = getTaskApiProfile(settings, latestTask)
       const usesApiProxy = profile?.apiProxy ?? settings.apiProxy
@@ -4341,7 +4282,6 @@ async function executeTask(taskId: string) {
       updateTaskInStore(taskId, {
         status: 'error',
         error: errorMessage,
-        ...getApiDiagnosticsPatch(err),
         ...getRawErrorPayload(err),
         falRecoverable: false,
         customRecoverable: false,
@@ -4719,12 +4659,27 @@ export async function removeMultipleTasks(taskIds: string[]) {
 /** 删除所有失败任务 */
 export async function clearFailedTasks(taskIds?: string[]) {
   const targetTaskIds = taskIds ? new Set(taskIds) : null
-  const failedTaskIds = useStore.getState().tasks
-    .filter((task) => task.status === 'error' && (!targetTaskIds || targetTaskIds.has(task.id)))
+  const failedTasks = useStore.getState().tasks
+    .filter((task) => taskMatchesFilterStatus(task, 'error') && (!targetTaskIds || targetTaskIds.has(task.id)))
+  const failedTaskIds = failedTasks
+    .filter((task) => task.status === 'error')
     .map((task) => task.id)
+  const partialFailedTaskIds = new Set(
+    failedTasks
+      .filter((task) => task.status !== 'error' && taskHasOutputErrors(task))
+      .map((task) => task.id),
+  )
 
-  if (!failedTaskIds.length) return
-  await removeMultipleTasks(failedTaskIds)
+  if (failedTaskIds.length) await removeMultipleTasks(failedTaskIds)
+  if (partialFailedTaskIds.size) {
+    const { tasks, setTasks, selectedTaskIds, setSelectedTaskIds, showToast } = useStore.getState()
+    const updated = tasks.map((task) => partialFailedTaskIds.has(task.id) ? { ...task, outputErrors: undefined } : task)
+    setTasks(updated)
+    const nextSelectedTaskIds = selectedTaskIds.filter((id) => !partialFailedTaskIds.has(id))
+    if (nextSelectedTaskIds.length !== selectedTaskIds.length) setSelectedTaskIds(nextSelectedTaskIds)
+    await Promise.all(updated.filter((task) => partialFailedTaskIds.has(task.id)).map((task) => putTask(task)))
+    showToast(`已清除 ${partialFailedTaskIds.size} 条部分失败记录`, 'success')
+  }
 }
 
 /** 删除单条任务 */

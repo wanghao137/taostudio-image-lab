@@ -5,7 +5,6 @@ import { formatImageRatio } from '../lib/size'
 import { getParamDisplay, ActualValueBadge } from '../lib/paramDisplay'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_FAL_MODEL } from '../lib/apiProfiles'
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
-import { formatApiDiagnosticsSummary } from '../lib/apiDiagnostics'
 import { CodeIcon, TransparentBgIcon } from './icons'
 import ViewportTooltip from './ViewportTooltip'
 
@@ -318,9 +317,10 @@ export default function TaskCard({
   const isAgentTask = task.sourceMode === 'agent' || Boolean(task.agentConversationId || task.agentRoundId)
   const showPendingPrompt = isAgentTaskPromptPending(task)
   const showN = !isAgentTask && (task.params.n > 1 || nDisplay.isMismatch)
-  const apiDiagnosticRows = task.apiDiagnostics ? formatApiDiagnosticsSummary(task.apiDiagnostics) : []
-  const apiStatus = task.apiDiagnostics?.status
-  const apiNetwork = apiDiagnosticRows.find((row) => row.label === '网络路径')?.value
+  const outputErrorCount = task.outputErrors?.length ?? 0
+  const outputSuccessCount = task.outputImages?.length ?? 0
+  const requestedOutputCount = Math.max(task.params.n, outputSuccessCount + outputErrorCount)
+  const hasPartialOutputFailure = task.status === 'done' && outputErrorCount > 0
 
   const defaultModelForProvider = task.apiProvider === 'fal' ? DEFAULT_FAL_MODEL : DEFAULT_IMAGES_MODEL
   const showModel = task.apiModel && task.apiModel !== defaultModelForProvider
@@ -491,9 +491,9 @@ export default function TaskCard({
                 loading="lazy"
                 alt=""
               />
-              {task.outputImages.length > 1 && (
+              {(hasPartialOutputFailure || task.outputImages.length > 1) && (
                 <span className="absolute bottom-1 right-1 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded">
-                  {task.outputImages.length}
+                  {hasPartialOutputFailure ? <>{requestedOutputCount} | <span className="font-semibold text-yellow-300">{outputSuccessCount}</span></> : task.outputImages.length}
                 </span>
               )}
             </>
@@ -569,16 +569,6 @@ export default function TaskCard({
                   <span className="truncate max-w-[8rem]">
                     {task.apiProfileName || task.apiProvider}
                   </span>
-                </span>
-              )}
-              {task.apiDiagnostics && (
-                <span
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-300 text-xs flex-shrink-0"
-                  title={apiDiagnosticRows.map((row) => `${row.label}: ${row.value}`).join('\n')}
-                >
-                  <CodeIcon className="w-3 h-3 flex-shrink-0 text-red-400" />
-                  <span>{typeof apiStatus === 'number' ? `API ${apiStatus}` : 'API 诊断'}</span>
-                  {apiNetwork && <span className="text-red-400 dark:text-red-300/70">{apiNetwork}</span>}
                 </span>
               )}
               {/* Model */}

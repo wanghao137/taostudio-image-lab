@@ -16,6 +16,8 @@ const buildId = process.env.VERCEL_GIT_COMMIT_SHA ||
   `${pkg.version}-${Date.now()}`
 
 function loadDevProxyConfig() {
+  if (process.env.VITEST) return null
+
   try {
     return normalizeDevProxyConfig(
       JSON.parse(readFileSync('./dev-proxy.config.json', 'utf-8')) as unknown,
@@ -109,6 +111,12 @@ function writeJson(res: ServerResponse, statusCode: number, payload: unknown): v
   res.end(JSON.stringify(payload))
 }
 
+function writeNoUpdate(res: ServerResponse): void {
+  res.statusCode = 204
+  res.setHeader('Cache-Control', 'no-store')
+  res.end()
+}
+
 async function sendUpstreamResponse(upstreamResponse: Response, res: ServerResponse): Promise<void> {
   res.statusCode = upstreamResponse.status
   upstreamResponse.headers.forEach((value, name) => {
@@ -182,6 +190,46 @@ function createDevApiProxyPlugin(devProxyConfig: DevProxyConfig): Plugin {
   }
 }
 
+function createDevUpstreamReleasePlugin(): Plugin {
+  return {
+    name: 'taostudio-dev-upstream-release',
+    configureServer(server) {
+      server.middlewares.use('/api/upstream-release', async (req, res) => {
+        if (req.method !== 'GET') {
+          res.statusCode = 405
+          res.setHeader('Allow', 'GET')
+          res.end()
+          return
+        }
+
+        try {
+          const upstream = await fetch('https://api.github.com/repos/CookSleep/gpt_image_playground/releases/latest', {
+            headers: {
+              Accept: 'application/vnd.github.v3+json',
+              'User-Agent': 'taostudio-image-lab-version-check',
+            },
+          })
+
+          if (!upstream.ok) {
+            writeNoUpdate(res)
+            return
+          }
+
+          const payload = await upstream.json() as { tag_name?: unknown; html_url?: unknown }
+          writeJson(res, 200, {
+            tag_name: typeof payload.tag_name === 'string' ? payload.tag_name : '',
+            html_url: typeof payload.html_url === 'string'
+              ? payload.html_url
+              : 'https://github.com/CookSleep/gpt_image_playground/releases/latest',
+          })
+        } catch {
+          writeNoUpdate(res)
+        }
+      })
+    },
+  }
+}
+
 export default defineConfig(({ command }) => {
   const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
 
@@ -189,6 +237,7 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       ...(devProxyConfig?.enabled ? [createDevApiProxyPlugin(devProxyConfig)] : []),
+      ...(command === 'serve' ? [createDevUpstreamReleasePlugin()] : []),
     ],
     base: './',
     define: {
