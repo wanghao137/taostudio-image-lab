@@ -96,10 +96,10 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
       if (!triggerRef.current) return
       const trigger = triggerRef.current
       const rect = trigger.getBoundingClientRect()
-
+      
       let availableBelow = window.innerHeight - rect.bottom - 8
       let availableAbove = rect.top - 8
-
+      
       let parent = trigger.parentElement
       while (parent && parent !== document.body) {
         const style = window.getComputedStyle(parent)
@@ -110,10 +110,10 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
         }
         parent = parent.parentElement
       }
-
+      
       let newPlacement: 'bottom' | 'top' = 'bottom'
       let maxHeight = DEFAULT_DROPDOWN_MAX_HEIGHT
-
+      
       if (availableBelow < 120 && availableAbove > availableBelow) {
         newPlacement = 'top'
         maxHeight = Math.min(DEFAULT_DROPDOWN_MAX_HEIGHT, Math.floor(availableAbove))
@@ -121,7 +121,7 @@ export default function Select({ value, onChange, onReorder, options, disabled, 
         newPlacement = 'bottom'
         maxHeight = Math.min(DEFAULT_DROPDOWN_MAX_HEIGHT, Math.floor(availableBelow))
       }
-
+      
       setPlacement(newPlacement)
       setMenuMaxHeight(Math.max(0, maxHeight))
     }

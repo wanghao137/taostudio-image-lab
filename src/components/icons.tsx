@@ -216,3 +216,4 @@ export function TransparentBgIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   )
 }
+

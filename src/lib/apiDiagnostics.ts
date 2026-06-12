@@ -1,4 +1,27 @@
-import type { ApiRequestDiagnostics } from '../types'
+import type { ApiMode } from '../types'
+
+export interface ApiRequestDiagnostics {
+  endpoint: string
+  apiMode: ApiMode | 'custom'
+  method: string
+  bodyKind: 'json' | 'multipart'
+  proxy: boolean
+  urlHost?: string
+  model: string
+  timeout: number
+  size?: string
+  outputFormat?: string
+  responseFormat?: string
+  stream?: boolean
+  inputImageCount?: number
+  hasMask?: boolean
+  attempts: number
+  elapsedMs: number
+  retryable: boolean
+  status?: number
+  errorName?: string
+  errorMessage?: string
+}
 
 const API_DIAGNOSTICS_MARKER = 'API request diagnostics:'
 

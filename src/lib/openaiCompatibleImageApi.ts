@@ -493,55 +493,7 @@ async function callImagesApi(opts: CallApiOptions, profile: ApiProfile): Promise
     return callImagesApiConcurrent(opts, profile, n)
   }
 
-  const result = await callImagesApiSingle(opts, profile)
-  if (n <= 1 || result.images.length >= n) return result
-
-  const missingCount = n - result.images.length
-  try {
-    const remaining = await callImagesApiConcurrent({
-      ...opts,
-      params: {
-        ...opts.params,
-        n: missingCount,
-      },
-    }, profile, missingCount)
-
-    const images = [...result.images, ...remaining.images]
-    const actualParamsList = [
-      ...(result.actualParamsList?.length ? result.actualParamsList : result.images.map(() => result.actualParams)),
-      ...(remaining.actualParamsList?.length ? remaining.actualParamsList : remaining.images.map(() => remaining.actualParams)),
-    ]
-    const revisedPrompts = [
-      ...(result.revisedPrompts?.length ? result.revisedPrompts : result.images.map(() => undefined)),
-      ...(remaining.revisedPrompts?.length ? remaining.revisedPrompts : remaining.images.map(() => undefined)),
-    ]
-    const rawImageUrls = [...(result.rawImageUrls ?? []), ...(remaining.rawImageUrls ?? [])]
-    const failedRequests = [
-      ...(result.failedRequests ?? []),
-      ...(remaining.failedRequests ?? []).map((request) => ({
-        ...request,
-        requestIndex: request.requestIndex + result.images.length,
-      })),
-    ]
-    const actualParams = mergeActualParams(
-      result.actualParams ?? {},
-      { n: images.length },
-    )
-
-    return {
-      images,
-      actualParams,
-      actualParamsList,
-      revisedPrompts,
-      ...(rawImageUrls.length ? { rawImageUrls } : {}),
-      ...(failedRequests.length ? { failedRequests } : {}),
-    }
-  } catch {
-    return {
-      ...result,
-      actualParams: mergeActualParams(result.actualParams ?? {}, { n: result.images.length }),
-    }
-  }
+  return callImagesApiSingle(opts, profile)
 }
 
 async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile, n: number): Promise<CallApiResult> {

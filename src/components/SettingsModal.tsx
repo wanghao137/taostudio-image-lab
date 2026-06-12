@@ -577,6 +577,7 @@ export default function SettingsModal() {
       url.searchParams.set('apiMode', profile.apiMode)
       const model = profile.model.trim() || getDefaultModelForMode(profile.apiMode)
       url.searchParams.set('model', !options.includeApiKey && options.useNewApiModel ? '{model}' : model)
+      if (profile.name.trim()) url.searchParams.set('profileName', profile.name.trim())
       if (profile.codexCli) url.searchParams.set('codexCli', 'true')
       if (profile.streamImages !== DEFAULT_SETTINGS.streamImages) url.searchParams.set('streamImages', String(Boolean(profile.streamImages)))
       if (profile.streamPartialImages !== DEFAULT_STREAM_PARTIAL_IMAGES) url.searchParams.set('streamPartialImages', String(normalizeStreamPartialImages(profile.streamPartialImages)))
@@ -2066,7 +2067,7 @@ export default function SettingsModal() {
                     @CookSleep
                   </p>
                 </a>
-
+                
                 <p className="mt-8 mb-6 max-w-[360px] text-center text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
                   本项目的成长离不开每一位用户的使用、反馈、贡献与支持，感谢一路有你。
                 </p>

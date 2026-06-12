@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ApiRequestDiagnostics } from '../types'
+import type { ApiRequestDiagnostics } from './apiDiagnostics'
 import { extractApiDiagnosticsFromError, formatApiDiagnosticsSummary, stripApiDiagnosticsFromMessage } from './apiDiagnostics'
 
 describe('api diagnostics helpers', () => {
