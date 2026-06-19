@@ -15,6 +15,7 @@
     ".env.local",
     ".omx",
     ".upstream",
+    "AGENTS.md",
     "api/upstream-release.js",
     "README.md",
     "design-qa.md",
