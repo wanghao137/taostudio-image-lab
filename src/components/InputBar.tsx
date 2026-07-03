@@ -1,11 +1,12 @@
 import { lazy, Suspense, useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ALL_FAVORITES_COLLECTION_ID, deleteFavoriteCollection, getTaskFavoriteCollectionIds, useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFromFile, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks, getCachedImage, ensureImageCached, getActiveAgentRounds } from '../store'
-import { DEFAULT_PARAMS, type TaskParams, type TaskRecord } from '../types'
+import { DEFAULT_PARAMS, type TaskRecord } from '../types'
 import { getActiveApiProfile, normalizeSettings } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
-import { normalizeImageSize } from '../lib/size'
+import { normalizeImageSize, type CommonImageRatio } from '../lib/size'
+import { ASSET_4K_RATIO_PRESETS, createAsset4KRatioPresetParams, getAsset4KRatioSize, isAsset4KRatioPresetActive } from '../lib/asset4kPresets'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { getSafeBoundingClientRect } from '../lib/domRect'
@@ -18,15 +19,6 @@ import ViewportTooltip from './ViewportTooltip'
 import { CloseIcon } from './icons'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
-const ASSET_4K_PORTRAIT_PRESET: Partial<TaskParams> = {
-  size: '2160x3840',
-  exact_size: true,
-  quality: 'high',
-  output_format: 'png',
-  output_compression: null,
-  transparent_output: false,
-  n: 1,
-}
 
 function getMentionTagTextLength(el: Element) {
   return el.textContent?.length ?? 0
@@ -824,12 +816,10 @@ export default function InputBar() {
   const generationStrategyItems = exactSizeEnabled
     ? [...baseGenerationStrategyItems, '精确尺寸']
     : baseGenerationStrategyItems
-  const asset4KPortraitActive = params.size === ASSET_4K_PORTRAIT_PRESET.size &&
-    params.exact_size &&
-    params.quality === ASSET_4K_PORTRAIT_PRESET.quality &&
-    params.output_format === ASSET_4K_PORTRAIT_PRESET.output_format &&
-    params.output_compression === null &&
-    params.n === ASSET_4K_PORTRAIT_PRESET.n
+  const asset4KPresetN = agentAutoImageCount ? params.n : 1
+  const activeAsset4KRatio = ASSET_4K_RATIO_PRESETS.find((item) =>
+    isAsset4KRatioPresetActive(params, item.value, { codexCli: activeProfile.codexCli, n: asset4KPresetN }),
+  )?.value
 
   const qualityOptions = isFalProvider
     ? [
@@ -1050,17 +1040,18 @@ export default function InputBar() {
     setParams({ n: clampedValue })
   }, [agentAutoImageCount, nInput, nLimitHint, outputImageLimit, params.n, setParams])
 
-  const applyAsset4KPortraitPreset = useCallback(() => {
-    const patch: Partial<TaskParams> = {
-      ...ASSET_4K_PORTRAIT_PRESET,
-      ...(agentAutoImageCount ? { n: params.n } : {}),
-      quality: activeProfile.codexCli ? DEFAULT_PARAMS.quality : 'high',
-    }
+  const applyAsset4KRatioPreset = useCallback((ratio: CommonImageRatio) => {
+    const patch = createAsset4KRatioPresetParams(ratio, {
+      codexCli: activeProfile.codexCli,
+      n: agentAutoImageCount ? params.n : 1,
+    })
+    if (!patch) return
+
     setParams(patch)
     showToast(
       activeProfile.codexCli
-        ? '已切换 4K 竖版 PNG；当前 Codex CLI 配置不支持 high 质量参数'
-        : '已切换 4K 竖版 high PNG',
+        ? `已切换 ${ratio} 4K PNG；当前 Codex CLI 配置不支持 high 质量参数`
+        : `已切换 ${ratio} 4K high PNG`,
       activeProfile.codexCli ? 'info' : 'success',
     )
   }, [activeProfile.codexCli, agentAutoImageCount, params.n, setParams, showToast])
@@ -2221,18 +2212,40 @@ export default function InputBar() {
             {item}
           </span>
         ))}
-        <button
-          type="button"
-          onClick={applyAsset4KPortraitPreset}
-          className={`rounded-full border px-2 py-0.5 font-medium transition ${
-            asset4KPortraitActive
-              ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
-              : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.07]'
-          }`}
-          title="套用 2160x3840、high、PNG、精确尺寸"
-        >
-          4K竖版 high PNG
-        </button>
+        <div className="flex flex-wrap items-center gap-1 rounded-full border border-gray-200 bg-white/80 px-1.5 py-0.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
+          <span className="px-1 text-[10px] font-semibold text-gray-500 dark:text-gray-300">4K high PNG</span>
+          {ASSET_4K_RATIO_PRESETS.map((item) => {
+            const size = getAsset4KRatioSize(item.value)
+            const [ratioW, ratioH] = item.value.split(':').map(Number)
+            const isHorizontal = ratioW > ratioH
+            const isSquare = ratioW === ratioH
+            const active = activeAsset4KRatio === item.value
+            return (
+              <button
+                key={item.value}
+                type="button"
+                onClick={() => applyAsset4KRatioPreset(item.value)}
+                className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 font-medium transition ${
+                  active
+                    ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
+                    : 'border-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-50 dark:text-gray-300 dark:hover:border-white/[0.08] dark:hover:bg-white/[0.07]'
+                }`}
+                title={`套用 ${size ?? '4K'}、${item.label}、high、PNG、精确尺寸`}
+              >
+                <span className="flex h-3 w-3 items-center justify-center">
+                  <span
+                    className="rounded-[2px] border border-current opacity-70"
+                    style={{
+                      width: isHorizontal || isSquare ? '100%' : `${(ratioW / ratioH) * 100}%`,
+                      height: !isHorizontal || isSquare ? '100%' : `${(ratioH / ratioW) * 100}%`,
+                    }}
+                  />
+                </span>
+                <span>{item.label}</span>
+              </button>
+            )
+          })}
+        </div>
       </div>
     </div>
   )

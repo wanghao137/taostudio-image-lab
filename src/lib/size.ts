@@ -7,7 +7,19 @@ const MIN_PIXELS = 655_360
 const MAX_PIXELS = 8_294_400
 
 export type SizeTier = '1K' | '2K' | '4K'
-type PresetRatio = '1:1' | '3:2' | '2:3' | '16:9' | '9:16' | '4:3' | '3:4' | '21:9'
+export const COMMON_IMAGE_RATIOS = [
+  { label: '1:1', value: '1:1' },
+  { label: '3:2', value: '3:2' },
+  { label: '2:3', value: '2:3' },
+  { label: '16:9', value: '16:9' },
+  { label: '9:16', value: '9:16' },
+  { label: '4:3', value: '4:3' },
+  { label: '3:4', value: '3:4' },
+  { label: '21:9', value: '21:9' },
+] as const
+
+export type CommonImageRatio = typeof COMMON_IMAGE_RATIOS[number]['value']
+type PresetRatio = CommonImageRatio
 
 export interface ImageSize {
   width: number
@@ -217,6 +229,9 @@ const COMMON_SIZE_PRESETS: Record<SizeTier, Record<PresetRatio, string>> = {
 
 function getPresetRatioKey(ratioWidth: number, ratioHeight: number): PresetRatio | null {
   if (!Number.isInteger(ratioWidth) || !Number.isInteger(ratioHeight)) return null
+
+  const originalKey = `${ratioWidth}:${ratioHeight}`
+  if (originalKey in COMMON_SIZE_PRESETS['1K']) return originalKey as PresetRatio
 
   const gcd = (a: number, b: number): number => b === 0 ? a : gcd(b, a % b)
   const divisor = gcd(ratioWidth, ratioHeight)
