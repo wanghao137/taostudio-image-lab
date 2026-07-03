@@ -259,6 +259,8 @@ export default defineConfig(({ command }) => {
     },
     server: {
       host: true,
+      port: 9527,
+      strictPort: true,
     },
   }
 })

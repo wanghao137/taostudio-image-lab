@@ -19,12 +19,12 @@ if not exist "dev-proxy.config.json" (
   )
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue) { exit 0 } exit 1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='http://127.0.0.1:9527/'; try { $r=Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 2; if ($r.Content -match 'TaoStudio') { exit 0 } } catch {} exit 1"
 if not errorlevel 1 (
   echo Local server is already running.
-  start "" "http://127.0.0.1:5173/"
+  start "" "http://127.0.0.1:9527/"
   exit /b 0
 )
 
-start "" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$u='http://127.0.0.1:5173/'; for ($i=0; $i -lt 120; $i++) { try { $r=Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 1; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) { Start-Process $u; exit 0 } } catch {} Start-Sleep -Milliseconds 500 }"
+start "" /min powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$u='http://127.0.0.1:9527/'; for ($i=0; $i -lt 120; $i++) { try { $r=Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 1; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500 -and $r.Content -match 'TaoStudio') { Start-Process $u; exit 0 } } catch {} Start-Sleep -Milliseconds 500 }"
 call npm run start:local

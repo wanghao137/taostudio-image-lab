@@ -121,6 +121,7 @@ export interface AppSettings {
 
 export interface TaskParams {
   size: string
+  exact_size: boolean
   quality: 'auto' | 'low' | 'medium' | 'high'
   output_format: 'png' | 'jpeg' | 'webp'
   output_compression: number | null
@@ -131,6 +132,7 @@ export interface TaskParams {
 
 export const DEFAULT_PARAMS: TaskParams = {
   size: 'auto',
+  exact_size: false,
   quality: 'auto',
   output_format: 'png',
   output_compression: null,
@@ -194,6 +196,8 @@ export interface TaskRecord {
   transparentPrompt?: string
   /** 透明背景后处理前的原始输出图片 id，顺序对应 outputImages */
   transparentOriginalImages?: string[]
+  /** 精确尺寸后处理前的原始输出图片 id，顺序对应 outputImages */
+  exactSizeOriginalImages?: string[]
   /** 输入图片的 image store id 列表 */
   inputImageIds: string[]
   maskTargetImageId?: string | null

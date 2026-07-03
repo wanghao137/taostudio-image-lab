@@ -1,7 +1,7 @@
 import { lazy, Suspense, useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ALL_FAVORITES_COLLECTION_ID, deleteFavoriteCollection, getTaskFavoriteCollectionIds, useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFromFile, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks, getCachedImage, ensureImageCached, getActiveAgentRounds } from '../store'
-import { DEFAULT_PARAMS, type TaskRecord } from '../types'
+import { DEFAULT_PARAMS, type TaskParams, type TaskRecord } from '../types'
 import { getActiveApiProfile, normalizeSettings } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
@@ -18,6 +18,15 @@ import ViewportTooltip from './ViewportTooltip'
 import { CloseIcon } from './icons'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
+const ASSET_4K_PORTRAIT_PRESET: Partial<TaskParams> = {
+  size: '2160x3840',
+  exact_size: true,
+  quality: 'high',
+  output_format: 'png',
+  output_compression: null,
+  transparent_output: false,
+  n: 1,
+}
 
 function getMentionTagTextLength(el: Element) {
   return el.textContent?.length ?? 0
@@ -803,13 +812,24 @@ export default function InputBar() {
   const displaySize = isFalTextToImage && params.size === 'auto'
     ? DEFAULT_FAL_IMAGE_SIZE
     : normalizeImageSize(params.size) || DEFAULT_PARAMS.size
-  const generationStrategyItems = isFalProvider
+  const exactSizeDisabled = params.size === 'auto'
+  const exactSizeEnabled = !exactSizeDisabled && params.exact_size
+  const baseGenerationStrategyItems = isFalProvider
     ? ['fal.ai 队列', '自动恢复']
     : [
         activeProfile.apiMode === 'responses' ? 'Responses API' : 'Images API',
         activeProfile.streamImages ? '流式返回' : '同步返回',
         `${activeProfile.timeout}s 超时`,
       ]
+  const generationStrategyItems = exactSizeEnabled
+    ? [...baseGenerationStrategyItems, '精确尺寸']
+    : baseGenerationStrategyItems
+  const asset4KPortraitActive = params.size === ASSET_4K_PORTRAIT_PRESET.size &&
+    params.exact_size &&
+    params.quality === ASSET_4K_PORTRAIT_PRESET.quality &&
+    params.output_format === ASSET_4K_PORTRAIT_PRESET.output_format &&
+    params.output_compression === null &&
+    params.n === ASSET_4K_PORTRAIT_PRESET.n
 
   const qualityOptions = isFalProvider
     ? [
@@ -832,6 +852,7 @@ export default function InputBar() {
   const compressionHint = useHintTooltip({ enabled: () => compressionDisabled })
   const moderationHint = useHintTooltip({ enabled: () => moderationDisabled })
   const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage })
+  const exactSizeHint = useHintTooltip({ enabled: () => exactSizeDisabled })
   const qualityHint = useHintTooltip({ enabled: () => settings.codexCli || isFalProvider })
   const nLimitHint = useHintTooltip({ autoHideMs: 2000 })
   const maskTargetImage = maskDraft
@@ -1028,6 +1049,21 @@ export default function InputBar() {
     setNInput(String(clampedValue))
     setParams({ n: clampedValue })
   }, [agentAutoImageCount, nInput, nLimitHint, outputImageLimit, params.n, setParams])
+
+  const applyAsset4KPortraitPreset = useCallback(() => {
+    const patch: Partial<TaskParams> = {
+      ...ASSET_4K_PORTRAIT_PRESET,
+      ...(agentAutoImageCount ? { n: params.n } : {}),
+      quality: activeProfile.codexCli ? DEFAULT_PARAMS.quality : 'high',
+    }
+    setParams(patch)
+    showToast(
+      activeProfile.codexCli
+        ? '已切换 4K 竖版 PNG；当前 Codex CLI 配置不支持 high 质量参数'
+        : '已切换 4K 竖版 high PNG',
+      activeProfile.codexCli ? 'info' : 'success',
+    )
+  }, [activeProfile.codexCli, agentAutoImageCount, params.n, setParams, showToast])
 
   const showNLimitHint = useCallback(() => {
     nLimitHint.show()
@@ -1960,6 +1996,35 @@ export default function InputBar() {
       </label>
       <label
         className="relative flex flex-col gap-0.5"
+        onMouseEnter={exactSizeHint.show}
+        onMouseLeave={exactSizeHint.hide}
+        onTouchStart={exactSizeHint.startTouch}
+        onTouchEnd={exactSizeHint.clearTimer}
+        onTouchCancel={exactSizeHint.hide}
+        onClick={exactSizeHint.show}
+      >
+        <span className="text-gray-400 dark:text-gray-500 ml-1">精确尺寸</span>
+        <Select
+          value={exactSizeEnabled ? 'on' : 'off'}
+          onChange={(val) => {
+            if (!exactSizeDisabled) setParams({ exact_size: val === 'on' })
+          }}
+          options={[
+            { label: '关', value: 'off' },
+            { label: '开', value: 'on' },
+          ]}
+          disabled={exactSizeDisabled}
+          className={exactSizeDisabled
+            ? 'px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-gray-100/50 dark:bg-white/[0.05] opacity-50 cursor-not-allowed text-xs transition-all duration-200 shadow-sm'
+            : selectClass}
+        />
+        <ButtonTooltip
+          visible={exactSizeDisabled && exactSizeHint.visible}
+          text="auto 尺寸下不执行本地尺寸兜底"
+        />
+      </label>
+      <label
+        className="relative flex flex-col gap-0.5"
         onMouseEnter={qualityHint.show}
         onMouseLeave={qualityHint.hide}
         onTouchStart={qualityHint.startTouch}
@@ -2156,6 +2221,18 @@ export default function InputBar() {
             {item}
           </span>
         ))}
+        <button
+          type="button"
+          onClick={applyAsset4KPortraitPreset}
+          className={`rounded-full border px-2 py-0.5 font-medium transition ${
+            asset4KPortraitActive
+              ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
+              : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.07]'
+          }`}
+          title="套用 2160x3840、high、PNG、精确尺寸"
+        >
+          4K竖版 high PNG
+        </button>
       </div>
     </div>
   )
@@ -2477,7 +2554,7 @@ export default function InputBar() {
             {renderGenerationStrategy()}
             {/* 桌面端布局 */}
             <div className="hidden sm:flex items-end justify-between gap-3">
-              {renderParams('grid-cols-6')}
+              {renderParams('grid-cols-7')}
 
               <div className="flex gap-2 flex-shrink-0 mb-0.5">
                 <div

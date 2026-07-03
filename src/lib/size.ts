@@ -9,6 +9,11 @@ const MAX_PIXELS = 8_294_400
 export type SizeTier = '1K' | '2K' | '4K'
 type PresetRatio = '1:1' | '3:2' | '2:3' | '16:9' | '9:16' | '4:3' | '3:4' | '21:9'
 
+export interface ImageSize {
+  width: number
+  height: number
+}
+
 function roundToMultiple(value: number, multiple: number) {
   return Math.max(multiple, Math.round(value / multiple) * multiple)
 }
@@ -65,6 +70,19 @@ export function normalizeImageSize(size: string) {
 
   const { width, height } = normalizeDimensions(Number(match[1]), Number(match[2]))
   return `${width}x${height}`
+}
+
+export function parseImageSize(size: string): ImageSize | null {
+  const match = size.trim().match(SIZE_PATTERN)
+  if (!match) return null
+
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+
+  return { width, height }
 }
 
 export function parseRatio(ratio: string) {

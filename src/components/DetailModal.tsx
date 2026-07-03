@@ -52,6 +52,7 @@ export default function DetailModal() {
   const retryTooltip = useTooltip()
   const downloadImageTooltip = useTooltip()
   const downloadOriginalImageTooltip = useTooltip()
+  const downloadSourceImageTooltip = useTooltip()
   const downloadAllTooltip = useTooltip()
 
   const clearTextSelection = () => {
@@ -177,6 +178,7 @@ export default function DetailModal() {
   const currentOutputImageIndex = currentOutputSlot?.outputImageIndex ?? -1
   const currentOutputError = currentOutputSlot?.error || ''
   const currentOriginalOutputImageId = currentOutputImageIndex >= 0 ? task?.transparentOriginalImages?.[currentOutputImageIndex] || '' : ''
+  const currentExactSizeSourceImageId = currentOutputImageIndex >= 0 ? task?.exactSizeOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
 
   useEffect(() => {
@@ -267,6 +269,7 @@ export default function DetailModal() {
   const currentStreamPreviewSrc = activeStreamPreviewSrc
   const streamPartialImageIds = task.streamPartialImageIds ?? []
   const isPngOutput = task.params.output_format === 'png'
+  const exactSizeText = task.params.exact_size ? 'true' : 'false'
   const transparentOutputText = task.transparentOutput || task.params.transparent_output ? 'true' : 'false'
   const currentTransparentOutputFailed = Boolean(currentOutputImageId && task.transparentOutput && task.transparentOriginalImages?.[currentOutputImageIndex] === '')
   const outputCompressionText = task.params.output_compression == null ? '未设置' : String(task.params.output_compression)
@@ -380,6 +383,23 @@ export default function DetailModal() {
         showToast('下载失败', 'error')
       } else {
         showToast('原图下载成功', 'success')
+      }
+    } catch (err) {
+      console.error(err)
+      showToast('下载失败', 'error')
+    }
+  }
+
+  const handleDownloadCurrentSourceOutput = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!currentExactSizeSourceImageId || !task) return
+
+    try {
+      const result = await downloadImageIds([currentExactSizeSourceImageId], `task-${task.id}-source`)
+      if (result.successCount === 0) {
+        showToast('下载失败', 'error')
+      } else {
+        showToast('源图下载成功', 'success')
       }
     } catch (err) {
       console.error(err)
@@ -593,6 +613,26 @@ export default function DetailModal() {
                   </button>
                   <ViewportTooltip visible={downloadOriginalImageTooltip.visible} className="whitespace-nowrap">
                     下载原图
+                  </ViewportTooltip>
+                </div>
+              )}
+              {currentExactSizeSourceImageId && (
+                <div className={`absolute bottom-4 ${currentOriginalOutputImageId ? 'right-20' : 'right-4'} z-20 flex`}>
+                  <button
+                    type="button"
+                    {...downloadSourceImageTooltip.handlers}
+                    onClick={(e) => {
+                      downloadSourceImageTooltip.handlers.onClick()
+                      handleDownloadCurrentSourceOutput(e)
+                    }}
+                    className="flex items-center justify-center gap-0.5 rounded bg-black/50 py-0.5 pl-1.5 pr-2 text-white backdrop-blur-sm transition hover:bg-black/70 focus:outline-none focus:ring-1 focus:ring-white/50"
+                    aria-label="下载源图"
+                  >
+                    <DownloadIcon className="h-4 w-4" />
+                    <span className="text-[9px] font-bold leading-none mt-[1px] uppercase">src</span>
+                  </button>
+                  <ViewportTooltip visible={downloadSourceImageTooltip.visible} className="whitespace-nowrap">
+                    下载源图
                   </ViewportTooltip>
                 </div>
               )}
@@ -982,6 +1022,18 @@ export default function DetailModal() {
                 <br />
                 <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
                   <DetailParamValue task={task} paramKey="quality" className="font-medium" actualParams={currentActualParams} />
+                </div>
+              </div>
+              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
+                <span className="text-gray-400 dark:text-gray-500">精确尺寸</span>
+                <br />
+                <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
+                  <span className="font-medium text-gray-700 dark:text-gray-300">{exactSizeText}</span>
+                  {currentExactSizeSourceImageId && (
+                    <span className="ml-1.5 rounded bg-blue-50 px-1 py-0.5 text-[10px] font-medium uppercase leading-none text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
+                      source
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">

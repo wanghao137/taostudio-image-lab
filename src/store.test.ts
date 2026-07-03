@@ -107,6 +107,29 @@ vi.mock('./lib/transparentImage', () => ({
   })),
   removeKeyedBackgroundFromDataUrl: vi.fn(async (dataUrl: string) => `transparent:${dataUrl}`),
 }))
+vi.mock('./lib/exactImageSize', () => ({
+  getExactImageSizeTarget: vi.fn((params: { size: string; exact_size: boolean }) => {
+    if (!params.exact_size || params.size === 'auto') return null
+    const match = params.size.match(/^(\d+)x(\d+)$/)
+    return match ? { width: Number(match[1]), height: Number(match[2]) } : null
+  }),
+  resizeImageDataUrlToExactSize: vi.fn(async (dataUrl: string, target: { width: number; height: number }) => {
+    const sourceMatch = dataUrl.match(/(\d+)x(\d+)/)
+    const sourceWidth = sourceMatch ? Number(sourceMatch[1]) : 1024
+    const sourceHeight = sourceMatch ? Number(sourceMatch[2]) : 1024
+    if (sourceWidth === target.width && sourceHeight === target.height) {
+      return { dataUrl, width: sourceWidth, height: sourceHeight, sourceWidth, sourceHeight, resized: false }
+    }
+    return {
+      dataUrl: `data:image/png;base64,resized-${target.width}x${target.height}`,
+      width: target.width,
+      height: target.height,
+      sourceWidth,
+      sourceHeight,
+      resized: true,
+    }
+  }),
+}))
 vi.mock('./lib/agentApi', () => ({
   callAgentConversationTitleApi: vi.fn(async () => '标题'),
   callAgentResponsesApi: vi.fn(() => new Promise(() => {})),
@@ -129,6 +152,7 @@ vi.mock('./lib/agentApi', () => ({
 }))
 import { clearAgentConversations, clearImages, clearTasks, getAllAgentConversations, getAllTasks, getImage, putAgentConversation, putImage, putTask as putDbTask } from './lib/db'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
+import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { cleanStaleAgentInputDrafts, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
@@ -339,6 +363,47 @@ describe('mask draft lifecycle in store actions', () => {
     const [task] = useStore.getState().tasks
     expect(task.actualParams?.size).toBe('1024x1024')
     expect(task.actualParamsByImage?.[task.outputImages[0]].size).toBe('1024x1024')
+    await clearTasks()
+    await clearImages()
+  })
+
+  it('resizes exact-size outputs locally and preserves the source image', async () => {
+    const { callImageApi } = await import('./lib/api')
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(resizeImageDataUrlToExactSize).mockClear()
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,actual-1254x1254'],
+      actualParams: { output_format: 'png', quality: 'high', size: '1254x1254' },
+      actualParamsList: [{ output_format: 'png', quality: 'high', size: '1254x1254' }],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: 'poster',
+      params: {
+        ...DEFAULT_PARAMS,
+        size: '2160x3840',
+        exact_size: true,
+        quality: 'high',
+        output_format: 'png',
+      },
+    })
+
+    await submitTask()
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
+      'data:image/png;base64,actual-1254x1254',
+      { width: 2160, height: 3840 },
+      'png',
+    )
+    const [task] = useStore.getState().tasks
+    expect(task.exactSizeOriginalImages).toHaveLength(1)
+    expect(task.actualParams).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high', n: 1 })
+    expect(task.actualParamsByImage?.[task.outputImages[0]]).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high' })
+    const outputImage = await getImage(task.outputImages[0])
+    const sourceImage = await getImage(task.exactSizeOriginalImages![0])
+    expect(outputImage?.dataUrl).toBe('data:image/png;base64,resized-2160x3840')
+    expect(sourceImage?.dataUrl).toBe('data:image/png;base64,actual-1254x1254')
     await clearTasks()
     await clearImages()
   })

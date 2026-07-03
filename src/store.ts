@@ -55,6 +55,7 @@ import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBa
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
+import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
 export const DEFAULT_FAVORITE_COLLECTION_ID = '__default_favorites__'
@@ -934,6 +935,7 @@ function isImageReferencedByState(state: AppState, imageId: string) {
     task.inputImageIds.includes(imageId) ||
     task.outputImages.includes(imageId) ||
     task.transparentOriginalImages?.includes(imageId) ||
+    task.exactSizeOriginalImages?.includes(imageId) ||
     task.streamPartialImageIds?.includes(imageId) ||
     task.maskTargetImageId === imageId ||
     task.maskImageId === imageId
@@ -2009,6 +2011,19 @@ function addImageSizeParam(
   return { ...(params ?? {}), ...sizeParam }
 }
 
+function resolveFinalActualParams(
+  params: Partial<TaskParams> | undefined,
+  size: { width?: number; height?: number } | undefined,
+  taskParams: TaskParams,
+): Partial<TaskParams> | undefined {
+  if (taskParams.exact_size) {
+    const sizeParam = getImageSizeParam(size)
+    return sizeParam ? { ...(params ?? {}), ...sizeParam } : params
+  }
+
+  return addImageSizeParam(params, size)
+}
+
 async function readImageSizeParam(dataUrl: string): Promise<Partial<TaskParams> | undefined> {
   if (typeof Image === 'undefined') return undefined
 
@@ -2065,17 +2080,21 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.falRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
-  const actualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
+  const actualParamsList = resolvedActualParamsList.map((params, index) =>
+    resolveFinalActualParams(params, outputImageSizes[index], task.params),
+  )
   const latestBeforeUpdate = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latestBeforeUpdate || latestBeforeUpdate.status === 'done' || latestBeforeUpdate.error === AGENT_STOPPED_MESSAGE || (latestBeforeUpdate.status !== 'running' && !latestBeforeUpdate.falRecoverable)) {
-    await deleteUnreferencedImageIds([...outputIds, ...(transparentOriginalImageIds ?? [])])
+    await deleteUnreferencedImageIds([...outputIds, ...(transparentOriginalImageIds ?? []), ...(exactSizeOriginalImageIds ?? [])])
     return
   }
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
     transparentOriginalImages: transparentOriginalImageIds,
+    exactSizeOriginalImages: exactSizeOriginalImageIds,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
@@ -2842,7 +2861,42 @@ function addTaskReferencedImageIds(target: Set<string>, task: TaskRecord) {
   for (const id of task.transparentOriginalImages || []) {
     if (id) target.add(id)
   }
+  for (const id of task.exactSizeOriginalImages || []) {
+    if (id) target.add(id)
+  }
   for (const id of task.streamPartialImageIds || []) target.add(id)
+}
+
+async function storeGeneratedOutputImage(
+  dataUrl: string,
+  params: TaskParams,
+  storedImageIds: string[],
+) {
+  let outputDataUrl = dataUrl
+  let exactSizeOriginalImageId = ''
+  const targetSize = getExactImageSizeTarget(params)
+
+  if (targetSize) {
+    const resized = await resizeImageDataUrlToExactSize(outputDataUrl, targetSize, params.output_format)
+    if (resized.resized) {
+      const original = await storeImageWithSize(outputDataUrl, 'generated')
+      storedImageIds.push(original.id)
+      cacheImage(original.id, outputDataUrl)
+      exactSizeOriginalImageId = original.id
+      outputDataUrl = resized.dataUrl
+    }
+  }
+
+  const stored = await storeImageWithSize(outputDataUrl, 'generated')
+  storedImageIds.push(stored.id)
+  cacheImage(stored.id, outputDataUrl)
+
+  return {
+    id: stored.id,
+    dataUrl: outputDataUrl,
+    size: stored,
+    exactSizeOriginalImageId,
+  }
 }
 
 async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
@@ -2850,7 +2904,9 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
   const outputDataUrls: string[] = []
   const outputImageSizes: Array<{ width?: number; height?: number }> = []
   const transparentOriginalImageIds: string[] = []
+  const exactSizeOriginalImageIds: string[] = []
   const storedImageIds: string[] = []
+  const trackExactSizeOriginalImages = Boolean(getExactImageSizeTarget(task.params))
 
   try {
     for (const dataUrl of images) {
@@ -2873,12 +2929,13 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
         }
       }
 
-      const stored = await storeImageWithSize(outputDataUrl, 'generated')
-      storedImageIds.push(stored.id)
-      cacheImage(stored.id, outputDataUrl)
+      const stored = await storeGeneratedOutputImage(outputDataUrl, task.params, storedImageIds)
       outputIds.push(stored.id)
-      outputDataUrls.push(outputDataUrl)
-      outputImageSizes.push(stored)
+      outputDataUrls.push(stored.dataUrl)
+      outputImageSizes.push(stored.size)
+      if (trackExactSizeOriginalImages) {
+        exactSizeOriginalImageIds.push(stored.exactSizeOriginalImageId)
+      }
     }
 
     return {
@@ -2886,6 +2943,7 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
       outputDataUrls,
       outputImageSizes,
       transparentOriginalImageIds: transparentOriginalImageIds.length ? transparentOriginalImageIds : undefined,
+      exactSizeOriginalImageIds: exactSizeOriginalImageIds.some(Boolean) ? exactSizeOriginalImageIds : undefined,
     }
   } catch (err) {
     await deleteUnreferencedImageIds(storedImageIds)
@@ -3876,16 +3934,18 @@ async function executeAgentRound(
       const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
       if (latestTask?.status === 'done' && latestTask.outputImages.length > 0) return taskId
 
-      const stored = await storeImageWithSize(image.dataUrl, 'generated')
-      cacheImage(stored.id, image.dataUrl)
+      const stored = await storeGeneratedOutputImage(image.dataUrl, latestTask?.params ?? params, [])
       const actualParams: Partial<TaskParams> = {
         ...(Object.keys(image.actualParams ?? {}).length ? image.actualParams : {}),
-        ...(!hasActualSizeParam(image.actualParams) ? getImageSizeParam(stored) ?? {} : {}),
+        ...((latestTask?.params ?? params).exact_size
+          ? getImageSizeParam(stored.size) ?? {}
+          : !hasActualSizeParam(image.actualParams) ? getImageSizeParam(stored.size) ?? {} : {}),
         n: 1,
       }
       updateTaskInStore(taskId, {
         prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
         outputImages: [stored.id],
+        exactSizeOriginalImages: stored.exactSizeOriginalImageId ? [stored.exactSizeOriginalImageId] : undefined,
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -4393,11 +4453,12 @@ async function executeAgentRound(
         }
         const promptRefIds = uniqueIds(extractAgentReferenceIds(image.revisedPrompt ?? ''))
         const promptRefs = await resolveReferenceImages(promptRefIds)
-        const stored = await storeImageWithSize(image.dataUrl, 'generated')
-        cacheImage(stored.id, image.dataUrl)
+        const stored = await storeGeneratedOutputImage(image.dataUrl, params, [])
         const actualParams: Partial<TaskParams> = {
           ...(Object.keys(image.actualParams ?? {}).length ? image.actualParams : {}),
-          ...(!hasActualSizeParam(image.actualParams) ? getImageSizeParam(stored) ?? {} : {}),
+          ...(params.exact_size
+            ? getImageSizeParam(stored.size) ?? {}
+            : !hasActualSizeParam(image.actualParams) ? getImageSizeParam(stored.size) ?? {} : {}),
           n: 1,
         }
         const task: TaskRecord = {
@@ -4413,6 +4474,7 @@ async function executeAgentRound(
           maskTargetImageId: round?.maskTargetImageId ?? null,
           maskImageId: round?.maskImageId ?? null,
           outputImages: [stored.id],
+          exactSizeOriginalImages: stored.exactSizeOriginalImageId ? [stored.exactSizeOriginalImageId] : undefined,
           actualParams,
           actualParamsByImage: { [stored.id]: actualParams },
           revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -4737,12 +4799,15 @@ async function executeTask(taskId: string) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds } = await storeTaskOutputImages(task, result.images)
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
-    const actualParamsList = await resolveImageSizeParamsList(
+    const resolvedActualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
       isAsyncCustomTask ? undefined : result.actualParamsList,
       outputImageSizes,
+    )
+    const actualParamsList = resolvedActualParamsList.map((params, index) =>
+      resolveFinalActualParams(params, outputImageSizes[index], task.params),
     )
     const actualParams = (() => {
       if (taskProvider === 'fal') return firstActualParams(actualParamsList)
@@ -4750,7 +4815,7 @@ async function executeTask(taskId: string) {
       const firstParams = firstActualParams(actualParamsList)
       return {
         ...result.actualParams,
-        size: result.actualParams?.size ?? firstParams?.size,
+        size: task.params.exact_size ? firstParams?.size : result.actualParams?.size ?? firstParams?.size,
         n: outputIds.length,
       }
     })()
@@ -4785,6 +4850,7 @@ async function executeTask(taskId: string) {
     updateTaskInStore(taskId, {
       outputImages: outputIds,
       transparentOriginalImages: transparentOriginalImageIds,
+      exactSizeOriginalImages: exactSizeOriginalImageIds,
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       streamPartialImageIds: undefined,
       rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
@@ -5273,6 +5339,7 @@ export async function removeTask(task: TaskRecord) {
     ...(task.maskImageId ? [task.maskImageId] : []),
     ...(task.outputImages || []),
     ...(task.transparentOriginalImages || []),
+    ...(task.exactSizeOriginalImages || []),
     ...(task.streamPartialImageIds || []),
   ])
 
@@ -5344,17 +5411,21 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.customRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds } = await storeTaskOutputImages(task, result.images)
-  const actualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
+  const actualParamsList = resolvedActualParamsList.map((params, index) =>
+    resolveFinalActualParams(params, outputImageSizes[index], task.params),
+  )
   const latestBeforeUpdate = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latestBeforeUpdate || latestBeforeUpdate.status === 'done' || latestBeforeUpdate.error === AGENT_STOPPED_MESSAGE || (latestBeforeUpdate.status !== 'running' && !latestBeforeUpdate.customRecoverable)) {
-    await deleteUnreferencedImageIds([...outputIds, ...(transparentOriginalImageIds ?? [])])
+    await deleteUnreferencedImageIds([...outputIds, ...(transparentOriginalImageIds ?? []), ...(exactSizeOriginalImageIds ?? [])])
     return
   }
 
   updateTaskInStore(task.id, {
     outputImages: outputIds,
     transparentOriginalImages: transparentOriginalImageIds,
+    exactSizeOriginalImages: exactSizeOriginalImageIds,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,

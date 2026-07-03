@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start:local": "vite --host 127.0.0.1 --port 5173",
+    "start:local": "vite --host 127.0.0.1 --port 9527",
     "upgrade:upstream": "node scripts/upgrade-upstream.mjs",
     "verify:ui": "node scripts/verify-ui.mjs",
     "verify:image-api": "node scripts/verify-image-api.mjs",

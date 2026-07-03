@@ -34,7 +34,7 @@ npm run start:local
 Open:
 
 ```text
-http://127.0.0.1:5173/
+http://127.0.0.1:9527/
 ```
 
 ## Upstream Upgrade
