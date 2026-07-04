@@ -4,6 +4,7 @@ import {
   ASSET_4K_RATIO_PRESETS,
   createAsset4KOriginalRatioPresetParams,
   createAsset4KRatioPresetParams,
+  getAsset4KInheritedRatioSource,
   getAsset4KOriginalRatioSize,
   getAsset4KRatioSize,
   isAsset4KOriginalRatioPresetActive,
@@ -96,5 +97,38 @@ describe('asset 4K ratio presets', () => {
 
     expect(isAsset4KOriginalRatioPresetActive(squareParams, source)).toBe(false)
     expect(isAsset4KOriginalRatioPresetActive(originalRatioParams, source)).toBe(true)
+  })
+
+  it('uses uploaded image dimensions as the inherited 4K ratio source before current UI size', () => {
+    const source = getAsset4KInheritedRatioSource({
+      inputImages: [{ width: 1536, height: 1024 }],
+      currentSize: '2880x2880',
+    })
+
+    expect(source).toEqual({
+      kind: 'input-image',
+      size: { width: 1536, height: 1024 },
+    })
+    expect(getAsset4KOriginalRatioSize(source?.size)).toBe('3456x2304')
+  })
+
+  it('uses the current base generation size as the inherited 4K ratio source when there is no uploaded image', () => {
+    const source = getAsset4KInheritedRatioSource({
+      inputImages: [],
+      currentSize: '1536x1024',
+    })
+
+    expect(source).toEqual({
+      kind: 'current-size',
+      size: { width: 1536, height: 1024 },
+    })
+    expect(getAsset4KOriginalRatioSize(source?.size)).toBe('3456x2304')
+  })
+
+  it('does not invent an inherited 4K ratio source from auto size', () => {
+    expect(getAsset4KInheritedRatioSource({
+      inputImages: [],
+      currentSize: 'auto',
+    })).toBeNull()
   })
 })

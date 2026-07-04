@@ -1,7 +1,19 @@
 import { DEFAULT_PARAMS, type TaskParams } from '../types'
-import { calculateImageSize, COMMON_IMAGE_RATIOS, type CommonImageRatio, type ImageSize } from './size'
+import { calculateImageSize, COMMON_IMAGE_RATIOS, parseImageSize, type CommonImageRatio, type ImageSize } from './size'
 
 export const ASSET_4K_RATIO_PRESETS = COMMON_IMAGE_RATIOS
+
+export type Asset4KInheritedRatioSourceKind = 'input-image' | 'current-size'
+
+export interface Asset4KInheritedRatioSource {
+  kind: Asset4KInheritedRatioSourceKind
+  size: ImageSize
+}
+
+interface RatioSourceImage {
+  width?: number
+  height?: number
+}
 
 export function getAsset4KRatioSize(ratio: CommonImageRatio) {
   return calculateImageSize('4K', ratio)
@@ -40,6 +52,31 @@ function buildAsset4KParams(size: string, options: { codexCli?: boolean; n?: num
 export function getAsset4KOriginalRatioSize(source: ImageSize | null | undefined) {
   if (!source?.width || !source.height) return null
   return calculateImageSize('4K', `${source.width}:${source.height}`)
+}
+
+export function getAsset4KInheritedRatioSource(options: {
+  inputImages?: RatioSourceImage[]
+  currentSize?: string | null
+}): Asset4KInheritedRatioSource | null {
+  const inputImage = options.inputImages?.find((img) => img.width && img.height)
+  if (inputImage?.width && inputImage.height) {
+    return {
+      kind: 'input-image',
+      size: { width: inputImage.width, height: inputImage.height },
+    }
+  }
+
+  const parsedCurrentSize = options.currentSize && options.currentSize !== 'auto'
+    ? parseImageSize(options.currentSize)
+    : null
+  if (parsedCurrentSize) {
+    return {
+      kind: 'current-size',
+      size: parsedCurrentSize,
+    }
+  }
+
+  return null
 }
 
 export function createAsset4KOriginalRatioPresetParams(
