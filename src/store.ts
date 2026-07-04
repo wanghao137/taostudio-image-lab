@@ -15,6 +15,7 @@ import type {
   FavoriteCollection,
   ResponsesApiResponse,
   ResponsesOutputItem,
+  StoredImage,
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
 import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
@@ -676,13 +677,13 @@ export function getPersistedState(state: AppState) {
     ...(settings.persistInputOnRestart && (state.appMode === 'gallery' || galleryInputDraft)
       ? {
           prompt: galleryInputDraft?.prompt ?? '',
-          inputImages: galleryInputDraft?.inputImages.map((img) => ({ id: img.id, dataUrl: '' })) ?? [],
+          inputImages: galleryInputDraft?.inputImages.map(getPersistableInputImage) ?? [],
         }
       : {}),
     dismissedCodexCliPrompts: state.dismissedCodexCliPrompts,
     appMode: state.appMode,
     galleryInputDraft: settings.persistInputOnRestart && galleryInputDraft
-      ? { ...galleryInputDraft, inputImages: galleryInputDraft.inputImages.map((img) => ({ id: img.id, dataUrl: '' })) }
+      ? { ...galleryInputDraft, inputImages: galleryInputDraft.inputImages.map(getPersistableInputImage) }
       : null,
     ...(agentConversationMigrationPending && !agentConversationPersistenceReady
       ? { agentConversations: getPersistableAgentConversations(state.agentConversations) }
@@ -977,9 +978,40 @@ function normalizeInputImages(value: unknown): InputImage[] {
   return value
     .map((img): InputImage | null => {
       if (!isRecord(img) || typeof img.id !== 'string') return null
-      return { id: img.id, dataUrl: typeof img.dataUrl === 'string' ? img.dataUrl : '' }
+      const width = normalizeImageDimension(img.width)
+      const height = normalizeImageDimension(img.height)
+      return {
+        id: img.id,
+        dataUrl: typeof img.dataUrl === 'string' ? img.dataUrl : '',
+        ...(width ? { width } : {}),
+        ...(height ? { height } : {}),
+      }
     })
     .filter((img): img is InputImage => img != null)
+}
+
+function normalizeImageDimension(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : undefined
+}
+
+function getPersistableInputImage(img: InputImage): InputImage {
+  return {
+    id: img.id,
+    dataUrl: '',
+    ...(img.width ? { width: img.width } : {}),
+    ...(img.height ? { height: img.height } : {}),
+  }
+}
+
+function restoreInputImageFromStoredImage(img: InputImage, storedImage: StoredImage): InputImage {
+  const width = img.width ?? storedImage.width
+  const height = img.height ?? storedImage.height
+  return {
+    ...img,
+    dataUrl: storedImage.dataUrl,
+    ...(width ? { width } : {}),
+    ...(height ? { height } : {}),
+  }
 }
 
 function normalizeMaskDraft(value: unknown): MaskDraft | null {
@@ -2259,7 +2291,7 @@ export async function initStore() {
     }
     const storedImage = await getImage(img.id)
     if (storedImage?.dataUrl) {
-      restoredInputImages.push({ ...img, dataUrl: storedImage.dataUrl })
+      restoredInputImages.push(restoreInputImageFromStoredImage(img, storedImage))
       cacheImage(img.id, storedImage.dataUrl)
     }
   }
@@ -2274,13 +2306,13 @@ export async function initStore() {
         restoredGalleryImages.push(img)
         cacheImage(img.id, img.dataUrl)
         continue
-      }
-      const storedImage = await getImage(img.id)
-      if (storedImage?.dataUrl) {
-        restoredGalleryImages.push({ ...img, dataUrl: storedImage.dataUrl })
-        cacheImage(img.id, storedImage.dataUrl)
-      }
     }
+    const storedImage = await getImage(img.id)
+    if (storedImage?.dataUrl) {
+      restoredGalleryImages.push(restoreInputImageFromStoredImage(img, storedImage))
+      cacheImage(img.id, storedImage.dataUrl)
+    }
+  }
     const shouldClearMask = Boolean(galleryInputDraft.maskDraft) && !restoredGalleryImages.some((img) => img.id === galleryInputDraft.maskDraft?.targetImageId)
     const restoredGalleryDraft: AgentInputDraft = {
       ...galleryInputDraft,
@@ -2313,13 +2345,13 @@ export async function initStore() {
         restoredDraftImages.push(img)
         cacheImage(img.id, img.dataUrl)
         continue
-      }
-      const storedImage = await getImage(img.id)
-      if (storedImage?.dataUrl) {
-        restoredDraftImages.push({ ...img, dataUrl: storedImage.dataUrl })
-        cacheImage(img.id, storedImage.dataUrl)
-      }
     }
+    const storedImage = await getImage(img.id)
+    if (storedImage?.dataUrl) {
+      restoredDraftImages.push(restoreInputImageFromStoredImage(img, storedImage))
+      cacheImage(img.id, storedImage.dataUrl)
+    }
+  }
 
     const shouldClearMask = Boolean(draft.maskDraft) && !restoredDraftImages.some((img) => img.id === draft.maskDraft?.targetImageId)
     const restoredDraft: AgentInputDraft = {
@@ -5193,9 +5225,15 @@ export async function reuseConfig(task: TaskRecord) {
   // 恢复输入图片
   const imgs: InputImage[] = []
   for (const imgId of task.inputImageIds) {
-    const dataUrl = await ensureImageCached(imgId)
+    const storedImage = await getImage(imgId)
+    const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
     if (dataUrl) {
-      imgs.push({ id: imgId, dataUrl })
+      imgs.push({
+        id: imgId,
+        dataUrl,
+        ...(storedImage?.width ? { width: storedImage.width } : {}),
+        ...(storedImage?.height ? { height: storedImage.height } : {}),
+      })
     }
   }
   setInputImages(imgs)
@@ -5244,9 +5282,15 @@ export async function editOutputs(task: TaskRecord) {
   let added = 0
   for (const imgId of task.outputImages) {
     if (inputImages.find((i) => i.id === imgId)) continue
-    const dataUrl = await ensureImageCached(imgId)
+    const storedImage = await getImage(imgId)
+    const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
     if (dataUrl) {
-      addInputImage({ id: imgId, dataUrl })
+      addInputImage({
+        id: imgId,
+        dataUrl,
+        ...(storedImage?.width ? { width: storedImage.width } : {}),
+        ...(storedImage?.height ? { height: storedImage.height } : {}),
+      })
       added++
     }
   }
@@ -5649,9 +5693,9 @@ export async function addImageFromFile(file: File): Promise<void> {
 export async function createInputImageFromFile(file: File): Promise<InputImage | null> {
   if (!file.type.startsWith('image/')) return null
   const dataUrl = await fileToDataUrl(file)
-  const id = await storeImage(dataUrl, 'upload')
-  cacheImage(id, dataUrl)
-  return { id, dataUrl }
+  const stored = await storeImageWithSize(dataUrl, 'upload')
+  cacheImage(stored.id, dataUrl)
+  return { id: stored.id, dataUrl, width: stored.width, height: stored.height }
 }
 
 /** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
@@ -5660,7 +5704,7 @@ export async function addImageFromUrl(src: string): Promise<void> {
   const blob = await res.blob()
   if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
   const dataUrl = await blobToDataUrl(blob)
-  const id = await storeImage(dataUrl, 'upload')
-  cacheImage(id, dataUrl)
-  useStore.getState().addInputImage({ id, dataUrl })
+  const stored = await storeImageWithSize(dataUrl, 'upload')
+  cacheImage(stored.id, dataUrl)
+  useStore.getState().addInputImage({ id: stored.id, dataUrl, width: stored.width, height: stored.height })
 }

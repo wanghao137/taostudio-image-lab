@@ -1,12 +1,21 @@
 import { lazy, Suspense, useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { ImageUp, Maximize2 } from 'lucide-react'
 import { ALL_FAVORITES_COLLECTION_ID, deleteFavoriteCollection, getTaskFavoriteCollectionIds, useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFromFile, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks, getCachedImage, ensureImageCached, getActiveAgentRounds } from '../store'
 import { DEFAULT_PARAMS, type TaskRecord } from '../types'
 import { getActiveApiProfile, normalizeSettings } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
-import { normalizeImageSize, type CommonImageRatio } from '../lib/size'
-import { ASSET_4K_RATIO_PRESETS, createAsset4KRatioPresetParams, getAsset4KRatioSize, isAsset4KRatioPresetActive } from '../lib/asset4kPresets'
+import { formatImageRatio, normalizeImageSize, type CommonImageRatio } from '../lib/size'
+import {
+  ASSET_4K_RATIO_PRESETS,
+  createAsset4KOriginalRatioPresetParams,
+  createAsset4KRatioPresetParams,
+  getAsset4KOriginalRatioSize,
+  getAsset4KRatioSize,
+  isAsset4KOriginalRatioPresetActive,
+  isAsset4KRatioPresetActive,
+} from '../lib/asset4kPresets'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { getSafeBoundingClientRect } from '../lib/domRect'
@@ -817,6 +826,19 @@ export default function InputBar() {
     ? [...baseGenerationStrategyItems, '精确尺寸']
     : baseGenerationStrategyItems
   const asset4KPresetN = agentAutoImageCount ? params.n : 1
+  const asset4KSourceImage = inputImages.find((img) => img.width && img.height) ?? null
+  const asset4KSourceSize = asset4KSourceImage?.width && asset4KSourceImage.height
+    ? { width: asset4KSourceImage.width, height: asset4KSourceImage.height }
+    : null
+  const asset4KOriginalRatioLabel = asset4KSourceSize
+    ? formatImageRatio(asset4KSourceSize.width, asset4KSourceSize.height)
+    : ''
+  const asset4KOriginalSize = getAsset4KOriginalRatioSize(asset4KSourceSize)
+  const activeAsset4KOriginalRatio = isAsset4KOriginalRatioPresetActive(
+    params,
+    asset4KSourceSize,
+    { codexCli: activeProfile.codexCli, n: asset4KPresetN },
+  )
   const activeAsset4KRatio = ASSET_4K_RATIO_PRESETS.find((item) =>
     isAsset4KRatioPresetActive(params, item.value, { codexCli: activeProfile.codexCli, n: asset4KPresetN }),
   )?.value
@@ -1039,6 +1061,33 @@ export default function InputBar() {
     setNInput(String(clampedValue))
     setParams({ n: clampedValue })
   }, [agentAutoImageCount, nInput, nLimitHint, outputImageLimit, params.n, setParams])
+
+  const applyAsset4KOriginalRatioPreset = useCallback(() => {
+    const patch = createAsset4KOriginalRatioPresetParams(asset4KSourceSize, {
+      codexCli: activeProfile.codexCli,
+      n: agentAutoImageCount ? params.n : 1,
+    })
+    if (!patch) {
+      showToast('请先上传一张带尺寸信息的参考图', 'info')
+      return
+    }
+
+    setParams(patch)
+    showToast(
+      activeProfile.codexCli
+        ? `已切换原比例 ${asset4KOriginalRatioLabel || ''} 4K PNG；当前 Codex CLI 配置不支持 high 质量参数`
+        : `已切换原比例 ${asset4KOriginalRatioLabel || ''} 4K high PNG`,
+      activeProfile.codexCli ? 'info' : 'success',
+    )
+  }, [
+    activeProfile.codexCli,
+    agentAutoImageCount,
+    asset4KOriginalRatioLabel,
+    asset4KSourceSize,
+    params.n,
+    setParams,
+    showToast,
+  ])
 
   const applyAsset4KRatioPreset = useCallback((ratio: CommonImageRatio) => {
     const patch = createAsset4KRatioPresetParams(ratio, {
@@ -2196,55 +2245,107 @@ export default function InputBar() {
   )
 
   const renderGenerationStrategy = () => (
-    <div className="mb-2 flex flex-col gap-2 rounded-xl border border-gray-200/70 bg-white/50 px-3 py-2 text-[11px] text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="h-2 w-2 shrink-0 rounded-full bg-blue-400" />
-        <span className="truncate font-medium">
-          当前生成策略
-        </span>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {generationStrategyItems.map((item) => (
-          <span
-            key={item}
-            className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
-          >
-            {item}
-          </span>
-        ))}
-        <div className="flex flex-wrap items-center gap-1 rounded-full border border-gray-200 bg-white/80 px-1.5 py-0.5 dark:border-white/[0.08] dark:bg-white/[0.04]">
-          <span className="px-1 text-[10px] font-semibold text-gray-500 dark:text-gray-300">4K high PNG</span>
-          {ASSET_4K_RATIO_PRESETS.map((item) => {
-            const size = getAsset4KRatioSize(item.value)
-            const [ratioW, ratioH] = item.value.split(':').map(Number)
-            const isHorizontal = ratioW > ratioH
-            const isSquare = ratioW === ratioH
-            const active = activeAsset4KRatio === item.value
-            return (
-              <button
-                key={item.value}
-                type="button"
-                onClick={() => applyAsset4KRatioPreset(item.value)}
-                className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 font-medium transition ${
-                  active
-                    ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
-                    : 'border-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-50 dark:text-gray-300 dark:hover:border-white/[0.08] dark:hover:bg-white/[0.07]'
-                }`}
-                title={`套用 ${size ?? '4K'}、${item.label}、high、PNG、精确尺寸`}
+    <div className="mb-3 rounded-lg border border-gray-200/70 bg-white/60 px-3 py-3 text-[11px] text-gray-500 shadow-sm dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 lg:w-[220px]">
+          <div className="flex min-w-0 items-center gap-2 text-gray-600 dark:text-gray-300">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-blue-400" />
+            <span className="truncate font-semibold">当前生成策略</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {generationStrategyItems.map((item) => (
+              <span
+                key={item}
+                className="rounded-md bg-gray-100 px-2 py-1 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300"
               >
-                <span className="flex h-3 w-3 items-center justify-center">
-                  <span
-                    className="rounded-[2px] border border-current opacity-70"
-                    style={{
-                      width: isHorizontal || isSquare ? '100%' : `${(ratioW / ratioH) * 100}%`,
-                      height: !isHorizontal || isSquare ? '100%' : `${(ratioH / ratioW) * 100}%`,
-                    }}
-                  />
+                {item}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex items-center gap-2 text-gray-600 dark:text-gray-300">
+            <ImageUp className="h-3.5 w-3.5 text-blue-500" aria-hidden="true" />
+            <span className="font-semibold">4K high PNG</span>
+            <span className="rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:bg-blue-500/10 dark:text-blue-300">
+              原比例优先
+            </span>
+          </div>
+
+          <div className="grid gap-2 xl:grid-cols-[minmax(220px,0.95fr)_minmax(0,1.8fr)]">
+            <button
+              type="button"
+              onClick={applyAsset4KOriginalRatioPreset}
+              disabled={!asset4KOriginalSize}
+              className={`group flex min-h-[48px] items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
+                activeAsset4KOriginalRatio
+                  ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-sm dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-200'
+                  : asset4KOriginalSize
+                  ? 'border-gray-200 bg-white/85 text-gray-700 hover:border-blue-200 hover:bg-blue-50/60 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-200 dark:hover:border-blue-500/30 dark:hover:bg-blue-500/10'
+                  : 'cursor-not-allowed border-gray-200 bg-gray-50/70 text-gray-400 dark:border-white/[0.06] dark:bg-white/[0.02] dark:text-gray-500'
+              }`}
+              title={asset4KOriginalSize
+                ? `按上传图原比例输出 ${asset4KOriginalSize}`
+                : '上传图片后可按原比例推导 4K 尺寸'}
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-500/10 text-blue-500">
+                  <Maximize2 className="h-4 w-4" aria-hidden="true" />
                 </span>
-                <span>{item.label}</span>
-              </button>
-            )
-          })}
+                <span className="min-w-0">
+                  <span className="block truncate text-xs font-semibold">原比例 4K</span>
+                  <span className="block truncate text-[10px] text-gray-500 dark:text-gray-400">
+                    {asset4KOriginalSize
+                      ? `${asset4KOriginalRatioLabel || '原比例'} · ${asset4KOriginalSize}`
+                      : '上传图后可用'}
+                  </span>
+                </span>
+              </span>
+              <span className="rounded-md bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold text-gray-500 dark:bg-white/[0.06] dark:text-gray-300">
+                PNG
+              </span>
+            </button>
+
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+              {ASSET_4K_RATIO_PRESETS.map((item) => {
+                const size = getAsset4KRatioSize(item.value)
+                const [ratioW, ratioH] = item.value.split(':').map(Number)
+                const isHorizontal = ratioW > ratioH
+                const isSquare = ratioW === ratioH
+                const active = !activeAsset4KOriginalRatio && activeAsset4KRatio === item.value
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    onClick={() => applyAsset4KRatioPreset(item.value)}
+                    className={`flex min-h-[48px] flex-col justify-center rounded-lg border px-2 py-1.5 text-left transition ${
+                      active
+                        ? 'border-blue-300 bg-blue-50 text-blue-700 shadow-sm dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-200'
+                        : 'border-gray-200 bg-white/70 text-gray-600 hover:border-gray-300 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-300 dark:hover:border-white/[0.14] dark:hover:bg-white/[0.07]'
+                    }`}
+                    title={`改为 ${item.label}，输出 ${size ?? '4K'}、high、PNG、精确尺寸`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                        <span
+                          className="rounded-[2px] border border-current opacity-70"
+                          style={{
+                            width: isHorizontal || isSquare ? '100%' : `${(ratioW / ratioH) * 100}%`,
+                            height: !isHorizontal || isSquare ? '100%' : `${(ratioH / ratioW) * 100}%`,
+                          }}
+                        />
+                      </span>
+                      <span className="text-xs font-semibold">{item.label}</span>
+                    </span>
+                    <span className="mt-0.5 truncate pl-[22px] text-[9px] leading-tight text-gray-400 dark:text-gray-500">
+                      {size}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>

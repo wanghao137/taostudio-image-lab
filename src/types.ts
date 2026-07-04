@@ -148,6 +148,10 @@ export interface InputImage {
   id: string
   /** data URL，用于预览 */
   dataUrl: string
+  /** 原图宽度，用于按上传图比例推导目标尺寸 */
+  width?: number
+  /** 原图高度，用于按上传图比例推导目标尺寸 */
+  height?: number
 }
 
 export interface MaskDraft {

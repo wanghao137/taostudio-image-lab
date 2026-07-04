@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
-import { ASSET_4K_RATIO_PRESETS, createAsset4KRatioPresetParams, getAsset4KRatioSize, isAsset4KRatioPresetActive } from './asset4kPresets'
+import {
+  ASSET_4K_RATIO_PRESETS,
+  createAsset4KOriginalRatioPresetParams,
+  createAsset4KRatioPresetParams,
+  getAsset4KOriginalRatioSize,
+  getAsset4KRatioSize,
+  isAsset4KOriginalRatioPresetActive,
+  isAsset4KRatioPresetActive,
+} from './asset4kPresets'
 
 describe('asset 4K ratio presets', () => {
   it('covers the common uploaded-image ratios', () => {
@@ -58,5 +66,35 @@ describe('asset 4K ratio presets', () => {
 
     expect(isAsset4KRatioPresetActive(params, '21:9')).toBe(true)
     expect(isAsset4KRatioPresetActive(params, '16:9')).toBe(false)
+  })
+
+  it('preserves the uploaded image aspect ratio for 4K high PNG output', () => {
+    const source = { width: 1536, height: 1024 }
+
+    expect(getAsset4KOriginalRatioSize(source)).toBe('3456x2304')
+    expect(createAsset4KOriginalRatioPresetParams(source)).toMatchObject({
+      size: '3456x2304',
+      exact_size: true,
+      quality: 'high',
+      output_format: 'png',
+      output_compression: null,
+      transparent_output: false,
+      n: 1,
+    })
+  })
+
+  it('does not mark a square 4K preset as the original-ratio preset for a 3:2 source', () => {
+    const source = { width: 1536, height: 1024 }
+    const squareParams = {
+      ...DEFAULT_PARAMS,
+      ...createAsset4KRatioPresetParams('1:1'),
+    }
+    const originalRatioParams = {
+      ...DEFAULT_PARAMS,
+      ...createAsset4KOriginalRatioPresetParams(source),
+    }
+
+    expect(isAsset4KOriginalRatioPresetActive(squareParams, source)).toBe(false)
+    expect(isAsset4KOriginalRatioPresetActive(originalRatioParams, source)).toBe(true)
   })
 })

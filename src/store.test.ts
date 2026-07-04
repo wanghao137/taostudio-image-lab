@@ -610,6 +610,58 @@ describe('input persistence setting', () => {
     expect(persisted.inputImages).toEqual([{ id: imageA.id, dataUrl: '' }])
   })
 
+  it('persists uploaded image dimensions while stripping preview payloads', () => {
+    useStore.setState({
+      inputImages: [{ id: imageA.id, dataUrl: imageA.dataUrl, width: 1536, height: 1024 }],
+    })
+
+    const persisted = getPersistedState(useStore.getState())
+
+    expect(persisted.inputImages).toEqual([{ id: imageA.id, dataUrl: '', width: 1536, height: 1024 }])
+  })
+
+  it('restores persisted uploaded image dimensions for ratio-aware actions', () => {
+    const migrated = migratePersistedState({
+      settings: { ...DEFAULT_SETTINGS },
+      appMode: 'gallery',
+      prompt: 'prompt',
+      inputImages: [{ id: imageA.id, dataUrl: '', width: 1536, height: 1024 }],
+    }) as { inputImages: Array<{ id: string; dataUrl: string; width?: number; height?: number }> }
+
+    expect(migrated.inputImages).toEqual([{ id: imageA.id, dataUrl: '', width: 1536, height: 1024 }])
+  })
+
+  it('hydrates persisted input dimensions from IndexedDB during startup', async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    await putImage({
+      id: imageA.id,
+      dataUrl: imageA.dataUrl,
+      source: 'upload',
+      createdAt: 1,
+      width: 1536,
+      height: 1024,
+    })
+    useStore.setState({
+      settings: { ...DEFAULT_SETTINGS },
+      appMode: 'gallery',
+      prompt: 'prompt',
+      inputImages: [{ id: imageA.id, dataUrl: '' }],
+      galleryInputDraft: null,
+      agentConversations: [],
+      agentInputDrafts: {},
+      tasks: [],
+      showToast: vi.fn(),
+    })
+
+    await initStore()
+
+    expect(useStore.getState().inputImages).toEqual([
+      { id: imageA.id, dataUrl: imageA.dataUrl, width: 1536, height: 1024 },
+    ])
+  })
+
   it('omits input when restart input restore is disabled', () => {
     useStore.setState({ settings: { ...DEFAULT_SETTINGS, persistInputOnRestart: false } })
 
