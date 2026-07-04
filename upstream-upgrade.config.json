@@ -40,8 +40,10 @@
     "src/components/SearchBar.tsx",
     "src/components/TaskGrid.tsx",
     "src/hooks/useVersionCheck.ts",
+    "src/types.ts",
     "src/lib/devProxy.ts",
     "src/lib/devProxy.test.ts",
+    "src/lib/size.ts",
     "src/index.css"
   ]
 }
