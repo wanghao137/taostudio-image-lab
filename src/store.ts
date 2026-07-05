@@ -16,6 +16,7 @@ import type {
   ResponsesApiResponse,
   ResponsesOutputItem,
   StoredImage,
+  ExactSizeTransformRecord,
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
 import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
@@ -57,6 +58,7 @@ import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
 import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './lib/exactImageSize'
+import { appendTargetAspectPromptHint, createTargetAspectPromptHint } from './lib/targetAspectPrompt'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
 export const DEFAULT_FAVORITE_COLLECTION_ID = '__default_favorites__'
@@ -2112,7 +2114,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.falRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms } = await storeTaskOutputImages(task, result.images)
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -2127,6 +2129,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     outputImages: outputIds,
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
+    exactSizeTransforms,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
@@ -2477,6 +2480,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     id: taskId,
     prompt: prompt.trim(),
     params: taskParams,
+    targetAspectPromptHint: createTargetAspectPromptHint(taskParams.size) ?? undefined,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
@@ -2906,16 +2910,32 @@ async function storeGeneratedOutputImage(
 ) {
   let outputDataUrl = dataUrl
   let exactSizeOriginalImageId = ''
+  let exactSizeTransform: ExactSizeTransformRecord | undefined
   const targetSize = getExactImageSizeTarget(params)
 
   if (targetSize) {
-    const resized = await resizeImageDataUrlToExactSize(outputDataUrl, targetSize, params.output_format)
+    const resized = await resizeImageDataUrlToExactSize(outputDataUrl, targetSize, params.output_format, 'cover')
     if (resized.resized) {
       const original = await storeImageWithSize(outputDataUrl, 'generated')
       storedImageIds.push(original.id)
       cacheImage(original.id, outputDataUrl)
       exactSizeOriginalImageId = original.id
       outputDataUrl = resized.dataUrl
+      if (resized.drawPlan) {
+        exactSizeTransform = {
+          mode: resized.drawPlan.mode,
+          sourceWidth: resized.drawPlan.sourceWidth,
+          sourceHeight: resized.drawPlan.sourceHeight,
+          targetWidth: resized.drawPlan.targetWidth,
+          targetHeight: resized.drawPlan.targetHeight,
+          scale: resized.drawPlan.scale,
+          drawX: resized.drawPlan.drawX,
+          drawY: resized.drawPlan.drawY,
+          drawWidth: resized.drawPlan.drawWidth,
+          drawHeight: resized.drawPlan.drawHeight,
+          aspectMismatch: resized.drawPlan.aspectMismatch,
+        }
+      }
     }
   }
 
@@ -2928,6 +2948,7 @@ async function storeGeneratedOutputImage(
     dataUrl: outputDataUrl,
     size: stored,
     exactSizeOriginalImageId,
+    exactSizeTransform,
   }
 }
 
@@ -2937,6 +2958,7 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
   const outputImageSizes: Array<{ width?: number; height?: number }> = []
   const transparentOriginalImageIds: string[] = []
   const exactSizeOriginalImageIds: string[] = []
+  const exactSizeTransforms: Record<string, ExactSizeTransformRecord> = {}
   const storedImageIds: string[] = []
   const trackExactSizeOriginalImages = Boolean(getExactImageSizeTarget(task.params))
 
@@ -2968,6 +2990,9 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
       if (trackExactSizeOriginalImages) {
         exactSizeOriginalImageIds.push(stored.exactSizeOriginalImageId)
       }
+      if (stored.exactSizeTransform) {
+        exactSizeTransforms[stored.id] = stored.exactSizeTransform
+      }
     }
 
     return {
@@ -2976,6 +3001,7 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
       outputImageSizes,
       transparentOriginalImageIds: transparentOriginalImageIds.length ? transparentOriginalImageIds : undefined,
       exactSizeOriginalImageIds: exactSizeOriginalImageIds.some(Boolean) ? exactSizeOriginalImageIds : undefined,
+      exactSizeTransforms: Object.keys(exactSizeTransforms).length ? exactSizeTransforms : undefined,
     }
   } catch (err) {
     await deleteUnreferencedImageIds(storedImageIds)
@@ -3931,6 +3957,7 @@ async function executeAgentRound(
         id: genId(),
         prompt: taskPrompt,
         params: options.taskParams ?? { ...params, n: 1 },
+        targetAspectPromptHint: createTargetAspectPromptHint((options.taskParams ?? params).size) ?? undefined,
         apiProvider: imageProfile.provider,
         apiProfileId: imageProfile.id,
         apiProfileName: imageProfile.name,
@@ -3978,6 +4005,7 @@ async function executeAgentRound(
         prompt: image.revisedPrompt ?? latestTask?.prompt ?? '',
         outputImages: [stored.id],
         exactSizeOriginalImages: stored.exactSizeOriginalImageId ? [stored.exactSizeOriginalImageId] : undefined,
+        exactSizeTransforms: stored.exactSizeTransform ? { [stored.id]: stored.exactSizeTransform } : undefined,
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -4143,7 +4171,10 @@ async function executeAgentRound(
     }) => {
       const result = await callImageApi({
         settings: imageRequestSettings,
-        prompt: replaceImageMentionsForApi(opts.prompt, opts.referenceImageDataUrls.length),
+        prompt: appendTargetAspectPromptHint(
+          replaceImageMentionsForApi(opts.prompt, opts.referenceImageDataUrls.length),
+          opts.taskParams.size,
+        ),
         params: opts.taskParams,
         inputImageDataUrls: opts.referenceImageDataUrls,
         onPartialImage: opts.onPartialImage
@@ -4298,7 +4329,7 @@ async function executeAgentRound(
               profile: imageProfile,
               params: taskParams,
               batchItemId: item.id,
-              prompt: item.prompt,
+              prompt: appendTargetAspectPromptHint(item.prompt, taskParams.size),
               referenceImageDataUrls: references.dataUrls,
               referenceIds,
               allowPromptRewrite: requestSettings.allowPromptRewrite,
@@ -4497,6 +4528,7 @@ async function executeAgentRound(
           id: genId(),
           prompt: image.revisedPrompt ?? round?.prompt ?? userMessage.content,
           params,
+          targetAspectPromptHint: createTargetAspectPromptHint(params.size) ?? undefined,
           apiProvider: imageProfile.provider,
           apiProfileId: imageProfile.id,
           apiProfileName: imageProfile.name,
@@ -4507,6 +4539,7 @@ async function executeAgentRound(
           maskImageId: round?.maskImageId ?? null,
           outputImages: [stored.id],
           exactSizeOriginalImages: stored.exactSizeOriginalImageId ? [stored.exactSizeOriginalImageId] : undefined,
+          exactSizeTransforms: stored.exactSizeTransform ? { [stored.id]: stored.exactSizeTransform } : undefined,
           actualParams,
           actualParamsByImage: { [stored.id]: actualParams },
           revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -4796,10 +4829,14 @@ async function executeTask(taskId: string) {
     const requestPrompt = task.transparentOutput && task.transparentPrompt
       ? task.transparentPrompt
       : task.prompt
+    const promptSentToApi = appendTargetAspectPromptHint(
+      replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
+      task.params.size,
+    )
 
     const result = await callImageApi({
       settings: requestSettings,
-      prompt: replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
+      prompt: promptSentToApi,
       params: task.params,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
@@ -4831,7 +4868,7 @@ async function executeTask(taskId: string) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms } = await storeTaskOutputImages(task, result.images)
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const resolvedActualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
@@ -4859,7 +4896,7 @@ async function executeTask(taskId: string) {
       return acc
     }, {}) : undefined
     const promptWasRevised = shouldStoreRevisedPrompts && result.revisedPrompts?.some(
-      (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== requestPrompt.trim(),
+      (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== promptSentToApi.trim(),
     )
     const hasRevisedPromptValue = shouldStoreRevisedPrompts && result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
     if (taskProvider === 'openai' && activeProfile.apiMode === 'responses' && !activeProfile.codexCli) {
@@ -4883,6 +4920,7 @@ async function executeTask(taskId: string) {
       outputImages: outputIds,
       transparentOriginalImages: transparentOriginalImageIds,
       exactSizeOriginalImages: exactSizeOriginalImageIds,
+      exactSizeTransforms,
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       streamPartialImageIds: undefined,
       rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
@@ -5178,6 +5216,7 @@ export async function retryTask(task: TaskRecord) {
     id: taskId,
     prompt: task.prompt,
     params: taskParams,
+    targetAspectPromptHint: createTargetAspectPromptHint(taskParams.size) ?? undefined,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
@@ -5455,7 +5494,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.customRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds } = await storeTaskOutputImages(task, result.images)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms } = await storeTaskOutputImages(task, result.images)
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -5470,6 +5509,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     outputImages: outputIds,
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
+    exactSizeTransforms,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,

@@ -11,6 +11,7 @@ import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from '../lib/downloadImages'
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { replaceImageMentionsForApi } from '../lib/promptImageMentions'
+import { appendTargetAspectPromptHint } from '../lib/targetAspectPrompt'
 import { CloseIcon, CodeIcon, CopyIcon, DownloadIcon, EditIcon, LinkIcon, TrashIcon } from './icons'
 
 import ViewportTooltip from './ViewportTooltip'
@@ -179,6 +180,7 @@ export default function DetailModal() {
   const currentOutputError = currentOutputSlot?.error || ''
   const currentOriginalOutputImageId = currentOutputImageIndex >= 0 ? task?.transparentOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentExactSizeSourceImageId = currentOutputImageIndex >= 0 ? task?.exactSizeOriginalImages?.[currentOutputImageIndex] || '' : ''
+  const currentExactSizeTransform = currentOutputImageId ? task?.exactSizeTransforms?.[currentOutputImageId] : undefined
   const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
 
   useEffect(() => {
@@ -251,7 +253,10 @@ export default function DetailModal() {
   const requestPrompt = task.transparentOutput && task.transparentPrompt
     ? task.transparentPrompt
     : task.prompt
-  const promptSentToApi = replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length).trim()
+  const promptSentToApi = appendTargetAspectPromptHint(
+    replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length),
+    task.params.size,
+  ).trim()
   const showRevisedPrompt = Boolean(currentRevisedPrompt && currentRevisedPrompt !== promptSentToApi)
   const codexCliPromptKey = getCodexCliPromptKey(settings)
   const hasHandledPromptWarning = settings.codexCli || dismissedCodexCliPrompts.includes(codexCliPromptKey)
@@ -1043,6 +1048,39 @@ export default function DetailModal() {
                   <DetailParamValue task={task} paramKey="output_format" className="font-medium" actualParams={currentActualParams} />
                 </div>
               </div>
+              {currentExactSizeTransform && (
+                <>
+                  <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
+                    <span className="text-gray-400 dark:text-gray-500">源图尺寸</span>
+                    <br />
+                    <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
+                      <span className="font-medium text-gray-700 dark:text-gray-300">
+                        {currentExactSizeTransform.sourceWidth}x{currentExactSizeTransform.sourceHeight}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
+                    <span className="text-gray-400 dark:text-gray-500">后处理</span>
+                    <br />
+                    <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
+                      <span className="font-medium text-gray-700 dark:text-gray-300">
+                        {currentExactSizeTransform.aspectMismatch
+                          ? `等比${currentExactSizeTransform.mode === 'cover' ? '裁切' : '留边'}`
+                          : '等比缩放'}
+                      </span>
+                    </div>
+                  </div>
+                </>
+              )}
+              {task.targetAspectPromptHint && (
+                <div className="col-span-2 bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
+                  <span className="text-gray-400 dark:text-gray-500">画幅提示</span>
+                  <br />
+                  <div className="mt-0.5 text-gray-700 dark:text-gray-300 whitespace-normal break-words">
+                    {task.targetAspectPromptHint}
+                  </div>
+                </div>
+              )}
               {isPngOutput ? (
                 <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
                   <span className="text-gray-400 dark:text-gray-500">透明背景</span>
@@ -1082,6 +1120,11 @@ export default function DetailModal() {
                 </div>
               )}
             </div>
+            {currentExactSizeTransform?.aspectMismatch && (
+              <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                API 返回比例与目标比例不同，已保持几何比例后处理。
+              </div>
+            )}
 
             {/* 时间 */}
             <div className="text-xs text-gray-400 dark:text-gray-500 mb-4">

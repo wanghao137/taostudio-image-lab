@@ -113,7 +113,12 @@ vi.mock('./lib/exactImageSize', () => ({
     const match = params.size.match(/^(\d+)x(\d+)$/)
     return match ? { width: Number(match[1]), height: Number(match[2]) } : null
   }),
-  resizeImageDataUrlToExactSize: vi.fn(async (dataUrl: string, target: { width: number; height: number }) => {
+  resizeImageDataUrlToExactSize: vi.fn(async (
+    dataUrl: string,
+    target: { width: number; height: number },
+    _outputFormat: string,
+    fitMode = 'cover',
+  ) => {
     const sourceMatch = dataUrl.match(/(\d+)x(\d+)/)
     const sourceWidth = sourceMatch ? Number(sourceMatch[1]) : 1024
     const sourceHeight = sourceMatch ? Number(sourceMatch[2]) : 1024
@@ -127,6 +132,19 @@ vi.mock('./lib/exactImageSize', () => ({
       sourceWidth,
       sourceHeight,
       resized: true,
+      drawPlan: {
+        mode: fitMode,
+        sourceWidth,
+        sourceHeight,
+        targetWidth: target.width,
+        targetHeight: target.height,
+        scale: 1,
+        drawX: 0,
+        drawY: 0,
+        drawWidth: target.width,
+        drawHeight: target.height,
+        aspectMismatch: sourceWidth / sourceHeight !== target.width / target.height,
+      },
     }
   }),
 }))
@@ -391,13 +409,23 @@ describe('mask draft lifecycle in store actions', () => {
     await submitTask()
     for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
 
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0].prompt).toContain('Target frame: vertical 9:16 composition')
     expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
       'data:image/png;base64,actual-1254x1254',
       { width: 2160, height: 3840 },
       'png',
+      'cover',
     )
     const [task] = useStore.getState().tasks
     expect(task.exactSizeOriginalImages).toHaveLength(1)
+    expect(task.exactSizeTransforms?.[task.outputImages[0]]).toMatchObject({
+      mode: 'cover',
+      sourceWidth: 1254,
+      sourceHeight: 1254,
+      targetWidth: 2160,
+      targetHeight: 3840,
+      aspectMismatch: true,
+    })
     expect(task.actualParams).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high', n: 1 })
     expect(task.actualParamsByImage?.[task.outputImages[0]]).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high' })
     const outputImage = await getImage(task.outputImages[0])

@@ -141,6 +141,22 @@ export const DEFAULT_PARAMS: TaskParams = {
   transparent_output: false,
 }
 
+export type ExactSizeFitMode = 'cover' | 'contain'
+
+export interface ExactSizeTransformRecord {
+  mode: ExactSizeFitMode
+  sourceWidth: number
+  sourceHeight: number
+  targetWidth: number
+  targetHeight: number
+  scale: number
+  drawX: number
+  drawY: number
+  drawWidth: number
+  drawHeight: number
+  aspectMismatch: boolean
+}
+
 // ===== 输入图片（UI 层面） =====
 
 export interface InputImage {
@@ -202,6 +218,10 @@ export interface TaskRecord {
   transparentOriginalImages?: string[]
   /** 精确尺寸后处理前的原始输出图片 id，顺序对应 outputImages */
   exactSizeOriginalImages?: string[]
+  /** 精确尺寸本地后处理几何信息，key 为 outputImages 中的图片 id */
+  exactSizeTransforms?: Record<string, ExactSizeTransformRecord>
+  /** 本地追加给 API 的目标画幅提示 */
+  targetAspectPromptHint?: string
   /** 输入图片的 image store id 列表 */
   inputImageIds: string[]
   maskTargetImageId?: string | null
