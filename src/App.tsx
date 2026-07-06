@@ -32,6 +32,7 @@ const FavoriteCollectionPickerModal = lazy(() =>
 const ManageCollectionsModal = lazy(() =>
   import('./components/FavoriteCollections').then((module) => ({ default: module.ManageCollectionsModal })),
 )
+const MobileComposeSheet = lazy(() => import('./components/MobileComposeSheet'))
 
 function GalleryWorkspaceHeader() {
   const tasks = useStore((s) => s.tasks)
@@ -129,8 +130,8 @@ export default function App() {
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
   const isMobile = useIsMobile()
-  // composeOpen 由 Task 5 的 MobileComposeSheet 消费；当前仅 setComposeOpen 由 FAB 触发。
-  const [, setComposeOpen] = useState(false)
+  // composeOpen 由 Task 5 的 MobileComposeSheet 消费；setComposeOpen 由 FAB 触发。
+  const [composeOpen, setComposeOpen] = useState(false)
   useDockerApiUrlMigrationNotice()
   useGlobalClickSuppression()
 
@@ -226,6 +227,13 @@ export default function App() {
           )}
           <InputBar />
         </>
+      )}
+
+      {/* 移动端创作抽屉（z-50，仅 <640px 渲染，组件内 sm:hidden 双重保险） */}
+      {isMobile && (
+        <Suspense fallback={null}>
+          <MobileComposeSheet open={composeOpen} onClose={() => setComposeOpen(false)} />
+        </Suspense>
       )}
 
       {/* 模态层：移动/桌面两端共用，保持在 Suspense 里 */}
