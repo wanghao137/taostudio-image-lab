@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook } from '@testing-library/react'
+import { renderHook, act } from '@testing-library/react'
 import { useIsMobile } from '../../hooks/useIsMobile'
 
 describe('useIsMobile', () => {
@@ -25,8 +25,9 @@ describe('useIsMobile', () => {
     const { result } = renderHook(() => useIsMobile())
     expect(result.current).toBe(false)
     vi.stubGlobal('innerWidth', 390)
-    window.dispatchEvent(new Event('resize'))
-    // renderHook 不会自动 re-render on 外部事件；rerun to confirm listener wired
-    expect(result.current).toBe(false) // still false until re-render
+    act(() => {
+      window.dispatchEvent(new Event('resize'))
+    })
+    expect(result.current).toBe(true)
   })
 })
