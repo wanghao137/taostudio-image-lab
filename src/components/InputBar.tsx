@@ -24,6 +24,7 @@ import { collectAgentRoundOutputImageSlots } from '../lib/agentImageReferences'
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { useTooltip } from '../hooks/useTooltip'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { useImageComposer } from '../hooks/useImageComposer'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
 import Select from './Select'
 import ViewportTooltip from './ViewportTooltip'
@@ -879,7 +880,7 @@ export default function InputBar() {
   const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage })
   const exactSizeHint = useHintTooltip({ enabled: () => exactSizeDisabled })
   const qualityHint = useHintTooltip({ enabled: () => settings.codexCli || isFalProvider })
-  const nLimitHint = useHintTooltip({ autoHideMs: 2000 })
+  const { nLimitHint, showNLimitHint, hideNLimitHint, clearAgentNHintTouchTimer } = useImageComposer()
   const maskTargetImage = maskDraft
     ? inputImages.find((img) => img.id === maskDraft.targetImageId) ?? null
     : null
@@ -1118,21 +1119,9 @@ export default function InputBar() {
     )
   }, [activeProfile.codexCli, agentAutoImageCount, params.n, setParams, showToast])
 
-  const showNLimitHint = useCallback(() => {
-    nLimitHint.show()
-  }, [nLimitHint])
-
-  const hideNLimitHint = useCallback(() => {
-    nLimitHint.hide()
-  }, [nLimitHint])
-
   const showAgentNHint = useCallback(() => {
     if (agentAutoImageCount) showNLimitHint()
   }, [agentAutoImageCount, showNLimitHint])
-
-  const clearAgentNHintTouchTimer = useCallback(() => {
-    nLimitHint.clearTimer()
-  }, [nLimitHint])
 
   const startAgentNHintTouch = useCallback(() => {
     if (!agentAutoImageCount) return
