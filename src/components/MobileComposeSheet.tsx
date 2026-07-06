@@ -19,7 +19,8 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
   const {
     prompt, setPrompt, inputImages,
     params, setParams, nInput, setNInput,
-    submitCurrentMode, hasSubmitApiConfig, activeAgentIsRunning, stopActiveAgentResponse,
+    submitCurrentMode, hasSubmitApiConfig, canSubmit, activeAgentIsRunning, stopActiveAgentResponse,
+    commitN,
     handleFiles, atImageLimit, uploadImageTooltipText,
     applyAsset4KOriginalRatioPreset,
     isFalTextToImage,
@@ -98,6 +99,7 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
             <Chip label="数量" value={`×${nInput || params.n}`} onClick={() => {
               const next = Math.min(4, (parseInt(nInput) || params.n) + 1)
               setNInput(String(next))
+              commitN()
             }} />
             <button onClick={applyAsset4KOriginalRatioPreset} className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-600 dark:border-white/10 dark:bg-white/5 dark:text-stone-300">
               4K
@@ -112,7 +114,8 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
         <div className="shrink-0 border-t border-stone-200/60 p-3 dark:border-white/5">
           <button
             onClick={onSubmit}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#df7b57] py-3 text-base font-semibold text-white active:scale-[0.99]"
+            disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
+            className={`flex w-full items-center justify-center gap-2 rounded-xl bg-[#df7b57] py-3 text-base font-semibold text-white ${(activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false) ? 'opacity-50' : 'active:scale-[0.99]'}`}
           >
             <Sparkles className="h-5 w-5" />
             {activeAgentIsRunning ? '停止' : '生成图像'}
