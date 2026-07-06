@@ -93,7 +93,14 @@ function TabButton({
  * 所以桌面设的主题移动端会读到，反之亦然。不复制 system 态（spec 未要求）。
  */
 function ThemeToggleButton() {
-  const [isDark, setIsDark] = useState(document.documentElement.classList.contains('dark'))
+  const [isDark, setIsDark] = useState(() => {
+    const saved = window.localStorage.getItem(THEME_KEY)
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    const dark = saved === 'dark' || (saved !== 'light' && prefersDark)
+    document.documentElement.classList.toggle('dark', dark)
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+    return dark
+  })
   const toggle = () => {
     const next = !isDark
     document.documentElement.classList.toggle('dark', next)
@@ -119,7 +126,7 @@ function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSetti
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-stone-300 dark:bg-stone-600" />
         <h3 className="mb-3 text-sm font-semibold text-stone-900 dark:text-stone-50">我的</h3>
         <button
-          onClick={onOpenSettings}
+          onClick={() => { onOpenSettings(); onClose() }}
           className="block w-full rounded-lg px-3 py-3 text-left text-sm text-stone-700 active:bg-stone-100 dark:text-stone-200 dark:active:bg-white/5"
         >
           设置
