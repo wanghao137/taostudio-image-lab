@@ -1,15 +1,17 @@
-import { lazy, Suspense, useEffect, useMemo } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { initStore } from './store'
 import { useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, hasUrlSettingParams } from './lib/urlSettings'
 import { mergeImportedSettings } from './lib/apiProfiles'
 import { getCustomProviderConfigUrl, loadCustomProviderSettingsFromUrl } from './lib/customProviderConfigUrl'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
+import { useIsMobile } from './hooks/useIsMobile'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import InputBar from './components/InputBar'
 import Toast from './components/Toast'
 import ImageContextMenu from './components/ImageContextMenu'
+import MobileShell from './components/MobileShell'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
 
 let customProviderConfigUrlImportStarted = false
@@ -126,6 +128,9 @@ export default function App() {
   const maskEditorImageId = useStore((s) => s.maskEditorImageId)
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
+  const isMobile = useIsMobile()
+  // composeOpen 由 Task 5 的 MobileComposeSheet 消费；当前仅 setComposeOpen 由 FAB 触发。
+  const [, setComposeOpen] = useState(false)
   useDockerApiUrlMigrationNotice()
   useGlobalClickSuppression()
 
@@ -173,29 +178,57 @@ export default function App() {
 
   return (
     <>
-      <Header />
-      {appMode === 'agent' ? (
-        <Suspense fallback={null}>
-          <AgentWorkspace />
-        </Suspense>
+      {isMobile ? (
+        <MobileShell onOpenCompose={() => setComposeOpen(true)}>
+          {appMode === 'agent' ? (
+            <Suspense fallback={null}>
+              <AgentWorkspace />
+            </Suspense>
+          ) : (
+            <div className="safe-area-x max-w-7xl mx-auto">
+              <GalleryWorkspaceHeader />
+              <SearchBar />
+              {filterFavorite && !activeFavoriteCollectionId ? (
+                <Suspense fallback={null}>
+                  <FavoriteCollectionsView />
+                </Suspense>
+              ) : (
+                <Suspense fallback={<div className="min-h-[220px]" />}>
+                  <TaskGrid />
+                </Suspense>
+              )}
+            </div>
+          )}
+        </MobileShell>
       ) : (
-        <main data-home-main data-drag-select-surface className="pb-48">
-          <div className="safe-area-x max-w-7xl mx-auto">
-            <GalleryWorkspaceHeader />
-            <SearchBar />
-            {filterFavorite && !activeFavoriteCollectionId ? (
-              <Suspense fallback={null}>
-                <FavoriteCollectionsView />
-              </Suspense>
-            ) : (
-              <Suspense fallback={<div className="min-h-[220px]" />}>
-                <TaskGrid />
-              </Suspense>
-            )}
-          </div>
-        </main>
+        <>
+          <Header />
+          {appMode === 'agent' ? (
+            <Suspense fallback={null}>
+              <AgentWorkspace />
+            </Suspense>
+          ) : (
+            <main data-home-main data-drag-select-surface className="pb-48">
+              <div className="safe-area-x max-w-7xl mx-auto">
+                <GalleryWorkspaceHeader />
+                <SearchBar />
+                {filterFavorite && !activeFavoriteCollectionId ? (
+                  <Suspense fallback={null}>
+                    <FavoriteCollectionsView />
+                  </Suspense>
+                ) : (
+                  <Suspense fallback={<div className="min-h-[220px]" />}>
+                    <TaskGrid />
+                  </Suspense>
+                )}
+              </div>
+            </main>
+          )}
+          <InputBar />
+        </>
       )}
-      <InputBar />
+
+      {/* 模态层：移动/桌面两端共用，保持在 Suspense 里 */}
       <Suspense fallback={null}>
         {detailTaskId ? <DetailModal /> : null}
         {lightboxImageId ? <Lightbox /> : null}
