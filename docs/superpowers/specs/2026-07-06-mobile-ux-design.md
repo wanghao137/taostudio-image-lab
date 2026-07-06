@@ -141,7 +141,7 @@
 | **`SearchBar` + 筛选** | 独立行 | 画廊 Tab 顶部 sticky 折叠条，点开才展开 |
 | **`DetailModal`**（67KB） | 居中模态 | **全屏 sheet**（`inset-0`），图在上、操作按钮区在下，可下滑收起 |
 | **`Lightbox`** | 居中预览 | 全屏 + **左右滑切换**多图 |
-| **`SettingsModal`**（126KB） | 巨型模态 | **拆成「我的」Tab 的分区列表**（API / 外观 / Provider / 高级），每项点进去是子页面。不一次铺开。 |
+| **`SettingsModal`**（126KB） | 巨型模态 | **本次：`<sm` 下用全屏 sheet 包裹现状**（`inset-0`、可下滑关闭、底部安全区），内容暂不拆分。**后续独立计划**：拆成「我的」Tab 的分区子页面（API / 外观 / Provider / 高级）。 |
 | **`MaskEditorModal`** | 全功能编辑器 | **降级提示**"建议桌面端"，不实现手机版 |
 | **`AgentWorkspace`** | 多图工作流 | 入口在「我的」，进入时提示"建议桌面端"，仍可进入 |
 | **`HistoryModal`** | 历史列表 | 移到「我的」→「历史」子页面 |
@@ -168,7 +168,7 @@
 
 | 件 | 作用 | 位置 |
 |---|---|---|
-| `useIsMobile()` hook | `matchMedia('(max-width:639px)')`，用于需要 JS 分支处（如渲染 Tab Bar） | `src/hooks/useIsMobile.ts` |
+| `useIsMobile()` hook | `matchMedia('(max-width:639px)')`，用于需要 JS 分支处（如渲染 Tab Bar）。**抽取现有 `InputBar.tsx:395` 和 `HelpModal.tsx:13` 的两份本地副本为统一 hook，并替换那两处引用。** | `src/hooks/useIsMobile.ts` |
 | `MobileTabBar` | 底部 4 格 + FAB | `src/components/MobileTabBar.tsx` |
 | `MobileComposeSheet` | 创作抽屉，复用 `useImageComposer` | `src/components/MobileComposeSheet.tsx` |
 | `MobileTopBar` | 极简顶栏 | `src/components/MobileTopBar.tsx` |
@@ -220,6 +220,7 @@
 - 移动端 Mask 编辑器实现（降级为提示）
 - 移动端 Agent 工作流的完整优化（降级为提示 + 可进入）
 - 4K 在移动端的完整平铺 UI（降级为二级 sheet）
+- **SettingsModal 拆成「我的」分区子页面** —— 本次仅用全屏 sheet 包裹现状；拆分留作后续独立计划
 - 云存储 / R2 / 元数据持久化（P2，独立轨道）
 - 任何 provider/proxy/API 行为改动
 
@@ -234,7 +235,7 @@
 - [ ] 画廊为单列大图卡片，搜索为顶部 sticky 折叠条
 - [ ] 「我的」Tab 包含设置分区列表、主题、安装、指南、统计
 - [ ] DetailModal / Lightbox 在 `<sm` 下全屏 sheet，可下滑关闭
-- [ ] SettingsModal 在 `<sm` 下拆成「我的」分区子页面
+- [ ] SettingsModal 在 `<sm` 下以全屏 sheet 包裹（`inset-0`、可下滑关闭、底部安全区），内容暂不拆分
 - [ ] `useImageComposer` 提取后桌面端 `InputBar` 行为完全等价（视觉 + 功能）
 - [ ] 桌面端（≥640px）渲染路径零改动，`npm run build` / `npm test` / `npm run lint` 通过
 - [ ] 安全区适配：Tab Bar 和生成按钮在 iPhone 全面屏下不被Home Indicator 遮挡
