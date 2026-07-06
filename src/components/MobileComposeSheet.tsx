@@ -20,7 +20,6 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
     prompt, setPrompt, inputImages,
     params, setParams, nInput, setNInput,
     submitCurrentMode, hasSubmitApiConfig, canSubmit, activeAgentIsRunning, stopActiveAgentResponse,
-    commitN,
     handleFiles, atImageLimit, uploadImageTooltipText,
     applyAsset4KOriginalRatioPreset,
     isFalTextToImage,
@@ -97,9 +96,12 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
               setParams({ quality: next as typeof params.quality })
             }} />
             <Chip label="数量" value={`×${nInput || params.n}`} onClick={() => {
+              // 直接 setParams 同步持久化（不能用 commitN，因为它读异步的 nInput state，
+              // 此处 setNInput 后立即调 commitN 会读到旧值）。next 已用 outputImageLimit 之外的
+              // 简单上限 4 钳制；outputImageLimit 的硬上限由 submitTask 端再守一道。
               const next = Math.min(4, (parseInt(nInput) || params.n) + 1)
               setNInput(String(next))
-              commitN()
+              setParams({ n: next })
             }} />
             <button onClick={applyAsset4KOriginalRatioPreset} className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-600 dark:border-white/10 dark:bg-white/5 dark:text-stone-300">
               4K
