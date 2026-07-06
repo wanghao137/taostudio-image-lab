@@ -5,16 +5,9 @@ import { ALL_FAVORITES_COLLECTION_ID, deleteFavoriteCollection, getTaskFavoriteC
 import { type TaskRecord } from '../types'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
-import { formatImageRatio, type CommonImageRatio } from '../lib/size'
 import {
   ASSET_4K_RATIO_PRESETS,
-  createAsset4KOriginalRatioPresetParams,
-  createAsset4KRatioPresetParams,
-  getAsset4KInheritedRatioSource,
-  getAsset4KOriginalRatioSize,
   getAsset4KRatioSize,
-  isAsset4KOriginalRatioPresetActive,
-  isAsset4KRatioPresetActive,
 } from '../lib/asset4kPresets'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
@@ -466,7 +459,6 @@ export default function InputBar() {
     setOutputCompressionInput,
     nInput,
     setNInputFocused,
-    activeProfile,
     activeAgentConversation,
     activeAgentIsRunning,
     hasSubmitApiConfig,
@@ -490,12 +482,25 @@ export default function InputBar() {
     displaySize,
     exactSizeDisabled,
     exactSizeEnabled,
+    showAsset4KRatioOptions,
+    setShowAsset4KRatioOptions,
+    generationStrategyItems,
+    asset4KSourceSize,
+    asset4KOriginalRatioLabel,
+    asset4KOriginalSize,
+    asset4KSourceSizeLabel,
+    asset4KSourceKindLabel,
+    asset4KKeepRatioHint,
+    activeAsset4KOriginalRatio,
+    activeAsset4KRatio,
     atImageLimit,
     uploadImageTooltipText,
     maskTargetImage,
     referenceImages,
     commitOutputCompression,
     commitN,
+    applyAsset4KOriginalRatioPreset,
+    applyAsset4KRatioPreset,
     nLimitHint,
     hideNLimitHint,
     clearAgentNHintTouchTimer,
@@ -719,7 +724,6 @@ export default function InputBar() {
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
-  const [showAsset4KRatioOptions, setShowAsset4KRatioOptions] = useState(false)
   const [showMobileUploadMenu, setShowMobileUploadMenu] = useState(false)
   const [maskPreviewUrl, setMaskPreviewUrl] = useState('')
   const [imageDragIndex, setImageDragIndex] = useState<number | null>(null)
@@ -787,53 +791,6 @@ export default function InputBar() {
     syncMentionTagSelection(el)
     setPrompt(getContentEditablePlainText(el))
   }, [setPrompt])
-  const baseGenerationStrategyItems = isFalProvider
-    ? ['fal.ai 队列', '自动恢复']
-    : [
-        activeProfile.apiMode === 'responses' ? 'Responses API' : 'Images API',
-        activeProfile.streamImages ? '流式返回' : '同步返回',
-        `${activeProfile.timeout}s 超时`,
-      ]
-  const generationStrategyItems = exactSizeEnabled
-    ? [...baseGenerationStrategyItems, '精确尺寸']
-    : baseGenerationStrategyItems
-  const asset4KPresetN = agentAutoImageCount ? params.n : 1
-  const asset4KInheritedSource = getAsset4KInheritedRatioSource({
-    inputImages,
-    currentSize: params.size,
-  })
-  const asset4KSourceSize = asset4KInheritedSource?.size ?? null
-  const asset4KOriginalRatioLabel = asset4KSourceSize
-    ? formatImageRatio(asset4KSourceSize.width, asset4KSourceSize.height)
-    : ''
-  const asset4KOriginalSize = getAsset4KOriginalRatioSize(asset4KSourceSize)
-  const asset4KSourceSizeLabel = asset4KSourceSize
-    ? `${asset4KSourceSize.width}×${asset4KSourceSize.height}`
-    : ''
-  const asset4KSourceKindLabel = asset4KInheritedSource?.kind === 'input-image'
-    ? '源图'
-    : asset4KInheritedSource?.kind === 'current-size'
-    ? '当前比例'
-    : '比例未定'
-  const asset4KKeepRatioHint = asset4KOriginalSize
-    ? `${asset4KSourceKindLabel} ${asset4KOriginalRatioLabel} → ${asset4KOriginalSize}`
-    : inputImages.length > 0
-    ? '源图尺寸读取后可用'
-    : '先选择尺寸或上传源图'
-  const activeAsset4KOriginalRatio = isAsset4KOriginalRatioPresetActive(
-    params,
-    asset4KSourceSize,
-    { codexCli: activeProfile.codexCli, n: asset4KPresetN },
-  )
-  const activeAsset4KRatio = ASSET_4K_RATIO_PRESETS.find((item) =>
-    isAsset4KRatioPresetActive(params, item.value, { codexCli: activeProfile.codexCli, n: asset4KPresetN }),
-  )?.value
-
-  useEffect(() => {
-    if (activeAsset4KRatio && !activeAsset4KOriginalRatio) {
-      setShowAsset4KRatioOptions(true)
-    }
-  }, [activeAsset4KOriginalRatio, activeAsset4KRatio])
 
   const qualityOptions = isFalProvider
     ? [
@@ -995,49 +952,6 @@ export default function InputBar() {
       cancelled = true
     }
   }, [maskDraft, maskTargetImage?.id, maskTargetImage?.dataUrl])
-
-  const applyAsset4KOriginalRatioPreset = useCallback(() => {
-    const patch = createAsset4KOriginalRatioPresetParams(asset4KSourceSize, {
-      codexCli: activeProfile.codexCli,
-      n: agentAutoImageCount ? params.n : 1,
-    })
-    if (!patch) {
-      showToast('请先上传源图，或选择一个明确的基准尺寸', 'info')
-      return
-    }
-
-    setParams(patch)
-    showToast(
-      activeProfile.codexCli
-        ? `已切换保持比例 ${asset4KOriginalRatioLabel || ''} 4K PNG；当前 Codex CLI 配置不支持 high 质量参数`
-        : `已切换保持比例 ${asset4KOriginalRatioLabel || ''} 4K high PNG`,
-      activeProfile.codexCli ? 'info' : 'success',
-    )
-  }, [
-    activeProfile.codexCli,
-    agentAutoImageCount,
-    asset4KOriginalRatioLabel,
-    asset4KSourceSize,
-    params.n,
-    setParams,
-    showToast,
-  ])
-
-  const applyAsset4KRatioPreset = useCallback((ratio: CommonImageRatio) => {
-    const patch = createAsset4KRatioPresetParams(ratio, {
-      codexCli: activeProfile.codexCli,
-      n: agentAutoImageCount ? params.n : 1,
-    })
-    if (!patch) return
-
-    setParams(patch)
-    showToast(
-      activeProfile.codexCli
-        ? `已切换改比例 ${ratio} PNG；当前 Codex CLI 配置不支持 high 质量参数`
-        : `已切换改比例 ${ratio} high PNG`,
-      activeProfile.codexCli ? 'info' : 'success',
-    )
-  }, [activeProfile.codexCli, agentAutoImageCount, params.n, setParams, showToast])
 
   const clearImageHintTimer = () => {
     if (imageHintTimerRef.current != null) {

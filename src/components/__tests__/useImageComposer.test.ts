@@ -102,6 +102,28 @@ describe('useImageComposer (core wiring)', () => {
   })
 })
 
+describe('useImageComposer (4K wiring)', () => {
+  it('exposes applyAsset4KOriginalRatioPreset as a function', () => {
+    const { result } = renderHook(() => useImageComposer())
+    expect(typeof result.current.applyAsset4KOriginalRatioPreset).toBe('function')
+  })
+
+  it('exposes applyAsset4KRatioPreset as a function', () => {
+    const { result } = renderHook(() => useImageComposer())
+    expect(typeof result.current.applyAsset4KRatioPreset).toBe('function')
+  })
+
+  it('exposes generationStrategyItems as an array', () => {
+    const { result } = renderHook(() => useImageComposer())
+    expect(Array.isArray(result.current.generationStrategyItems)).toBe(true)
+  })
+
+  it('showAsset4KRatioOptions starts false', () => {
+    const { result } = renderHook(() => useImageComposer())
+    expect(result.current.showAsset4KRatioOptions).toBe(false)
+  })
+})
+
 describe('useImageComposer (commitN clamping)', () => {
   it('commitN clamps n to outputImageLimit when nInput exceeds it', () => {
     // Seed store with settings that yield a known outputImageLimit.
