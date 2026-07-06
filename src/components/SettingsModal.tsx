@@ -1153,14 +1153,14 @@ export default function SettingsModal() {
   }
 
   return (
-        <div data-no-drag-select className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+        <div data-no-drag-select className="fixed inset-0 z-[70] flex items-center justify-center p-4 max-sm:items-end max-sm:p-0">
       <div
         className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in"
         onClick={handleClose}
       />
       <div
         ref={settingsScrollBoundaryRef}
-        className="relative z-10 w-full max-w-3xl rounded-3xl border border-white/50 bg-white/95 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex h-[85vh] sm:h-[600px] flex-col overflow-hidden"
+        className="relative z-10 w-full max-w-3xl rounded-3xl border border-white/50 bg-white/95 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex h-[85vh] sm:h-[600px] flex-col overflow-hidden max-sm:h-screen max-sm:rounded-none max-sm:max-w-full"
       >
         {/* Header */}
         <div className="flex items-center justify-between shrink-0 p-5 border-b border-gray-100 dark:border-white/[0.08]">
