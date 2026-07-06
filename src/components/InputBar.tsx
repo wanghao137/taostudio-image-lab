@@ -23,6 +23,7 @@ import { getSafeBoundingClientRect } from '../lib/domRect'
 import { collectAgentRoundOutputImageSlots } from '../lib/agentImageReferences'
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { useTooltip } from '../hooks/useTooltip'
+import { useIsMobile } from '../hooks/useIsMobile'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
 import Select from './Select'
 import ViewportTooltip from './ViewportTooltip'
@@ -390,16 +391,6 @@ function getFavoriteCollectionTasksForBatch(collectionId: string, tasks: TaskRec
 
 function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 640)
-  useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 640)
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
-  return isMobile
 }
 
 type AtImageOption =
