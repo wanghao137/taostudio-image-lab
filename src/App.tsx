@@ -1,16 +1,21 @@
-import { lazy, Suspense, useEffect, useMemo } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { initStore } from './store'
 import { useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, hasUrlSettingParams } from './lib/urlSettings'
 import { mergeImportedSettings } from './lib/apiProfiles'
 import { getCustomProviderConfigUrl, loadCustomProviderSettingsFromUrl } from './lib/customProviderConfigUrl'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
+import { useIsMobile } from './hooks/useIsMobile'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import InputBar from './components/InputBar'
 import Toast from './components/Toast'
 import ImageContextMenu from './components/ImageContextMenu'
+import MobileShell from './components/MobileShell'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
+
+// 移动端统计降级：仅保留这三项；桌面端 6 项不变。
+const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
 
 let customProviderConfigUrlImportStarted = false
 const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
@@ -30,6 +35,7 @@ const FavoriteCollectionPickerModal = lazy(() =>
 const ManageCollectionsModal = lazy(() =>
   import('./components/FavoriteCollections').then((module) => ({ default: module.ManageCollectionsModal })),
 )
+const MobileComposeSheet = lazy(() => import('./components/MobileComposeSheet'))
 
 function GalleryWorkspaceHeader() {
   const tasks = useStore((s) => s.tasks)
@@ -37,6 +43,7 @@ function GalleryWorkspaceHeader() {
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const isMobile = useIsMobile()
 
   const stats = useMemo(() => {
     return tasks.reduce(
@@ -72,6 +79,10 @@ function GalleryWorkspaceHeader() {
     { label: '输出', value: stats.outputs, tone: 'text-[#df7b57] dark:text-[#ffb096]' },
     { label: '收藏', value: stats.saved, tone: 'text-amber-500 dark:text-amber-300' },
   ]
+  // 移动端仅保留「输出 / 生成中 / 收藏」三项，桌面端 6 项不变。
+  const visibleStatItems = isMobile
+    ? statItems.filter((item) => MOBILE_STAT_LABELS.includes(item.label))
+    : statItems
 
   return (
     <section data-no-drag-select data-ui-summary className="mt-4">
@@ -96,8 +107,8 @@ function GalleryWorkspaceHeader() {
               </p>
             ) : null}
           </div>
-          <div className="flex gap-1.5 overflow-x-auto pb-0.5 sm:items-center sm:justify-end sm:gap-2 sm:overflow-visible sm:pb-0">
-            {statItems.map((item) => (
+          <div className="flex gap-1.5 sm:items-center sm:justify-end sm:gap-2 sm:overflow-visible sm:pb-0">
+            {visibleStatItems.map((item) => (
               <div
                 key={item.label}
                 className="min-w-[76px] shrink-0 rounded-lg border border-stone-200/70 bg-stone-50/80 px-2.5 py-2 dark:border-white/[0.08] dark:bg-black/18"
@@ -126,6 +137,9 @@ export default function App() {
   const maskEditorImageId = useStore((s) => s.maskEditorImageId)
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
+  const isMobile = useIsMobile()
+  // composeOpen 由 Task 5 的 MobileComposeSheet 消费；setComposeOpen 由 FAB 触发。
+  const [composeOpen, setComposeOpen] = useState(false)
   useDockerApiUrlMigrationNotice()
   useGlobalClickSuppression()
 
@@ -173,29 +187,69 @@ export default function App() {
 
   return (
     <>
-      <Header />
-      {appMode === 'agent' ? (
-        <Suspense fallback={null}>
-          <AgentWorkspace />
-        </Suspense>
-      ) : (
-        <main data-home-main data-drag-select-surface className="pb-48">
-          <div className="safe-area-x max-w-7xl mx-auto">
-            <GalleryWorkspaceHeader />
-            <SearchBar />
-            {filterFavorite && !activeFavoriteCollectionId ? (
+      {isMobile ? (
+        <MobileShell onOpenCompose={() => setComposeOpen(true)}>
+          {appMode === 'agent' ? (
+            <div className="safe-area-x">
+              <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
+              </div>
               <Suspense fallback={null}>
-                <FavoriteCollectionsView />
+                <AgentWorkspace />
               </Suspense>
-            ) : (
-              <Suspense fallback={<div className="min-h-[220px]" />}>
-                <TaskGrid />
-              </Suspense>
-            )}
-          </div>
-        </main>
+            </div>
+          ) : (
+            <div className="safe-area-x max-w-7xl mx-auto">
+              <GalleryWorkspaceHeader />
+              <SearchBar />
+              {filterFavorite && !activeFavoriteCollectionId ? (
+                <Suspense fallback={null}>
+                  <FavoriteCollectionsView />
+                </Suspense>
+              ) : (
+                <Suspense fallback={<div className="min-h-[220px]" />}>
+                  <TaskGrid />
+                </Suspense>
+              )}
+            </div>
+          )}
+        </MobileShell>
+      ) : (
+        <>
+          <Header />
+          {appMode === 'agent' ? (
+            <Suspense fallback={null}>
+              <AgentWorkspace />
+            </Suspense>
+          ) : (
+            <main data-home-main data-drag-select-surface className="pb-48">
+              <div className="safe-area-x max-w-7xl mx-auto">
+                <GalleryWorkspaceHeader />
+                <SearchBar />
+                {filterFavorite && !activeFavoriteCollectionId ? (
+                  <Suspense fallback={null}>
+                    <FavoriteCollectionsView />
+                  </Suspense>
+                ) : (
+                  <Suspense fallback={<div className="min-h-[220px]" />}>
+                    <TaskGrid />
+                  </Suspense>
+                )}
+              </div>
+            </main>
+          )}
+          <InputBar />
+        </>
       )}
-      <InputBar />
+
+      {/* 移动端创作抽屉（z-50，仅 <640px 渲染，组件内 sm:hidden 双重保险） */}
+      {isMobile && (
+        <Suspense fallback={null}>
+          <MobileComposeSheet open={composeOpen} onClose={() => setComposeOpen(false)} />
+        </Suspense>
+      )}
+
+      {/* 模态层：移动/桌面两端共用，保持在 Suspense 里 */}
       <Suspense fallback={null}>
         {detailTaskId ? <DetailModal /> : null}
         {lightboxImageId ? <Lightbox /> : null}

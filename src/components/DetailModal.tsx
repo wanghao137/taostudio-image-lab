@@ -3,6 +3,8 @@ import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, 
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { useTooltip } from '../hooks/useTooltip'
+import { useIsMobile } from '../hooks/useIsMobile'
+import { useMobileSheet } from '../hooks/useMobileSheet'
 import { formatImageRatio } from '../lib/size'
 import { ActualValueBadge, DetailParamValue } from '../lib/paramDisplay'
 import { copyImageSourceToClipboard, copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
@@ -55,6 +57,10 @@ export default function DetailModal() {
   const downloadOriginalImageTooltip = useTooltip()
   const downloadSourceImageTooltip = useTooltip()
   const downloadAllTooltip = useTooltip()
+
+  // 移动端：全屏 sheet + 下滑关闭（仅 <640px 生效，桌面完全不变）
+  const isMobile = useIsMobile()
+  const sheet = useMobileSheet({ open: Boolean(detailTaskId), onClose: () => setDetailTaskId(null), enabled: isMobile })
 
   const clearTextSelection = () => {
     const selection = window.getSelection()
@@ -463,15 +469,25 @@ export default function DetailModal() {
   return (
     <div
       data-no-drag-select
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 max-sm:items-end max-sm:justify-end max-sm:p-0"
       onClick={() => setDetailTaskId(null)}
     >
       <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
       <div
-        ref={modalRef}
-        className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in"
+        ref={(el) => { modalRef.current = el; sheet.sheetRef.current = el }}
+        style={{ transform: `translateY(${sheet.dragTranslateY}px)` }}
+        className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in max-sm:h-screen max-sm:rounded-none max-sm:w-full max-sm:max-h-none"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* 移动端抓手：下滑关闭 */}
+        <div
+          className="flex shrink-0 cursor-grab items-center justify-center py-2 sm:hidden active:cursor-grabbing"
+          onPointerDown={sheet.onDragStart}
+          onPointerMove={sheet.onDragMove}
+          onPointerUp={sheet.onDragEnd}
+        >
+          <div className="h-1 w-10 rounded-full bg-stone-300 dark:bg-stone-600" />
+        </div>
         <div className="flex h-14 items-center justify-end px-4 md:hidden">
           <button
             onClick={() => setDetailTaskId(null)}
