@@ -14,6 +14,9 @@ import ImageContextMenu from './components/ImageContextMenu'
 import MobileShell from './components/MobileShell'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
 
+// 移动端统计降级：仅保留这三项；桌面端 6 项不变。
+const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
+
 let customProviderConfigUrlImportStarted = false
 const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
 const TaskGrid = lazy(() => import('./components/TaskGrid'))
@@ -40,6 +43,7 @@ function GalleryWorkspaceHeader() {
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const isMobile = useIsMobile()
 
   const stats = useMemo(() => {
     return tasks.reduce(
@@ -75,6 +79,10 @@ function GalleryWorkspaceHeader() {
     { label: '输出', value: stats.outputs, tone: 'text-[#df7b57] dark:text-[#ffb096]' },
     { label: '收藏', value: stats.saved, tone: 'text-amber-500 dark:text-amber-300' },
   ]
+  // 移动端仅保留「输出 / 生成中 / 收藏」三项，桌面端 6 项不变。
+  const visibleStatItems = isMobile
+    ? statItems.filter((item) => MOBILE_STAT_LABELS.includes(item.label))
+    : statItems
 
   return (
     <section data-no-drag-select data-ui-summary className="mt-4">
@@ -99,8 +107,8 @@ function GalleryWorkspaceHeader() {
               </p>
             ) : null}
           </div>
-          <div className="flex gap-1.5 overflow-x-auto pb-0.5 sm:items-center sm:justify-end sm:gap-2 sm:overflow-visible sm:pb-0">
-            {statItems.map((item) => (
+          <div className="flex gap-1.5 sm:items-center sm:justify-end sm:gap-2 sm:overflow-visible sm:pb-0">
+            {visibleStatItems.map((item) => (
               <div
                 key={item.label}
                 className="min-w-[76px] shrink-0 rounded-lg border border-stone-200/70 bg-stone-50/80 px-2.5 py-2 dark:border-white/[0.08] dark:bg-black/18"
