@@ -14,16 +14,16 @@ describe('useImageComposer (seed)', () => {
     expect(result.current.nLimitHint.visible).toBe(false)
   })
 
-  it('showNLimitHint shows the hint', () => {
+  it('nLimitHint.show shows the hint', () => {
     const { result } = renderHook(() => useImageComposer())
-    act(() => result.current.showNLimitHint())
+    act(() => result.current.nLimitHint.show())
     expect(result.current.nLimitHint.visible).toBe(true)
   })
 
-  it('hideNLimitHint hides the hint', () => {
+  it('nLimitHint.hide hides the hint', () => {
     const { result } = renderHook(() => useImageComposer())
-    act(() => result.current.showNLimitHint())
-    act(() => result.current.hideNLimitHint())
+    act(() => result.current.nLimitHint.show())
+    act(() => result.current.nLimitHint.hide())
     expect(result.current.nLimitHint.visible).toBe(false)
   })
 
@@ -101,3 +101,33 @@ describe('useImageComposer (core wiring)', () => {
     expect(typeof result.current.handleNLimitIncreaseAttempt).toBe('function')
   })
 })
+
+describe('useImageComposer (commitN clamping)', () => {
+  it('commitN clamps n to outputImageLimit when nInput exceeds it', () => {
+    // Seed store with settings that yield a known outputImageLimit.
+    // { apiUrl, apiKey, model } (no profiles) → normalizeSettings builds a default
+    // openai profile, so getOutputImageLimitForSettings returns MAX_OPENAI_OUTPUT_IMAGES (10).
+    useStore.setState({
+      settings: { apiUrl: 'https://x', apiKey: 'k', model: 'gpt-image-1' } as any,
+      params: {
+        size: 'auto',
+        exact_size: false,
+        quality: 'auto',
+        output_format: 'png',
+        output_compression: null,
+        moderation: 'auto',
+        n: 1,
+        transparent_output: false,
+      },
+    })
+    const { result } = renderHook(() => useImageComposer())
+    const limit = result.current.outputImageLimit
+    // Set nInput above the limit, then commit.
+    act(() => result.current.setNInput('20'))
+    act(() => result.current.commitN())
+    // commitN clamps to [1, outputImageLimit]; with nInput 20 > limit it lands on the limit.
+    expect(useStore.getState().params.n).toBe(limit)
+    expect(result.current.nInput).toBe(String(limit))
+  })
+})
+
