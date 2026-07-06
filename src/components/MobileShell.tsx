@@ -1,5 +1,5 @@
-import { useState, type ComponentType, type ReactNode } from 'react'
-import { Image as ImageIcon, Star, Sparkles, User, Moon, Sun } from 'lucide-react'
+import { useMemo, useState, type ComponentType, type ReactNode } from 'react'
+import { Image as ImageIcon, Star, Sparkles, User, Moon, Sun, BookOpen, Bot } from 'lucide-react'
 import { useStore } from '../store'
 
 interface MobileShellProps {
@@ -116,6 +116,42 @@ function ThemeToggleButton() {
 }
 
 function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSettings: () => void }) {
+  const setSupportPromptOpen = useStore((s) => s.setSupportPromptOpen)
+  const setAppMode = useStore((s) => s.setAppMode)
+  const setConfirmDialog = useStore((s) => s.setConfirmDialog)
+  const tasks = useStore((s) => s.tasks)
+
+  const stats = useMemo(
+    () =>
+      tasks.reduce(
+        (acc, t) => {
+          acc.total += 1
+          acc.outputs += t.status === 'done' ? t.outputImages.length : 0
+          acc.saved += t.isFavorite ? 1 : 0
+          return acc
+        },
+        { total: 0, outputs: 0, saved: 0 },
+      ),
+    [tasks],
+  )
+
+  const openGuide = () => {
+    setSupportPromptOpen(true)
+    onClose()
+  }
+  const openAgent = () => {
+    setConfirmDialog({
+      title: '智能体工作台',
+      message: '智能体为多图工作流，建议在桌面端使用以获得更好体验。仍要继续吗？',
+      confirmText: '继续',
+      cancelText: '取消',
+      action: () => {
+        setAppMode('agent')
+        onClose()
+      },
+    })
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-end" onClick={onClose}>
       <div className="absolute inset-0 bg-black/40" />
@@ -125,14 +161,47 @@ function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSetti
       >
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-stone-300 dark:bg-stone-600" />
         <h3 className="mb-3 text-sm font-semibold text-stone-900 dark:text-stone-50">我的</h3>
-        <button
-          onClick={() => { onOpenSettings(); onClose() }}
-          className="block w-full rounded-lg px-3 py-3 text-left text-sm text-stone-700 active:bg-stone-100 dark:text-stone-200 dark:active:bg-white/5"
-        >
-          设置
-        </button>
-        {/* 其余入口（主题/安装/指南/历史/智能体）在后续任务补 */}
+
+        {/* 统计摘要 */}
+        <div className="mb-4 grid grid-cols-3 gap-2">
+          <Stat label="输出" value={stats.outputs} tone="text-[#df7b57] dark:text-[#ffb096]" />
+          <Stat label="收藏" value={stats.saved} tone="text-amber-500 dark:text-amber-300" />
+          <Stat label="任务" value={stats.total} tone="text-stone-900 dark:text-stone-50" />
+        </div>
+
+        <EntryRow icon={BookOpen} label="操作指南" onClick={openGuide} />
+        <EntryRow icon={Bot} label="智能体工作台" onClick={openAgent} />
+        <EntryRow icon={User} label="设置" onClick={() => { onOpenSettings(); onClose() }} />
       </div>
     </div>
+  )
+}
+
+function Stat({ label, value, tone }: { label: string; value: number; tone: string }) {
+  return (
+    <div className="rounded-lg border border-stone-200/70 bg-stone-50/80 px-2 py-2 text-center dark:border-white/[0.08] dark:bg-black/18">
+      <div className={`font-mono text-lg font-semibold leading-none ${tone}`}>{value}</div>
+      <div className="mt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-stone-400 dark:text-stone-500">{label}</div>
+    </div>
+  )
+}
+
+function EntryRow({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: ComponentType<{ className?: string }>
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm text-stone-700 active:bg-stone-100 dark:text-stone-200 dark:active:bg-white/5"
+    >
+      <Icon className="h-4 w-4 text-stone-400 dark:text-stone-500" />
+      {label}
+    </button>
   )
 }

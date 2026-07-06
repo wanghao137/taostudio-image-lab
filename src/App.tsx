@@ -190,9 +190,14 @@ export default function App() {
       {isMobile ? (
         <MobileShell onOpenCompose={() => setComposeOpen(true)}>
           {appMode === 'agent' ? (
-            <Suspense fallback={null}>
-              <AgentWorkspace />
-            </Suspense>
+            <div className="safe-area-x">
+              <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
+              </div>
+              <Suspense fallback={null}>
+                <AgentWorkspace />
+              </Suspense>
+            </div>
           ) : (
             <div className="safe-area-x max-w-7xl mx-auto">
               <GalleryWorkspaceHeader />
