@@ -476,7 +476,7 @@ export default function DetailModal() {
       <div
         ref={(el) => { modalRef.current = el; sheet.sheetRef.current = el }}
         style={{ transform: `translateY(${sheet.dragTranslateY}px)` }}
-        className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in max-sm:h-screen max-sm:rounded-none max-sm:w-full max-sm:max-h-none"
+        className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in max-sm:h-screen max-sm:rounded-none max-sm:w-full max-sm:max-h-none max-sm:pt-[env(safe-area-inset-top)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 移动端抓手：下滑关闭 */}
