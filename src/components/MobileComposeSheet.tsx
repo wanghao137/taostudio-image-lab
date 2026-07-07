@@ -22,13 +22,14 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
     submitCurrentMode, hasSubmitApiConfig, canSubmit, activeAgentIsRunning, stopActiveAgentResponse,
     handleFiles, atImageLimit, uploadImageTooltipText,
     applyAsset4KOriginalRatioPreset,
-    isFalTextToImage,
+    isFalTextToImage, outputImageLimit,
   } = composer
   const removeInputImage = useStore((s) => s.removeInputImage)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const sheet = useMobileSheet({ open, onClose })
   const [moreOpen, setMoreOpen] = useState(false)
   const [sizePickerOpen, setSizePickerOpen] = useState(false)
+  const [openMenu, setOpenMenu] = useState<'none' | 'quality' | 'count'>('none')
 
   if (!open) return null
 
@@ -89,20 +90,32 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
           )}
 
           {/* 一行胶囊：尺寸 / 质量 / 数量 / 4K / 更多 */}
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="relative mt-3 flex flex-wrap gap-2">
             <Chip label="尺寸" value={params.size === 'auto' ? '自动' : params.size} onClick={() => setSizePickerOpen(true)} />
-            <Chip label="质量" value={params.quality === 'auto' ? '自动' : params.quality} onClick={() => {
-              const next = params.quality === 'auto' ? 'high' : params.quality === 'high' ? 'medium' : params.quality === 'medium' ? 'low' : 'auto'
-              setParams({ quality: next as typeof params.quality })
-            }} />
-            <Chip label="数量" value={`×${nInput || params.n}`} onClick={() => {
-              // 直接 setParams 同步持久化（不能用 commitN，因为它读异步的 nInput state，
-              // 此处 setNInput 后立即调 commitN 会读到旧值）。next 已用 outputImageLimit 之外的
-              // 简单上限 4 钳制；outputImageLimit 的硬上限由 submitTask 端再守一道。
-              const next = Math.min(4, (parseInt(nInput) || params.n) + 1)
-              setNInput(String(next))
-              setParams({ n: next })
-            }} />
+            <div className="relative">
+              <Chip label="质量" value={qualityLabel(params.quality)} onClick={() => setOpenMenu(openMenu === 'quality' ? 'none' : 'quality')} active={openMenu === 'quality'} />
+              {openMenu === 'quality' && (
+                <ChipMenu onClose={() => setOpenMenu('none')}>
+                  {(['auto', 'high', 'medium', 'low'] as const).map((q) => (
+                    <ChipMenuItem key={q} active={params.quality === q} onClick={() => { setParams({ quality: q }); setOpenMenu('none') }}>
+                      {qualityLabel(q)}
+                    </ChipMenuItem>
+                  ))}
+                </ChipMenu>
+              )}
+            </div>
+            <div className="relative">
+              <Chip label="数量" value={`×${nInput || params.n}`} onClick={() => setOpenMenu(openMenu === 'count' ? 'none' : 'count')} active={openMenu === 'count'} />
+              {openMenu === 'count' && (
+                <ChipMenu onClose={() => setOpenMenu('none')}>
+                  {countOptions(outputImageLimit).map((n) => (
+                    <ChipMenuItem key={n} active={(Number(nInput) || params.n) === n} onClick={() => { setNInput(String(n)); setParams({ n }); setOpenMenu('none') }}>
+                      ×{n}
+                    </ChipMenuItem>
+                  ))}
+                </ChipMenu>
+              )}
+            </div>
             <button onClick={applyAsset4KOriginalRatioPreset} className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-600 dark:border-white/10 dark:bg-white/5 dark:text-stone-300">
               4K
             </button>
@@ -141,12 +154,46 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
   )
 }
 
-function Chip({ label, value, onClick }: { label: string; value: string; onClick: () => void }) {
+function Chip({ label, value, onClick, active = false }: { label: string; value: string; onClick: () => void; active?: boolean }) {
   return (
-    <button onClick={onClick} className="flex items-center gap-1 rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs text-stone-700 dark:border-white/10 dark:bg-white/5 dark:text-stone-200">
-      <span className="text-stone-400">{label}</span>
+    <button onClick={onClick} className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs ${active ? 'border-[#df7b57] bg-[#df7b57]/10 text-[#df7b57]' : 'border-stone-200 bg-white text-stone-700 dark:border-white/10 dark:bg-white/5 dark:text-stone-200'}`}>
+      <span className={active ? '' : 'text-stone-400'}>{label}</span>
       <span className="font-medium">{value}</span>
-      <ChevronDown className="h-3 w-3 text-stone-400" />
+      <ChevronDown className={`h-3 w-3 transition-transform ${active ? 'rotate-180' : ''} ${active ? '' : 'text-stone-400'}`} />
     </button>
   )
+}
+
+/**
+ * chip 下拉浮层。绝对定位在 chip 正下方，点遮罩或外部关闭。
+ */
+function ChipMenu({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  return (
+    <>
+      {/* 全屏遮罩捕获外部点击 */}
+      <div className="fixed inset-0 z-[55]" onClick={onClose} />
+      {/* 下拉菜单 */}
+      <div className="absolute left-0 top-full z-[56] mt-1 min-w-[120px] overflow-hidden rounded-xl border border-stone-200 bg-white py-1 shadow-xl dark:border-white/10 dark:bg-[#1a1612]">
+        {children}
+      </div>
+    </>
+  )
+}
+
+function ChipMenuItem({ children, active, onClick }: { children: React.ReactNode; active: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className={`flex w-full items-center px-4 py-2.5 text-left text-sm ${active ? 'bg-[#df7b57]/10 font-medium text-[#df7b57]' : 'text-stone-700 dark:text-stone-200'}`}>
+      {children}
+    </button>
+  )
+}
+
+function qualityLabel(q: 'auto' | 'low' | 'medium' | 'high'): string {
+  return q === 'auto' ? '自动' : q === 'high' ? '高' : q === 'medium' ? '中' : '低'
+}
+
+function countOptions(limit: number): number[] {
+  // 数量选项 1..min(4, outputImageLimit)
+  const max = Math.min(4, Math.max(1, limit))
+  return Array.from({ length: max }, (_, i) => i + 1)
 }

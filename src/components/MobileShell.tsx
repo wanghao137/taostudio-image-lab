@@ -33,7 +33,7 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
     <div className="max-sm:flex max-sm:min-h-screen max-sm:flex-col sm:hidden">
       {/* 极简顶栏 */}
       <header className="safe-area-top sticky top-0 z-30 flex items-center justify-between border-b border-stone-200/70 bg-[#f7f2ec]/90 px-4 py-2 backdrop-blur dark:border-white/[0.08] dark:bg-[#13100d]/90">
-        <span className="text-[15px] font-bold tracking-tight text-stone-900 dark:text-stone-50">TaoStudio</span>
+        <img src="./brand/taostudio-peach-logo-64.png" alt="TaoStudio" className="h-7 w-auto" />
         <ThemeToggleButton />
       </header>
 
@@ -42,19 +42,19 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
 
       {/* 右下角 FAB + 底部 Tab */}
       <div className="safe-area-bottom fixed inset-x-0 bottom-0 z-40 border-t border-stone-200/70 bg-white/95 backdrop-blur dark:border-white/[0.08] dark:bg-[#13100d]/95">
-        <div className="relative flex items-center justify-around px-2 py-1.5">
+        <div className="relative flex items-center justify-between px-4 py-1.5">
           <TabButton icon={ImageIcon} label="画廊" active={tab === 'gallery'} onClick={goGallery} />
           <TabButton icon={Star} label="收藏" active={tab === 'favorites'} onClick={goFavorites} />
-          <div className="w-14" /> {/* FAB 占位 */}
+          <div className="w-16 shrink-0" aria-hidden /> {/* FAB 占位，加宽避免遮挡两侧 */}
           <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} />
         </div>
         {/* FAB */}
         <button
           onClick={onOpenCompose}
           aria-label="创作"
-          className="absolute -top-7 left-1/2 -translate-x-1/2 flex h-14 w-14 items-center justify-center rounded-full bg-[#df7b57] text-white shadow-lg ring-4 ring-white dark:ring-[#13100d] active:scale-95 transition"
+          className="absolute -top-6 left-1/2 -translate-x-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-[#df7b57] text-white shadow-lg ring-4 ring-white dark:ring-[#13100d] active:scale-95 transition"
         >
-          <Sparkles className="h-6 w-6" />
+          <Sparkles className="h-5 w-5" />
         </button>
       </div>
 
