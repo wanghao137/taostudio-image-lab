@@ -3,8 +3,6 @@ import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, 
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { useTooltip } from '../hooks/useTooltip'
-import { useIsMobile } from '../hooks/useIsMobile'
-import { useMobileSheet } from '../hooks/useMobileSheet'
 import { formatImageRatio } from '../lib/size'
 import { ActualValueBadge, DetailParamValue } from '../lib/paramDisplay'
 import { copyImageSourceToClipboard, copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
@@ -13,7 +11,6 @@ import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from '../lib/downloadImages'
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { replaceImageMentionsForApi } from '../lib/promptImageMentions'
-import { appendTargetAspectPromptHint } from '../lib/targetAspectPrompt'
 import { CloseIcon, CodeIcon, CopyIcon, DownloadIcon, EditIcon, LinkIcon, TrashIcon } from './icons'
 
 import ViewportTooltip from './ViewportTooltip'
@@ -55,12 +52,7 @@ export default function DetailModal() {
   const retryTooltip = useTooltip()
   const downloadImageTooltip = useTooltip()
   const downloadOriginalImageTooltip = useTooltip()
-  const downloadSourceImageTooltip = useTooltip()
   const downloadAllTooltip = useTooltip()
-
-  // 移动端：全屏 sheet + 下滑关闭（仅 <640px 生效，桌面完全不变）
-  const isMobile = useIsMobile()
-  const sheet = useMobileSheet({ open: Boolean(detailTaskId), onClose: () => setDetailTaskId(null), enabled: isMobile })
 
   const clearTextSelection = () => {
     const selection = window.getSelection()
@@ -185,8 +177,6 @@ export default function DetailModal() {
   const currentOutputImageIndex = currentOutputSlot?.outputImageIndex ?? -1
   const currentOutputError = currentOutputSlot?.error || ''
   const currentOriginalOutputImageId = currentOutputImageIndex >= 0 ? task?.transparentOriginalImages?.[currentOutputImageIndex] || '' : ''
-  const currentExactSizeSourceImageId = currentOutputImageIndex >= 0 ? task?.exactSizeOriginalImages?.[currentOutputImageIndex] || '' : ''
-  const currentExactSizeTransform = currentOutputImageId ? task?.exactSizeTransforms?.[currentOutputImageId] : undefined
   const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
 
   useEffect(() => {
@@ -259,10 +249,7 @@ export default function DetailModal() {
   const requestPrompt = task.transparentOutput && task.transparentPrompt
     ? task.transparentPrompt
     : task.prompt
-  const promptSentToApi = appendTargetAspectPromptHint(
-    replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length),
-    task.params.size,
-  ).trim()
+  const promptSentToApi = replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length).trim()
   const showRevisedPrompt = Boolean(currentRevisedPrompt && currentRevisedPrompt !== promptSentToApi)
   const codexCliPromptKey = getCodexCliPromptKey(settings)
   const hasHandledPromptWarning = settings.codexCli || dismissedCodexCliPrompts.includes(codexCliPromptKey)
@@ -280,7 +267,6 @@ export default function DetailModal() {
   const currentStreamPreviewSrc = activeStreamPreviewSrc
   const streamPartialImageIds = task.streamPartialImageIds ?? []
   const isPngOutput = task.params.output_format === 'png'
-  const exactSizeText = task.params.exact_size ? 'true' : 'false'
   const transparentOutputText = task.transparentOutput || task.params.transparent_output ? 'true' : 'false'
   const currentTransparentOutputFailed = Boolean(currentOutputImageId && task.transparentOutput && task.transparentOriginalImages?.[currentOutputImageIndex] === '')
   const outputCompressionText = task.params.output_compression == null ? '未设置' : String(task.params.output_compression)
@@ -401,23 +387,6 @@ export default function DetailModal() {
     }
   }
 
-  const handleDownloadCurrentSourceOutput = async (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (!currentExactSizeSourceImageId || !task) return
-
-    try {
-      const result = await downloadImageIds([currentExactSizeSourceImageId], `task-${task.id}-source`)
-      if (result.successCount === 0) {
-        showToast('下载失败', 'error')
-      } else {
-        showToast('源图下载成功', 'success')
-      }
-    } catch (err) {
-      console.error(err)
-      showToast('下载失败', 'error')
-    }
-  }
-
   const handleDownloadAllOutputs = async (e: React.MouseEvent) => {
     e.stopPropagation()
     if (!task?.outputImages?.length) return
@@ -469,25 +438,15 @@ export default function DetailModal() {
   return (
     <div
       data-no-drag-select
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 max-sm:items-end max-sm:justify-end max-sm:p-0"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
       onClick={() => setDetailTaskId(null)}
     >
       <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
       <div
-        ref={(el) => { modalRef.current = el; sheet.sheetRef.current = el }}
-        style={{ transform: `translateY(${sheet.dragTranslateY}px)` }}
-        className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in max-sm:h-screen max-sm:rounded-none max-sm:w-full max-sm:max-h-none max-sm:pt-[env(safe-area-inset-top)]"
+        ref={modalRef}
+        className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 移动端抓手：下滑关闭 */}
-        <div
-          className="flex shrink-0 cursor-grab items-center justify-center py-2 sm:hidden active:cursor-grabbing"
-          onPointerDown={sheet.onDragStart}
-          onPointerMove={sheet.onDragMove}
-          onPointerUp={sheet.onDragEnd}
-        >
-          <div className="h-1 w-10 rounded-full bg-stone-300 dark:bg-stone-600" />
-        </div>
         <div className="flex h-14 items-center justify-end px-4 md:hidden">
           <button
             onClick={() => setDetailTaskId(null)}
@@ -634,26 +593,6 @@ export default function DetailModal() {
                   </button>
                   <ViewportTooltip visible={downloadOriginalImageTooltip.visible} className="whitespace-nowrap">
                     下载原图
-                  </ViewportTooltip>
-                </div>
-              )}
-              {currentExactSizeSourceImageId && (
-                <div className={`absolute bottom-4 ${currentOriginalOutputImageId ? 'right-20' : 'right-4'} z-20 flex`}>
-                  <button
-                    type="button"
-                    {...downloadSourceImageTooltip.handlers}
-                    onClick={(e) => {
-                      downloadSourceImageTooltip.handlers.onClick()
-                      handleDownloadCurrentSourceOutput(e)
-                    }}
-                    className="flex items-center justify-center gap-0.5 rounded bg-black/50 py-0.5 pl-1.5 pr-2 text-white backdrop-blur-sm transition hover:bg-black/70 focus:outline-none focus:ring-1 focus:ring-white/50"
-                    aria-label="下载源图"
-                  >
-                    <DownloadIcon className="h-4 w-4" />
-                    <span className="text-[9px] font-bold leading-none mt-[1px] uppercase">src</span>
-                  </button>
-                  <ViewportTooltip visible={downloadSourceImageTooltip.visible} className="whitespace-nowrap">
-                    下载源图
                   </ViewportTooltip>
                 </div>
               )}
@@ -1046,57 +985,12 @@ export default function DetailModal() {
                 </div>
               </div>
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
-                <span className="text-gray-400 dark:text-gray-500">精确尺寸</span>
-                <br />
-                <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
-                  <span className="font-medium text-gray-700 dark:text-gray-300">{exactSizeText}</span>
-                  {currentExactSizeSourceImageId && (
-                    <span className="ml-1.5 rounded bg-blue-50 px-1 py-0.5 text-[10px] font-medium uppercase leading-none text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
-                      source
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
                 <span className="text-gray-400 dark:text-gray-500">格式</span>
                 <br />
                 <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
                   <DetailParamValue task={task} paramKey="output_format" className="font-medium" actualParams={currentActualParams} />
                 </div>
               </div>
-              {currentExactSizeTransform && (
-                <>
-                  <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
-                    <span className="text-gray-400 dark:text-gray-500">源图尺寸</span>
-                    <br />
-                    <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
-                      <span className="font-medium text-gray-700 dark:text-gray-300">
-                        {currentExactSizeTransform.sourceWidth}x{currentExactSizeTransform.sourceHeight}
-                      </span>
-                    </div>
-                  </div>
-                  <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
-                    <span className="text-gray-400 dark:text-gray-500">后处理</span>
-                    <br />
-                    <div className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
-                      <span className="font-medium text-gray-700 dark:text-gray-300">
-                        {currentExactSizeTransform.aspectMismatch
-                          ? `等比${currentExactSizeTransform.mode === 'cover' ? '裁切' : '留边'}`
-                          : '等比缩放'}
-                      </span>
-                    </div>
-                  </div>
-                </>
-              )}
-              {task.targetAspectPromptHint && (
-                <div className="col-span-2 bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
-                  <span className="text-gray-400 dark:text-gray-500">画幅提示</span>
-                  <br />
-                  <div className="mt-0.5 text-gray-700 dark:text-gray-300 whitespace-normal break-words">
-                    {task.targetAspectPromptHint}
-                  </div>
-                </div>
-              )}
               {isPngOutput ? (
                 <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
                   <span className="text-gray-400 dark:text-gray-500">透明背景</span>
@@ -1136,11 +1030,6 @@ export default function DetailModal() {
                 </div>
               )}
             </div>
-            {currentExactSizeTransform?.aspectMismatch && (
-              <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-                API 返回比例与目标比例不同，已保持几何比例后处理。
-              </div>
-            )}
 
             {/* 时间 */}
             <div className="text-xs text-gray-400 dark:text-gray-500 mb-4">
