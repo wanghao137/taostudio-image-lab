@@ -2,22 +2,28 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import { DEFAULT_PARAMS } from './types'
 import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, normalizeSettings } from './lib/apiProfiles'
-import type { AgentConversation, ExportData, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
+import type { AgentConversation, AppSettings, ExportData, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
 import { getSelectedImageMentionLabel } from './lib/promptImageMentions'
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
   const thumbnails = new Map<string, StoredImageThumbnail>()
   const agentConversations = new Map<string, AgentConversation>()
+  let localAutoSaveDirectoryHandle: {
+    id: 'directory'
+    handle: FileSystemDirectoryHandle
+    name?: string
+    updatedAt: number
+  } | undefined
   let imageSeq = 0
 
   return {
     CURRENT_THUMBNAIL_VERSION: 2,
     getAllTasks: async () => [...tasks.values()],
-    putTask: async (task: TaskRecord) => {
+    putTask: vi.fn(async (task: TaskRecord) => {
       tasks.set(task.id, task)
       return task.id
-    },
+    }),
     deleteTask: async (id: string) => {
       tasks.delete(id)
     },
@@ -38,6 +44,19 @@ vi.mock('./lib/db', () => {
     replaceAgentConversations: async (conversations: AgentConversation[]) => {
       agentConversations.clear()
       for (const conversation of conversations) agentConversations.set(conversation.id, conversation)
+    },
+    getLocalAutoSaveDirectoryHandle: async () => localAutoSaveDirectoryHandle,
+    putLocalAutoSaveDirectoryHandle: async (handle: FileSystemDirectoryHandle) => {
+      localAutoSaveDirectoryHandle = {
+        id: 'directory',
+        handle,
+        name: handle.name,
+        updatedAt: Date.now(),
+      }
+      return 'directory'
+    },
+    clearLocalAutoSaveDirectoryHandle: async () => {
+      localAutoSaveDirectoryHandle = undefined
     },
     getImage: async (id: string) => images.get(id),
     getImageThumbnail: async (id: string) => thumbnails.get(id),
@@ -75,6 +94,18 @@ vi.mock('./lib/db', () => {
     },
   }
 })
+vi.mock('./lib/localAutoSaveWriter', () => ({
+  LocalAutoSavePermissionError: class LocalAutoSavePermissionError extends Error {
+    constructor() {
+      super('需要重新授权保存位置')
+      this.name = 'LocalAutoSavePermissionError'
+    }
+  },
+  writeLocalAutoSaveArchive: vi.fn(async (params: { folderName: string; files: Array<{ name: string }> }) => ({
+    folderName: params.folderName,
+    files: params.files.map((file) => file.name),
+  })),
+}))
 vi.mock('./lib/api', () => ({
   callImageApi: vi.fn(async () => ({
     images: [],
@@ -168,12 +199,15 @@ vi.mock('./lib/agentApi', () => ({
     }
   }),
 }))
-import { clearAgentConversations, clearImages, clearTasks, getAllAgentConversations, getAllTasks, getImage, putAgentConversation, putImage, putTask as putDbTask } from './lib/db'
+import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, getAllAgentConversations, getAllTasks, getImage, getLocalAutoSaveDirectoryHandle, putAgentConversation, putImage, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
+import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
+import { formatExportFileTime } from './lib/exportFileName'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
+import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { cleanStaleAgentInputDrafts, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { cleanStaleAgentInputDrafts, clearData, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, retryPendingLocalAutoSaves, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
@@ -224,6 +258,460 @@ function importFile(data: ExportData): File {
   const buffer = zipped.buffer.slice(zipped.byteOffset, zipped.byteOffset + zipped.byteLength)
   return { arrayBuffer: async () => buffer } as File
 }
+
+function localAutoSaveSettings(enabled = true, localAutoSaveOverrides: Partial<AppSettings['localAutoSave']> = {}) {
+  const profile = createDefaultOpenAIProfile({ id: 'local-auto-save-profile', apiKey: 'test-key' })
+  return normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    apiKey: 'test-key',
+    profiles: [profile],
+    activeProfileId: profile.id,
+    localAutoSave: {
+      enabled,
+      directoryName: enabled ? 'Archive' : null,
+      lastSavedAt: null,
+      lastSavedFolderName: null,
+      ...localAutoSaveOverrides,
+    },
+  })
+}
+
+function localAutoSaveTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
+  return task({
+    prompt: '城市夜晚人像',
+    params: {
+      ...DEFAULT_PARAMS,
+      size: '2160x3840',
+      exact_size: true,
+      quality: 'high',
+      output_format: 'png',
+    },
+    outputImages: ['image-a'],
+    status: 'done',
+    createdAt: Date.UTC(2026, 6, 7, 13, 35, 12),
+    finishedAt: Date.UTC(2026, 6, 7, 13, 36, 12),
+    ...overrides,
+  })
+}
+
+function localAutoSaveImage(overrides: Partial<StoredImage> = {}): StoredImage {
+  return {
+    id: 'image-a',
+    dataUrl: 'data:image/png;base64,AAAA',
+    width: 2160,
+    height: 3840,
+    source: 'generated',
+    createdAt: Date.UTC(2026, 6, 7, 13, 36, 0),
+    ...overrides,
+  }
+}
+
+function fakeDirectoryHandle(name = 'Archive') {
+  return { name } as unknown as FileSystemDirectoryHandle
+}
+
+interface LocalAutoSaveTestWindow {
+  showDirectoryPicker?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>
+  navigator: {
+    userAgent?: string
+    userAgentData?: {
+      mobile: boolean
+      brands: Array<{ brand: string; version: string }>
+    }
+  }
+}
+
+function getLocalAutoSaveTestWindow() {
+  const target = globalThis as typeof globalThis & { window?: LocalAutoSaveTestWindow }
+  if (!target.window) {
+    Object.defineProperty(target, 'window', {
+      configurable: true,
+      writable: true,
+      value: { navigator: { userAgent: '' } },
+    })
+  }
+  return target.window
+}
+
+function setLocalAutoSaveBrowserSupport(supported: boolean, picker = vi.fn(async () => fakeDirectoryHandle())) {
+  const testWindow = getLocalAutoSaveTestWindow()
+  Object.defineProperty(testWindow, 'showDirectoryPicker', {
+    configurable: true,
+    value: picker,
+  })
+  Object.defineProperty(testWindow.navigator, 'userAgentData', {
+    configurable: true,
+    value: {
+      mobile: !supported,
+      brands: [{ brand: 'Google Chrome', version: '126' }],
+    },
+  })
+  return picker
+}
+
+async function waitForAssertion(assertion: () => void) {
+  const deadline = Date.now() + 1000
+  let lastError: unknown
+  while (Date.now() < deadline) {
+    try {
+      assertion()
+      return
+    } catch (err) {
+      lastError = err
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+  throw lastError
+}
+
+describe('local auto-save store integration', () => {
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearLocalAutoSaveDirectoryHandle()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(putDbTask).mockClear()
+    vi.mocked(writeLocalAutoSaveArchive).mockClear()
+    const testWindow = getLocalAutoSaveTestWindow()
+    Object.defineProperty(testWindow, 'showDirectoryPicker', {
+      configurable: true,
+      value: undefined,
+    })
+    Object.defineProperty(testWindow.navigator, 'userAgentData', {
+      configurable: true,
+      value: undefined,
+    })
+    useStore.setState({
+      settings: localAutoSaveSettings(),
+      tasks: [],
+      localAutoSaveRunningTaskIds: {},
+      showToast: vi.fn(),
+    })
+  })
+
+  it('auto-saves eligible gallery 4K tasks without changing generation status', async () => {
+    const directory = fakeDirectoryHandle()
+    await putLocalAutoSaveDirectoryHandle(directory)
+    await putImage(localAutoSaveImage())
+    const galleryTask = localAutoSaveTask()
+    useStore.getState().setTasks([galleryTask])
+
+    await runLocalAutoSaveForTask(galleryTask.id)
+
+    const expectedFolderName = `${formatExportFileTime(new Date(galleryTask.createdAt))}_2160x3840_城市夜晚人像`
+    const saved = useStore.getState().tasks[0]
+    expect(saved.status).toBe('done')
+    expect(saved.localAutoSave).toMatchObject({
+      status: 'saved',
+      folderName: expectedFolderName,
+      files: ['image-1.png', 'prompt.txt', 'metadata.json'],
+    })
+    expect(writeLocalAutoSaveArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({
+      rootHandle: directory,
+      folderName: expectedFolderName,
+    })
+  })
+
+  it('persists the final saved status when the saving write resolves late', async () => {
+    const directory = fakeDirectoryHandle()
+    await putLocalAutoSaveDirectoryHandle(directory)
+    await putImage(localAutoSaveImage())
+    const galleryTask = localAutoSaveTask({ id: 'race-task' })
+    useStore.getState().setTasks([galleryTask])
+
+    const putTaskMock = vi.mocked(putDbTask)
+    const defaultPutTask = putTaskMock.getMockImplementation()
+    if (!defaultPutTask) throw new Error('putTask mock implementation missing')
+    let releaseSavingWrite: (() => void) | undefined
+    const savingWriteStarted = new Promise<void>((resolve) => {
+      putTaskMock.mockImplementationOnce(async (nextTask) => {
+        expect(nextTask.localAutoSave?.status).toBe('saving')
+        const blockedSavingWrite = new Promise<void>((release) => {
+          releaseSavingWrite = release
+        })
+        resolve()
+        await blockedSavingWrite
+        return defaultPutTask(nextTask)
+      })
+    })
+
+    const run = runLocalAutoSaveForTask(galleryTask.id)
+    await savingWriteStarted
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    if (!releaseSavingWrite) throw new Error('saving write did not start')
+    releaseSavingWrite()
+    await run
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const persisted = (await getAllTasks()).find((item) => item.id === galleryTask.id)
+    expect(persisted?.localAutoSave?.status).toBe('saved')
+  })
+
+  it('marks Agent tasks as not_applicable', async () => {
+    useStore.getState().setTasks([localAutoSaveTask({
+      id: 'agent-task',
+      sourceMode: 'agent',
+    })])
+
+    await runLocalAutoSaveForTask('agent-task')
+
+    expect(useStore.getState().tasks[0].localAutoSave).toEqual({
+      status: 'not_applicable',
+      error: 'agent_task',
+    })
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+  })
+
+  it('does not auto-save partial-success gallery tasks', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle())
+    await putImage(localAutoSaveImage())
+    useStore.getState().setTasks([localAutoSaveTask({
+      id: 'partial-task',
+      outputErrors: [{ requestIndex: 1, error: 'rate limit' }],
+    })])
+
+    await runLocalAutoSaveForTask('partial-task')
+
+    expect(useStore.getState().tasks[0].localAutoSave).toEqual({
+      status: 'not_applicable',
+      error: 'partial_failure',
+    })
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+  })
+
+  it('marks missing stored images as failed', async () => {
+    useStore.getState().setTasks([localAutoSaveTask({
+      id: 'missing-image-task',
+      outputImages: ['missing-image'],
+    })])
+
+    await runLocalAutoSaveForTask('missing-image-task')
+
+    expect(useStore.getState().tasks[0].localAutoSave).toEqual({
+      status: 'failed',
+      error: '图片数据已不存在',
+    })
+  })
+
+  it('marks eligible tasks as pending when no directory is selected', async () => {
+    await putImage(localAutoSaveImage())
+    useStore.getState().setTasks([localAutoSaveTask({ id: 'pending-task' })])
+
+    await runLocalAutoSaveForTask('pending-task')
+
+    expect(useStore.getState().tasks[0].localAutoSave).toEqual({
+      status: 'pending',
+      error: '未选择保存位置',
+    })
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+  })
+
+  it('does not write with a stored handle when settings have no selected directory', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('Archive'))
+    await putImage(localAutoSaveImage())
+    useStore.setState({
+      settings: localAutoSaveSettings(true, { directoryName: null }),
+    })
+    useStore.getState().setTasks([localAutoSaveTask({ id: 'drift-task' })])
+
+    await runLocalAutoSaveForTask('drift-task')
+
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0].localAutoSave?.status).toBe('pending')
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+    expect(useStore.getState().settings.localAutoSave.directoryName).toBeNull()
+  })
+
+  it('does not write when the stored handle name differs from the selected directory', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('Archive'))
+    await putImage(localAutoSaveImage())
+    useStore.setState({
+      settings: localAutoSaveSettings(true, { directoryName: 'Imported Archive' }),
+    })
+    useStore.getState().setTasks([localAutoSaveTask({ id: 'mismatched-directory-task' })])
+
+    await runLocalAutoSaveForTask('mismatched-directory-task')
+
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0].localAutoSave?.status).toBe('pending')
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+    expect(useStore.getState().settings.localAutoSave.directoryName).toBeNull()
+  })
+
+  it('marks permission errors as needs_permission', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle())
+    vi.mocked(writeLocalAutoSaveArchive).mockRejectedValueOnce(new LocalAutoSavePermissionError())
+    await putImage(localAutoSaveImage())
+    useStore.getState().setTasks([localAutoSaveTask({ id: 'permission-task' })])
+
+    await runLocalAutoSaveForTask('permission-task')
+
+    expect(useStore.getState().tasks[0].localAutoSave).toEqual({
+      status: 'needs_permission',
+      error: '需要重新授权保存位置',
+    })
+  })
+
+  it('selects a directory only when strict desktop browser support passes', async () => {
+    const unsupportedPicker = setLocalAutoSaveBrowserSupport(false)
+
+    await selectLocalAutoSaveDirectory()
+
+    expect(unsupportedPicker).not.toHaveBeenCalled()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('本地自动保存仅支持桌面 Chrome/Edge', 'error')
+
+    const directory = fakeDirectoryHandle('Desktop Archive')
+    const supportedPicker = setLocalAutoSaveBrowserSupport(true, vi.fn(async () => directory))
+
+    await selectLocalAutoSaveDirectory()
+
+    expect(supportedPicker).toHaveBeenCalledWith({ mode: 'readwrite' })
+    expect(await getLocalAutoSaveDirectoryHandle()).toMatchObject({ handle: directory, name: 'Desktop Archive' })
+    expect(useStore.getState().settings.localAutoSave.directoryName).toBe('Desktop Archive')
+  })
+
+  it('counts and retries pending, failed, permission, and stale saving local auto-saves', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle())
+    await putImage(localAutoSaveImage({ id: 'image-pending' }))
+    await putImage(localAutoSaveImage({ id: 'image-failed' }))
+    await putImage(localAutoSaveImage({ id: 'image-needs-permission' }))
+    await putImage(localAutoSaveImage({ id: 'image-saving' }))
+    await putImage(localAutoSaveImage({ id: 'image-saved' }))
+    const tasks = [
+      localAutoSaveTask({ id: 'pending-task', outputImages: ['image-pending'], localAutoSave: { status: 'pending' } }),
+      localAutoSaveTask({ id: 'failed-task', outputImages: ['image-failed'], localAutoSave: { status: 'failed', error: 'disk full' } }),
+      localAutoSaveTask({ id: 'permission-task', outputImages: ['image-needs-permission'], localAutoSave: { status: 'needs_permission', error: '需要重新授权保存位置' } }),
+      localAutoSaveTask({ id: 'saving-task', outputImages: ['image-saving'], localAutoSave: { status: 'saving' } }),
+      localAutoSaveTask({ id: 'saved-task', outputImages: ['image-saved'], localAutoSave: { status: 'saved', folderName: 'saved', files: ['image-1.png'] } }),
+      localAutoSaveTask({ id: 'skipped-task', localAutoSave: { status: 'not_applicable', error: 'not_4k_intent' } }),
+    ]
+    useStore.getState().setTasks(tasks)
+
+    expect(getLocalAutoSaveRetryableTaskCount(tasks)).toBe(4)
+
+    await retryPendingLocalAutoSaves()
+
+    expect(writeLocalAutoSaveArchive).toHaveBeenCalledTimes(4)
+    expect(useStore.getState().tasks.filter((item) => item.localAutoSave?.status === 'saved')).toHaveLength(5)
+  })
+
+  it('does not retry local auto-saves while the setting is disabled', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle())
+    await putImage(localAutoSaveImage({ id: 'image-pending' }))
+    useStore.setState({
+      settings: localAutoSaveSettings(false),
+    })
+    useStore.getState().setTasks([
+      localAutoSaveTask({ id: 'pending-task', outputImages: ['image-pending'], localAutoSave: { status: 'pending' } }),
+    ])
+
+    await retryPendingLocalAutoSaves()
+
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0].localAutoSave?.status).toBe('pending')
+  })
+
+  it('clears the stored directory handle when clearing config resets local auto-save settings', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle())
+
+    await clearData({ clearConfig: true, clearTasks: false })
+
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+  })
+
+  it('clears the stored directory handle and imported archive metadata when importing local auto-save settings', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('Old Archive'))
+    useStore.setState({
+      settings: normalizeSettings(DEFAULT_SETTINGS),
+    })
+
+    const imported = await importData(importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      settings: localAutoSaveSettings(true, {
+        directoryName: 'Imported Archive',
+        lastSavedAt: 1,
+        lastSavedFolderName: '2026-07-07_13-35-12_2160x3840_城市夜晚人像',
+      }),
+    }), { importConfig: true, importTasks: false })
+
+    expect(imported).toBe(true)
+    expect(useStore.getState().settings.localAutoSave.enabled).toBe(true)
+    expect(useStore.getState().settings.localAutoSave.directoryName).toBeNull()
+    expect(useStore.getState().settings.localAutoSave.lastSavedAt).toBeNull()
+    expect(useStore.getState().settings.localAutoSave.lastSavedFolderName).toBeNull()
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+  })
+
+  it('marks imported local auto-save states as pending because archive files are not imported', async () => {
+    await putImage(localAutoSaveImage({ id: 'image-a' }))
+    const imported = await importData(importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [
+        localAutoSaveTask({
+          id: 'imported-saved-task',
+          localAutoSave: {
+            status: 'saved',
+            folderName: '2026-07-07_13-35-12_2160x3840_城市夜晚人像',
+            files: ['image-1.png', 'prompt.txt', 'metadata.json'],
+            savedAt: 1,
+          },
+        }),
+      ],
+      imageFiles: {
+        'image-a': {
+          path: 'images/image-a.png',
+          source: 'generated',
+          width: 2160,
+          height: 3840,
+          createdAt: 1,
+        },
+      },
+    }), { importConfig: false, importTasks: true })
+
+    expect(imported).toBe(true)
+    const importedTask = useStore.getState().tasks.find((task) => task.id === 'imported-saved-task')
+    expect(importedTask?.localAutoSave).toEqual({
+      status: 'pending',
+      error: '导入的数据不包含本地归档文件，请重新补保存',
+    })
+    expect(getLocalAutoSaveRetryableTaskCount(useStore.getState().tasks)).toBe(1)
+  })
+
+  it('schedules local auto-save after successful gallery task generation', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle())
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,2160x3840AAAAAAA'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      settings: localAutoSaveSettings(),
+      prompt: '城市夜晚人像',
+      params: {
+        ...DEFAULT_PARAMS,
+        size: '2160x3840',
+        exact_size: true,
+        quality: 'high',
+        output_format: 'png',
+      },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      showToast: vi.fn(),
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(writeLocalAutoSaveArchive).toHaveBeenCalledTimes(1))
+
+    const saved = useStore.getState().tasks[0]
+    expect(saved.status).toBe('done')
+    expect(saved.localAutoSave?.status).toBe('saved')
+  })
+})
 
 describe('favorite collection deletion', () => {
   const collectionA = { id: 'collection-a', name: '收藏夹 A', createdAt: 1, updatedAt: 1 }

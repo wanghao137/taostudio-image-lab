@@ -31,6 +31,9 @@ import {
   getAllAgentConversations,
   replaceAgentConversations,
   clearAgentConversations as dbClearAgentConversations,
+  getLocalAutoSaveDirectoryHandle,
+  putLocalAutoSaveDirectoryHandle,
+  clearLocalAutoSaveDirectoryHandle,
   getImage,
   getImageThumbnail,
   getStoredFreshImageThumbnail,
@@ -59,6 +62,17 @@ import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
 import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { appendTargetAspectPromptHint, createTargetAspectPromptHint } from './lib/targetAspectPrompt'
+import {
+  buildLocalAutoSaveFolderName,
+  buildLocalAutoSaveMetadata,
+  buildLocalAutoSavePromptText,
+  getLocalAutoSaveEligibility,
+  getLocalAutoSaveImageBytes,
+  getLocalAutoSaveImageFileName,
+  getLocalAutoSaveIntentSize,
+  isLocalAutoSaveSupported,
+} from './lib/localAutoSave'
+import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 
 export const ALL_FAVORITES_COLLECTION_ID = '__all_favorites__'
 export const DEFAULT_FAVORITE_COLLECTION_ID = '__default_favorites__'
@@ -864,6 +878,9 @@ interface AppState {
   streamPreviews: Record<string, string>
   streamPreviewSlots: Record<string, Record<string, string>>
   setTaskStreamPreview: (taskId: string, image?: string, requestIndex?: number) => void
+  localAutoSaveRunningTaskIds: Record<string, true>
+  selectLocalAutoSaveDirectory: () => Promise<void>
+  retryPendingLocalAutoSaves: () => Promise<void>
 
   // 搜索和筛选
   searchQuery: string
@@ -1568,6 +1585,9 @@ export const useStore = create<AppState>()(
         delete nextSlots[taskId]
         return { streamPreviews: next, streamPreviewSlots: nextSlots }
       }),
+      localAutoSaveRunningTaskIds: {},
+      selectLocalAutoSaveDirectory: async () => selectLocalAutoSaveDirectory(),
+      retryPendingLocalAutoSaves: async () => retryPendingLocalAutoSaves(),
 
       // Search & Filter
       searchQuery: '',
@@ -4933,6 +4953,9 @@ async function executeTask(taskId: string) {
       falRecoverable: false,
       customRecoverable: false,
     })
+    if (!isAgentTask(task) && useStore.getState().settings.localAutoSave.enabled) {
+      void runLocalAutoSaveForTask(taskId)
+    }
     void deleteUnreferencedImageIds(partialImageIdsToClean)
 
     const failedCount = result.failedRequests?.length ?? 0
@@ -5039,6 +5062,202 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
   setTasks(updated)
   maybeOpenSupportPrompt(tasks, updated, taskId)
   if (task) putTask(task)
+}
+
+async function updateTaskLocalAutoSave(taskId: string, localAutoSave: TaskRecord['localAutoSave']) {
+  const { tasks, setTasks } = useStore.getState()
+  const updated = tasks.map((task) => task.id === taskId ? { ...task, localAutoSave } : task)
+  const task = updated.find((item) => item.id === taskId)
+  setTasks(updated)
+  if (task) await putTask(task)
+}
+
+function isLocalAutoSaveRetryable(task: TaskRecord) {
+  return task.localAutoSave?.status === 'pending' ||
+    task.localAutoSave?.status === 'saving' ||
+    task.localAutoSave?.status === 'failed' ||
+    task.localAutoSave?.status === 'needs_permission'
+}
+
+export function getLocalAutoSaveRetryableTaskCount(tasks: TaskRecord[]) {
+  return tasks.filter(isLocalAutoSaveRetryable).length
+}
+
+function normalizeImportedTaskLocalAutoSave(task: TaskRecord): TaskRecord {
+  if (!task.localAutoSave) return task
+  return {
+    ...task,
+    localAutoSave: {
+      status: 'pending',
+      error: '导入的数据不包含本地归档文件，请重新补保存',
+    },
+  }
+}
+
+export async function selectLocalAutoSaveDirectory() {
+  if (typeof window === 'undefined' || !isLocalAutoSaveSupported(window)) {
+    useStore.getState().showToast('本地自动保存仅支持桌面 Chrome/Edge', 'error')
+    return
+  }
+
+  try {
+    const handle = await (window as unknown as {
+      showDirectoryPicker: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
+    }).showDirectoryPicker({ mode: 'readwrite' })
+    await putLocalAutoSaveDirectoryHandle(handle)
+    useStore.getState().setSettings({
+      localAutoSave: {
+        ...useStore.getState().settings.localAutoSave,
+        directoryName: handle.name,
+      },
+    })
+    useStore.getState().showToast('本地自动保存位置已设置', 'success')
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return
+    const message = err instanceof Error ? err.message : String(err)
+    useStore.getState().showToast(`设置本地自动保存位置失败：${message}`, 'error')
+  }
+}
+
+export async function retryPendingLocalAutoSaves() {
+  const retryable = useStore.getState().tasks.filter(isLocalAutoSaveRetryable)
+  for (const task of retryable) {
+    await runLocalAutoSaveForTask(task.id)
+  }
+}
+
+async function getSelectedLocalAutoSaveDirectoryHandle() {
+  const selectedName = useStore.getState().settings.localAutoSave.directoryName?.trim()
+  if (!selectedName) {
+    await clearLocalAutoSaveDirectoryHandle()
+    return null
+  }
+
+  const directory = await getLocalAutoSaveDirectoryHandle()
+  const storedName = directory?.name ?? directory?.handle.name
+  if (!directory?.handle || !storedName || storedName !== selectedName) {
+    if (directory?.handle) await clearLocalAutoSaveDirectoryHandle()
+    const settings = useStore.getState().settings.localAutoSave
+    if (settings.directoryName !== null) {
+      useStore.getState().setSettings({
+        localAutoSave: {
+          ...settings,
+          directoryName: null,
+        },
+      })
+    }
+    return null
+  }
+
+  return directory.handle
+}
+
+export async function runLocalAutoSaveForTask(taskId: string) {
+  const state = useStore.getState()
+  const task = state.tasks.find((item) => item.id === taskId)
+  if (!task) return
+  if (!state.settings.localAutoSave.enabled) return
+  if (state.localAutoSaveRunningTaskIds[taskId]) return
+  if (task.localAutoSave?.status === 'saved') return
+
+  useStore.setState((current) => ({
+    localAutoSaveRunningTaskIds: {
+      ...current.localAutoSaveRunningTaskIds,
+      [taskId]: true,
+    },
+  }))
+
+  try {
+    const storedImages: StoredImage[] = []
+    for (const imageId of task.outputImages) {
+      const image = await getImage(imageId)
+      if (image) storedImages.push(image)
+    }
+
+    const eligibility = getLocalAutoSaveEligibility(task, storedImages)
+    if (!eligibility.eligible) {
+      await updateTaskLocalAutoSave(taskId, {
+        status: eligibility.status,
+        error: eligibility.reason === 'missing_image' ? '图片数据已不存在' : eligibility.reason,
+      })
+      return
+    }
+
+    const directoryHandle = await getSelectedLocalAutoSaveDirectoryHandle()
+    if (!directoryHandle) {
+      await updateTaskLocalAutoSave(taskId, {
+        status: 'pending',
+        error: '未选择保存位置',
+      })
+      return
+    }
+
+    const intentSize = getLocalAutoSaveIntentSize(task)
+    const actualSize = {
+      width: storedImages[0].width ?? intentSize?.width ?? 0,
+      height: storedImages[0].height ?? intentSize?.height ?? 0,
+    }
+    const usedNames = new Set(
+      useStore.getState().tasks
+        .map((item) => item.localAutoSave?.folderName)
+        .filter((value): value is string => Boolean(value)),
+    )
+    const folderName = buildLocalAutoSaveFolderName(task, actualSize, usedNames)
+    const imageFiles = storedImages.map((image, index) => ({
+      image,
+      fileName: getLocalAutoSaveImageFileName(index, image),
+    }))
+    const metadata = buildLocalAutoSaveMetadata(task, imageFiles)
+
+    await updateTaskLocalAutoSave(taskId, { status: 'saving' })
+    const result = await writeLocalAutoSaveArchive({
+      rootHandle: directoryHandle,
+      folderName,
+      files: [
+        ...imageFiles.map(({ image, fileName }) => ({
+          name: fileName,
+          data: getLocalAutoSaveImageBytes(image),
+          type: image.dataUrl.match(/^data:([^;]+)/)?.[1] ?? 'image/png',
+        })),
+        {
+          name: 'prompt.txt',
+          data: buildLocalAutoSavePromptText(task, actualSize),
+          type: 'text/plain;charset=utf-8',
+        },
+        {
+          name: 'metadata.json',
+          data: `${JSON.stringify(metadata, null, 2)}\n`,
+          type: 'application/json;charset=utf-8',
+        },
+      ],
+    })
+
+    const savedAt = Date.now()
+    await updateTaskLocalAutoSave(taskId, {
+      status: 'saved',
+      folderName: result.folderName,
+      files: result.files,
+      savedAt,
+    })
+    useStore.getState().setSettings({
+      localAutoSave: {
+        ...useStore.getState().settings.localAutoSave,
+        lastSavedAt: savedAt,
+        lastSavedFolderName: result.folderName,
+      },
+    })
+  } catch (err) {
+    await updateTaskLocalAutoSave(taskId, {
+      status: err instanceof LocalAutoSavePermissionError ? 'needs_permission' : 'failed',
+      error: err instanceof Error ? err.message : String(err),
+    })
+  } finally {
+    useStore.setState((current) => {
+      const localAutoSaveRunningTaskIds = { ...current.localAutoSaveRunningTaskIds }
+      delete localAutoSaveRunningTaskIds[taskId]
+      return { localAutoSaveRunningTaskIds }
+    })
+  }
 }
 
 function normalizeFavoriteCollectionIds(ids: unknown) {
@@ -5482,6 +5701,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   if (options.clearConfig) {
     useStore.setState({ dismissedCodexCliPrompts: [], supportPromptDismissed: false })
+    await clearLocalAutoSaveDirectoryHandle()
     setSettings({ ...DEFAULT_SETTINGS })
     setParams({ ...DEFAULT_PARAMS })
   }
@@ -5662,7 +5882,7 @@ export async function importData(file: File, options: ImportOptions = { importCo
       }
 
       for (const task of data.tasks) {
-        await putTask(task)
+        await putTask(normalizeImportedTaskLocalAutoSave(task))
       }
 
       const tasks = await getAllTasks()
@@ -5700,7 +5920,17 @@ export async function importData(file: File, options: ImportOptions = { importCo
 
     if (options.importConfig && data.settings) {
       const state = useStore.getState()
-      state.setSettings(mergeImportedSettings(state.settings, data.settings))
+      await clearLocalAutoSaveDirectoryHandle()
+      const importedSettings = mergeImportedSettings(state.settings, data.settings)
+      state.setSettings({
+        ...importedSettings,
+        localAutoSave: {
+          ...importedSettings.localAutoSave,
+          directoryName: null,
+          lastSavedAt: null,
+          lastSavedFolderName: null,
+        },
+      })
     }
 
     let msg = '数据已成功导入'

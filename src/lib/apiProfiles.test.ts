@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
   DEFAULT_FAL_BASE_URL,
   DEFAULT_FAL_MODEL,
   DEFAULT_IMAGES_MODEL,
@@ -19,6 +20,34 @@ import {
 
 afterEach(() => {
   vi.unstubAllEnvs()
+})
+
+describe('local auto-save settings', () => {
+  it('defaults local auto-save to disabled with no selected folder metadata', () => {
+    const settings = normalizeSettings({})
+
+    expect(settings.localAutoSave).toEqual(DEFAULT_LOCAL_AUTO_SAVE_SETTINGS)
+  })
+
+  it('normalizes persisted local auto-save metadata without storing handles in settings', () => {
+    const settings = normalizeSettings({
+      localAutoSave: {
+        enabled: true,
+        directoryName: 'D:\\\\TaoStudio Archive',
+        lastSavedAt: 1783440000000,
+        lastSavedFolderName: '2026-07-07_21-35-12_2160x3840_城市夜晚人像',
+        handle: { unsafe: true },
+      },
+    })
+
+    expect(settings.localAutoSave).toEqual({
+      enabled: true,
+      directoryName: 'D:\\\\TaoStudio Archive',
+      lastSavedAt: 1783440000000,
+      lastSavedFolderName: '2026-07-07_21-35-12_2160x3840_城市夜晚人像',
+    })
+    expect('handle' in settings.localAutoSave).toBe(false)
+  })
 })
 
 describe('validateApiProfile', () => {

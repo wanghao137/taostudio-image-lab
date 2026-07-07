@@ -84,6 +84,29 @@ export interface ApiProfile {
   providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'model' | 'apiMode' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages'>>>>
 }
 
+export type LocalAutoSaveStatus =
+  | 'not_applicable'
+  | 'pending'
+  | 'saving'
+  | 'saved'
+  | 'failed'
+  | 'needs_permission'
+
+export interface LocalAutoSaveSettings {
+  enabled: boolean
+  directoryName: string | null
+  lastSavedAt: number | null
+  lastSavedFolderName: string | null
+}
+
+export interface LocalAutoSaveTaskState {
+  status: LocalAutoSaveStatus
+  folderName?: string
+  savedAt?: number
+  files?: string[]
+  error?: string
+}
+
 export interface AppSettings {
   /** 旧版单配置字段：保留用于导入/查询参数兼容，实际请求以 active profile 为准 */
   baseUrl: string
@@ -106,6 +129,7 @@ export interface AppSettings {
   enterSubmit: boolean
   referenceImageEditAction: ReferenceImageEditAction
   zipDownloadRoutes: ZipDownloadRoute[]
+  localAutoSave: LocalAutoSaveSettings
   agentScrollToBottomAfterSubmit: boolean
   agentMaxToolRounds: number
   agentWebSearch: boolean
@@ -242,6 +266,8 @@ export interface TaskRecord {
   finishedAt: number | null
   /** 总耗时毫秒 */
   elapsed: number | null
+  /** Local filesystem archive status; independent from generation status. */
+  localAutoSave?: LocalAutoSaveTaskState
   /** 是否收藏 */
   isFavorite?: boolean
   /** 所属收藏夹 ID 列表 */

@@ -1,16 +1,25 @@
 import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 3
+const DB_VERSION = 4
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
 const STORE_THUMBNAILS = 'thumbnails'
 const STORE_AGENT_CONVERSATIONS = 'agentConversations'
+const STORE_LOCAL_AUTO_SAVE = 'localAutoSave'
+const LOCAL_AUTO_SAVE_DIRECTORY_KEY = 'directory'
 const THUMBNAIL_MAX_SIZE = 720
 const THUMBNAIL_QUALITY = 0.9
 const THUMBNAIL_VERSION = 2
 
 export const CURRENT_THUMBNAIL_VERSION = THUMBNAIL_VERSION
+
+export interface StoredLocalAutoSaveDirectoryHandle {
+  id: typeof LOCAL_AUTO_SAVE_DIRECTORY_KEY
+  handle: FileSystemDirectoryHandle
+  name?: string
+  updatedAt: number
+}
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -28,6 +37,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_AGENT_CONVERSATIONS)) {
         db.createObjectStore(STORE_AGENT_CONVERSATIONS, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(STORE_LOCAL_AUTO_SAVE)) {
+        db.createObjectStore(STORE_LOCAL_AUTO_SAVE, { keyPath: 'id' })
       }
     }
     req.onsuccess = () => resolve(req.result)
@@ -97,6 +109,25 @@ export function replaceAgentConversations(conversations: AgentConversation[]): P
         tx.onabort = () => reject(tx.error)
       }),
   )
+}
+
+// ===== Local auto-save =====
+
+export function getLocalAutoSaveDirectoryHandle(): Promise<StoredLocalAutoSaveDirectoryHandle | undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readonly', (s) => s.get(LOCAL_AUTO_SAVE_DIRECTORY_KEY))
+}
+
+export function putLocalAutoSaveDirectoryHandle(handle: FileSystemDirectoryHandle): Promise<IDBValidKey> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.put({
+    id: LOCAL_AUTO_SAVE_DIRECTORY_KEY,
+    handle,
+    name: handle.name,
+    updatedAt: Date.now(),
+  } satisfies StoredLocalAutoSaveDirectoryHandle))
+}
+
+export function clearLocalAutoSaveDirectoryHandle(): Promise<undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(LOCAL_AUTO_SAVE_DIRECTORY_KEY))
 }
 
 // ===== Images =====

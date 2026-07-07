@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { normalizeBaseUrl } from '../lib/api'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
-import { useStore, exportData, importData, clearData, type SettingsTab } from '../store'
+import { isLocalAutoSaveSupported } from '../lib/localAutoSave'
+import { useStore, exportData, importData, clearData, getLocalAutoSaveRetryableTaskCount, type SettingsTab } from '../store'
 import {
   createDefaultOpenAIProfile,
   DEFAULT_FAL_BASE_URL,
@@ -299,8 +300,11 @@ export default function SettingsModal() {
   const showSettings = useStore((s) => s.showSettings)
   const settingsTabRequest = useStore((s) => s.settingsTabRequest)
   const setShowSettings = useStore((s) => s.setShowSettings)
+  const tasks = useStore((s) => s.tasks)
   const settings = useStore((s) => s.settings)
   const setSettings = useStore((s) => s.setSettings)
+  const selectLocalAutoSaveDirectory = useStore((s) => s.selectLocalAutoSaveDirectory)
+  const retryPendingLocalAutoSaves = useStore((s) => s.retryPendingLocalAutoSaves)
   const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
   const setReusedTaskApiProfile = useStore((s) => s.setReusedTaskApiProfile)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
@@ -368,6 +372,10 @@ export default function SettingsModal() {
   const activeCustomProviderAsync = isAsyncCustomProvider(activeCustomProvider)
   const apiProxyChecked = activeProfileApiProxyEligible && (apiProxyLocked || activeProfile.apiProxy)
   const apiProxyEnabled = apiProxyAvailable && activeProfileApiProxyEligible && apiProxyChecked
+  const localAutoSaveSupported = isLocalAutoSaveSupported()
+  const pendingLocalAutoSaveCount = getLocalAutoSaveRetryableTaskCount(tasks)
+  const localAutoSaveNeedsPermission = tasks.some((task) => task.localAutoSave?.status === 'needs_permission')
+  const canRetryLocalAutoSave = settings.localAutoSave.enabled && pendingLocalAutoSaveCount > 0
   const defaultProviderOrder = ['openai', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
@@ -1737,6 +1745,72 @@ export default function SettingsModal() {
                   <div className="text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
                     所有的配置、任务和生成的图片均仅保存在您的浏览器本地（除非您使用的服务商存储了它们）。如果您需要清理浏览器站点数据、重置浏览器或使用其他设备，请先导出备份。
                   </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/[0.06] dark:bg-white/[0.02] space-y-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">本地自动保存</h4>
+                      <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+                        仅自动保存画廊模式下成功生成的 4K 图片。需要桌面 Chrome/Edge；移动端暂不支持本地自动保存。
+                      </p>
+                    </div>
+                    <Checkbox
+                      checked={settings.localAutoSave.enabled}
+                      onChange={(enabled) => setSettings({
+                        localAutoSave: {
+                          ...settings.localAutoSave,
+                          enabled,
+                        },
+                      })}
+                      label={settings.localAutoSave.enabled ? '开启' : '关闭'}
+                      disabled={!localAutoSaveSupported}
+                      className={!localAutoSaveSupported ? 'opacity-50 cursor-not-allowed' : undefined}
+                    />
+                  </div>
+
+                  {!localAutoSaveSupported ? (
+                    <div className="rounded-xl border border-yellow-200/70 bg-yellow-50 px-3 py-2 text-xs leading-relaxed text-yellow-700 dark:border-yellow-500/20 dark:bg-yellow-500/10 dark:text-yellow-200">
+                      本地自动保存仅支持桌面 Chrome/Edge。移动端暂不支持本地自动保存，可继续使用手动下载。
+                    </div>
+                  ) : (
+                    <>
+                      <div className="rounded-xl bg-gray-50/80 p-3 text-xs leading-relaxed text-gray-600 dark:bg-white/[0.04] dark:text-gray-300">
+                        <div>保存位置：{settings.localAutoSave.directoryName ?? '未选择'}</div>
+                        <div>状态：{localAutoSaveNeedsPermission ? '需要重新授权保存位置' : settings.localAutoSave.directoryName ? '已选择，写入前会确认权限' : '未选择'}</div>
+                        {settings.localAutoSave.lastSavedFolderName ? (
+                          <div>最近保存：{settings.localAutoSave.lastSavedFolderName}</div>
+                        ) : null}
+                        {localAutoSaveNeedsPermission ? (
+                          <div className="text-yellow-700 dark:text-yellow-200">请重新选择文件夹后再补保存。</div>
+                        ) : null}
+                        {pendingLocalAutoSaveCount > 0 ? (
+                          <div>待补保存：{pendingLocalAutoSaveCount} 个</div>
+                        ) : null}
+                        {!settings.localAutoSave.enabled && pendingLocalAutoSaveCount > 0 ? (
+                          <div>开启本地自动保存后可补保存。</div>
+                        ) : null}
+                      </div>
+
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <button
+                          type="button"
+                          onClick={() => { void selectLocalAutoSaveDirectory() }}
+                          className="rounded-xl bg-gray-100/80 px-4 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
+                        >
+                          选择文件夹
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { void retryPendingLocalAutoSaves() }}
+                          disabled={!canRetryLocalAutoSave}
+                          className="rounded-xl bg-blue-50 px-4 py-2.5 text-sm font-medium text-blue-600 transition-all hover:bg-blue-100 disabled:opacity-50 disabled:hover:bg-blue-50 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20 dark:disabled:hover:bg-blue-500/10"
+                        >
+                          {pendingLocalAutoSaveCount > 0 ? `立即补保存（${pendingLocalAutoSaveCount}）` : '立即补保存'}
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/[0.06] dark:bg-white/[0.02] space-y-4 shadow-sm">

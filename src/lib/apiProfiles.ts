@@ -1,9 +1,9 @@
 import type {
+  AgentApiConfigMode,
   ApiMode,
   ApiProfile,
   ApiProvider,
   AppSettings,
-  AgentApiConfigMode,
   CustomProviderContentType,
   CustomProviderDefinition,
   CustomProviderFileMapping,
@@ -12,6 +12,7 @@ import type {
   CustomProviderResultMapping,
   CustomProviderSubmitMapping,
   CustomProviderTemplate,
+  LocalAutoSaveSettings,
   ReferenceImageEditAction,
 } from '../types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
@@ -35,6 +36,13 @@ export const DEFAULT_FAL_BASE_URL = 'https://fal.run'
 export const DEFAULT_FAL_MODEL = 'openai/gpt-image-2'
 export const DEFAULT_OPENAI_PROFILE_ID = 'default-openai'
 export const DEFAULT_API_TIMEOUT = 600
+
+export const DEFAULT_LOCAL_AUTO_SAVE_SETTINGS: LocalAutoSaveSettings = {
+  enabled: false,
+  directoryName: null,
+  lastSavedAt: null,
+  lastSavedFolderName: null,
+}
 
 const BUILT_IN_PROVIDER_IDS = new Set<ApiProvider>(['openai', 'fal'])
 const DEFAULT_CUSTOM_PROVIDER_PATHS = {
@@ -75,6 +83,22 @@ export function normalizeAgentMaxToolRounds(value: unknown, fallback: number | u
   const numeric = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(numeric)) return fallbackValue
   return Math.min(50, Math.max(1, Math.trunc(numeric)))
+}
+
+export function normalizeLocalAutoSaveSettings(value: unknown): LocalAutoSaveSettings {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return {
+    enabled: record.enabled === true,
+    directoryName: typeof record.directoryName === 'string' && record.directoryName.trim()
+      ? record.directoryName
+      : null,
+    lastSavedAt: typeof record.lastSavedAt === 'number' && Number.isFinite(record.lastSavedAt)
+      ? record.lastSavedAt
+      : null,
+    lastSavedFolderName: typeof record.lastSavedFolderName === 'string' && record.lastSavedFolderName.trim()
+      ? record.lastSavedFolderName
+      : null,
+  }
 }
 
 export function isDefaultConfigOnlyEnabled(): boolean {
@@ -557,6 +581,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
     referenceImageEditAction: normalizeReferenceImageEditAction(record.referenceImageEditAction),
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
+    localAutoSave: normalizeLocalAutoSaveSettings(record.localAutoSave),
     agentScrollToBottomAfterSubmit: typeof record.agentScrollToBottomAfterSubmit === 'boolean' ? record.agentScrollToBottomAfterSubmit : true,
     agentMaxToolRounds: normalizeAgentMaxToolRounds(record.agentMaxToolRounds),
     agentWebSearch: typeof record.agentWebSearch === 'boolean' ? record.agentWebSearch : false,
@@ -865,6 +890,7 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   enterSubmit: false,
   referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
+  localAutoSave: DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
   agentScrollToBottomAfterSubmit: true,
   agentMaxToolRounds: DEFAULT_AGENT_MAX_TOOL_ROUNDS,
   agentWebSearch: false,
