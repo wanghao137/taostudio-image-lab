@@ -1,0 +1,61 @@
+name: Deploy to Vercel
+
+# 任何 push 到 main 自动部署生产前端到 https://image.taostudioai.com/
+# 也能在 GitHub Actions 页面手动触发（用于首次部署或重跑）
+# 需要 2 个 repository secrets（见 docs/deploy-vercel.md）：
+#   VERCEL_TOKEN  — vercel.com/account/tokens 创建，scope 选该项目
+#   VERCEL_ORG_ID / VERCEL_PROJECT_ID — 已在 .vercel/project.json，配置文档里有怎么读
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.superpowers/**'
+      - 'work/**'
+      - 'output/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: vercel-production
+  cancel-in-progress: false  # 部署不可中断，避免半成品
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Vercel (production)
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'
+          working-directory: ./
