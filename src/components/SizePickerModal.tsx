@@ -1,10 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { calculateImageSize, COMMON_IMAGE_RATIOS, normalizeImageSize, parseRatio, type CommonImageRatio, type SizeTier } from '../lib/size'
+import { calculateImageSize, normalizeImageSize, parseRatio, type SizeTier } from '../lib/size'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import ViewportTooltip from './ViewportTooltip'
 
 const TIERS: SizeTier[] = ['1K', '2K', '4K']
 const SIZE_LIMIT_TEXT = '由于模型限制，最终输出会自动规整到合法尺寸：\n宽高均为 16 的倍数，最大边长 3840px，宽高比不超过 3:1，总像素限制为 655360-8294400。'
+const RATIOS = [
+  { label: '1:1', value: '1:1' },
+  { label: '3:2', value: '3:2' },
+  { label: '2:3', value: '2:3' },
+  { label: '16:9', value: '16:9' },
+  { label: '9:16', value: '9:16' },
+  { label: '4:3', value: '4:3' },
+  { label: '3:4', value: '3:4' },
+  { label: '21:9', value: '21:9' },
+]
+
 interface Props {
   currentSize: string
   onSelect: (size: string) => void
@@ -13,7 +24,6 @@ interface Props {
 }
 
 type Mode = 'auto' | 'ratio' | 'resolution'
-type RatioSelection = CommonImageRatio | 'custom'
 
 function parseSize(size: string) {
   const match = size.match(/^\s*(\d+)\s*[xX×]\s*(\d+)\s*$/)
@@ -24,7 +34,7 @@ function parseSize(size: string) {
 function findPresetForSize(size: string) {
   const normalized = normalizeImageSize(size)
   for (const tier of TIERS) {
-    for (const ratio of COMMON_IMAGE_RATIOS) {
+    for (const ratio of RATIOS) {
       if (calculateImageSize(tier, ratio.value) === normalized) {
         return { tier, ratio: ratio.value }
       }
@@ -69,7 +79,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
 
   // Ratio mode state
   const [tier, setTier] = useState<SizeTier>(currentPreset?.tier ?? '1K')
-  const [ratio, setRatio] = useState<RatioSelection>(currentPreset?.ratio ?? (allowAuto ? '1:1' : '4:3'))
+  const [ratio, setRatio] = useState(currentPreset?.ratio ?? (allowAuto ? '1:1' : '4:3'))
   const [customRatio, setCustomRatio] = useState('16:9')
 
   // Resolution mode state
@@ -243,7 +253,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
                 <section>
                   <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">图像比例</div>
                   <div className="grid grid-cols-4 gap-2">
-                    {COMMON_IMAGE_RATIOS.map((item) => {
+                    {RATIOS.map((item) => {
                       const [w, h] = item.value.split(':').map(Number)
                       const isHorizontal = w > h
                       const isSquare = w === h

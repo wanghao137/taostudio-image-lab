@@ -22,7 +22,6 @@ export function normalizeParamsForSettings(
     size: normalizeImageSize(params.size) || DEFAULT_PARAMS.size,
     n: Math.min(outputImageLimit, Math.max(1, params.n || DEFAULT_PARAMS.n)),
   }
-  nextParams.exact_size = nextParams.size !== 'auto' && Boolean(nextParams.exact_size)
 
   if (activeProfile.provider === 'openai' && activeProfile.codexCli) {
     nextParams.quality = DEFAULT_PARAMS.quality
@@ -30,7 +29,6 @@ export function normalizeParamsForSettings(
 
   if (activeProfile.provider === 'fal') {
     if (!options.hasInputImages && nextParams.size === 'auto') nextParams.size = DEFAULT_FAL_IMAGE_SIZE
-    nextParams.exact_size = nextParams.size !== 'auto' && Boolean(nextParams.exact_size)
     if (nextParams.quality === 'auto') nextParams.quality = 'high'
     nextParams.moderation = DEFAULT_PARAMS.moderation
     nextParams.output_compression = DEFAULT_PARAMS.output_compression

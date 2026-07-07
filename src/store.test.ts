@@ -107,47 +107,6 @@ vi.mock('./lib/transparentImage', () => ({
   })),
   removeKeyedBackgroundFromDataUrl: vi.fn(async (dataUrl: string) => `transparent:${dataUrl}`),
 }))
-vi.mock('./lib/exactImageSize', () => ({
-  getExactImageSizeTarget: vi.fn((params: { size: string; exact_size: boolean }) => {
-    if (!params.exact_size || params.size === 'auto') return null
-    const match = params.size.match(/^(\d+)x(\d+)$/)
-    return match ? { width: Number(match[1]), height: Number(match[2]) } : null
-  }),
-  resizeImageDataUrlToExactSize: vi.fn(async (
-    dataUrl: string,
-    target: { width: number; height: number },
-    _outputFormat: string,
-    fitMode = 'cover',
-  ) => {
-    const sourceMatch = dataUrl.match(/(\d+)x(\d+)/)
-    const sourceWidth = sourceMatch ? Number(sourceMatch[1]) : 1024
-    const sourceHeight = sourceMatch ? Number(sourceMatch[2]) : 1024
-    if (sourceWidth === target.width && sourceHeight === target.height) {
-      return { dataUrl, width: sourceWidth, height: sourceHeight, sourceWidth, sourceHeight, resized: false }
-    }
-    return {
-      dataUrl: `data:image/png;base64,resized-${target.width}x${target.height}`,
-      width: target.width,
-      height: target.height,
-      sourceWidth,
-      sourceHeight,
-      resized: true,
-      drawPlan: {
-        mode: fitMode,
-        sourceWidth,
-        sourceHeight,
-        targetWidth: target.width,
-        targetHeight: target.height,
-        scale: 1,
-        drawX: 0,
-        drawY: 0,
-        drawWidth: target.width,
-        drawHeight: target.height,
-        aspectMismatch: sourceWidth / sourceHeight !== target.width / target.height,
-      },
-    }
-  }),
-}))
 vi.mock('./lib/agentApi', () => ({
   callAgentConversationTitleApi: vi.fn(async () => '标题'),
   callAgentResponsesApi: vi.fn(() => new Promise(() => {})),
@@ -170,7 +129,6 @@ vi.mock('./lib/agentApi', () => ({
 }))
 import { clearAgentConversations, clearImages, clearTasks, getAllAgentConversations, getAllTasks, getImage, putAgentConversation, putImage, putTask as putDbTask } from './lib/db'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
-import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { cleanStaleAgentInputDrafts, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
@@ -385,57 +343,6 @@ describe('mask draft lifecycle in store actions', () => {
     await clearImages()
   })
 
-  it('resizes exact-size outputs locally and preserves the source image', async () => {
-    const { callImageApi } = await import('./lib/api')
-    vi.mocked(callImageApi).mockClear()
-    vi.mocked(resizeImageDataUrlToExactSize).mockClear()
-    vi.mocked(callImageApi).mockResolvedValueOnce({
-      images: ['data:image/png;base64,actual-1254x1254'],
-      actualParams: { output_format: 'png', quality: 'high', size: '1254x1254' },
-      actualParamsList: [{ output_format: 'png', quality: 'high', size: '1254x1254' }],
-      revisedPrompts: [],
-    })
-    useStore.setState({
-      prompt: 'poster',
-      params: {
-        ...DEFAULT_PARAMS,
-        size: '2160x3840',
-        exact_size: true,
-        quality: 'high',
-        output_format: 'png',
-      },
-    })
-
-    await submitTask()
-    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(vi.mocked(callImageApi).mock.calls[0]?.[0].prompt).toContain('Target frame: vertical 9:16 composition')
-    expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
-      'data:image/png;base64,actual-1254x1254',
-      { width: 2160, height: 3840 },
-      'png',
-      'cover',
-    )
-    const [task] = useStore.getState().tasks
-    expect(task.exactSizeOriginalImages).toHaveLength(1)
-    expect(task.exactSizeTransforms?.[task.outputImages[0]]).toMatchObject({
-      mode: 'cover',
-      sourceWidth: 1254,
-      sourceHeight: 1254,
-      targetWidth: 2160,
-      targetHeight: 3840,
-      aspectMismatch: true,
-    })
-    expect(task.actualParams).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high', n: 1 })
-    expect(task.actualParamsByImage?.[task.outputImages[0]]).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high' })
-    const outputImage = await getImage(task.outputImages[0])
-    const sourceImage = await getImage(task.exactSizeOriginalImages![0])
-    expect(outputImage?.dataUrl).toBe('data:image/png;base64,resized-2160x3840')
-    expect(sourceImage?.dataUrl).toBe('data:image/png;base64,actual-1254x1254')
-    await clearTasks()
-    await clearImages()
-  })
-
   it('stores transparent background output after local post-processing', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockClear()
@@ -636,58 +543,6 @@ describe('input persistence setting', () => {
 
     expect(persisted.prompt).toBe('prompt')
     expect(persisted.inputImages).toEqual([{ id: imageA.id, dataUrl: '' }])
-  })
-
-  it('persists uploaded image dimensions while stripping preview payloads', () => {
-    useStore.setState({
-      inputImages: [{ id: imageA.id, dataUrl: imageA.dataUrl, width: 1536, height: 1024 }],
-    })
-
-    const persisted = getPersistedState(useStore.getState())
-
-    expect(persisted.inputImages).toEqual([{ id: imageA.id, dataUrl: '', width: 1536, height: 1024 }])
-  })
-
-  it('restores persisted uploaded image dimensions for ratio-aware actions', () => {
-    const migrated = migratePersistedState({
-      settings: { ...DEFAULT_SETTINGS },
-      appMode: 'gallery',
-      prompt: 'prompt',
-      inputImages: [{ id: imageA.id, dataUrl: '', width: 1536, height: 1024 }],
-    }) as { inputImages: Array<{ id: string; dataUrl: string; width?: number; height?: number }> }
-
-    expect(migrated.inputImages).toEqual([{ id: imageA.id, dataUrl: '', width: 1536, height: 1024 }])
-  })
-
-  it('hydrates persisted input dimensions from IndexedDB during startup', async () => {
-    await clearTasks()
-    await clearImages()
-    await clearAgentConversations()
-    await putImage({
-      id: imageA.id,
-      dataUrl: imageA.dataUrl,
-      source: 'upload',
-      createdAt: 1,
-      width: 1536,
-      height: 1024,
-    })
-    useStore.setState({
-      settings: { ...DEFAULT_SETTINGS },
-      appMode: 'gallery',
-      prompt: 'prompt',
-      inputImages: [{ id: imageA.id, dataUrl: '' }],
-      galleryInputDraft: null,
-      agentConversations: [],
-      agentInputDrafts: {},
-      tasks: [],
-      showToast: vi.fn(),
-    })
-
-    await initStore()
-
-    expect(useStore.getState().inputImages).toEqual([
-      { id: imageA.id, dataUrl: imageA.dataUrl, width: 1536, height: 1024 },
-    ])
   })
 
   it('omits input when restart input restore is disabled', () => {

@@ -312,7 +312,6 @@ export default function TaskCard({
   const formatDisplay = getParamDisplay(task, 'output_format')
   const showFormat = task.params.output_format !== 'png' || formatDisplay.isMismatch
   const showTransparentOutput = task.transparentOutput || task.params.transparent_output
-  const showExactSize = task.params.exact_size
 
   const nDisplay = getParamDisplay(task, 'n')
   const isAgentTask = task.sourceMode === 'agent' || Boolean(task.agentConversationId || task.agentRoundId)
@@ -600,11 +599,6 @@ export default function TaskCard({
                 <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-xs flex-shrink-0">
                   <TransparentBgIcon className="w-3 h-3 flex-shrink-0" />
                   透明背景
-                </span>
-              )}
-              {showExactSize && (
-                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs flex-shrink-0">
-                  精确尺寸
                 </span>
               )}
               {/* Params: only show if not default or mismatch */}
