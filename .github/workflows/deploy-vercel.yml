@@ -2,9 +2,10 @@ name: Deploy to Vercel
 
 # 任何 push 到 main 自动部署生产前端到 https://image.taostudioai.com/
 # 也能在 GitHub Actions 页面手动触发（用于首次部署或重跑）
-# 需要 2 个 repository secrets（见 docs/deploy-vercel.md）：
-#   VERCEL_TOKEN  — vercel.com/account/tokens 创建，scope 选该项目
-#   VERCEL_ORG_ID / VERCEL_PROJECT_ID — 已在 .vercel/project.json，配置文档里有怎么读
+# 需要 3 个 repository secrets（见 docs/deploy-vercel.md）：
+#   VERCEL_TOKEN      — vercel.com/account/tokens 创建，scope 选该项目
+#   VERCEL_ORG_ID     — team_yLkWFllwHMElnHL2UPdCMrHO（来自 .vercel/project.json）
+#   VERCEL_PROJECT_ID — prj_3YEQuSzkM4uqRJ3yCgrrFlXSIu8s
 
 on:
   push:
@@ -29,6 +30,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
+    env:
+      # 官方 vercel CLI 读这三个环境变量来认证和选项目
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,11 +57,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install latest Vercel CLI
+        # 直接用官方 vercel 包，避免第三方 action 捆绑旧版 CLI 导致版本过时
+        run: npm install -g vercel@latest
+
       - name: Deploy to Vercel (production)
-        uses: amondnet/vercel-action@v25
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'
-          working-directory: ./
+        run: vercel --prod --yes --cwd=.

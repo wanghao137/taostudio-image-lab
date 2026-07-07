@@ -4,7 +4,9 @@
 
 ## 为什么需要这一步
 
-`vercel.json` 里 `git.deploymentEnabled: false`（项目一开始就关闭了 git 自动部署）。原因是早期想用别的部署方式但没落地。本次改用 **GitHub Actions 触发 Vercel 部署**（见 `.github/workflows/deploy-vercel.yml`），比 Vercel 原生 git 集成更可控（CI 里能跑 lint/test/build gates，失败则不部署）。
+`vercel.json` 里 `git.deploymentEnabled: false`（项目一开始就关闭了 git 自动部署）。本次改用 **GitHub Actions + 官方 vercel CLI** 触发部署（见 `.github/workflows/deploy-vercel.yml`），比 Vercel 原生 git 集成更可控（CI 里能跑 lint/test/build gates，失败则不部署）。
+
+> 注意：早期版本用过 `amondnet/vercel-action`，但它捆绑的 vercel CLI 版本跟不上 Vercel API 要求（报 "CLI version outdated"）。现改为 CI 里 `npm install -g vercel@latest` 直接用官方包，永不再有版本过时问题。
 
 ## 你要做的 3 件事（约 5 分钟，一次性）
 
