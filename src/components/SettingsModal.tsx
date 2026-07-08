@@ -373,9 +373,10 @@ export default function SettingsModal() {
   const apiProxyChecked = activeProfileApiProxyEligible && (apiProxyLocked || activeProfile.apiProxy)
   const apiProxyEnabled = apiProxyAvailable && activeProfileApiProxyEligible && apiProxyChecked
   const localAutoSaveSupported = isLocalAutoSaveSupported()
+  const localAutoSave = draft.localAutoSave
   const pendingLocalAutoSaveCount = getLocalAutoSaveRetryableTaskCount(tasks)
   const localAutoSaveNeedsPermission = tasks.some((task) => task.localAutoSave?.status === 'needs_permission')
-  const canRetryLocalAutoSave = settings.localAutoSave.enabled && pendingLocalAutoSaveCount > 0
+  const canRetryLocalAutoSave = localAutoSave.enabled && pendingLocalAutoSaveCount > 0
   const defaultProviderOrder = ['openai', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
@@ -567,8 +568,26 @@ export default function SettingsModal() {
       }
     })
     const fallbackProfile = createDefaultOpenAIProfile({ id: newId('openai') })
+    const latestLocalAutoSave = useStore.getState().settings.localAutoSave
+    const localAutoSavePatch: Partial<AppSettings['localAutoSave']> = {}
+    if (nextDraft.localAutoSave.enabled !== draft.localAutoSave.enabled) {
+      localAutoSavePatch.enabled = nextDraft.localAutoSave.enabled
+    }
+    if (nextDraft.localAutoSave.directoryName !== draft.localAutoSave.directoryName) {
+      localAutoSavePatch.directoryName = nextDraft.localAutoSave.directoryName
+    }
+    if (nextDraft.localAutoSave.lastSavedAt !== draft.localAutoSave.lastSavedAt) {
+      localAutoSavePatch.lastSavedAt = nextDraft.localAutoSave.lastSavedAt
+    }
+    if (nextDraft.localAutoSave.lastSavedFolderName !== draft.localAutoSave.lastSavedFolderName) {
+      localAutoSavePatch.lastSavedFolderName = nextDraft.localAutoSave.lastSavedFolderName
+    }
     const normalizedDraft = normalizeSettings({
       ...nextDraft,
+      localAutoSave: {
+        ...latestLocalAutoSave,
+        ...localAutoSavePatch,
+      },
       profiles: normalizedProfiles.length ? normalizedProfiles : [fallbackProfile],
       activeProfileId: normalizedProfiles.some((profile) => profile.id === nextDraft.activeProfileId)
         ? nextDraft.activeProfileId
@@ -583,6 +602,25 @@ export default function SettingsModal() {
       ? Array.from(new Set([...draft.zipDownloadRoutes, route]))
       : draft.zipDownloadRoutes.filter((item) => item !== route)
     commitSettings({ ...draft, zipDownloadRoutes: nextRoutes })
+  }
+
+  const commitLocalAutoSaveSettings = (patch: Partial<AppSettings['localAutoSave']>) => {
+    commitSettings({
+      ...draft,
+      localAutoSave: {
+        ...draft.localAutoSave,
+        ...patch,
+      },
+    })
+  }
+
+  const handleSelectLocalAutoSaveDirectory = async () => {
+    await selectLocalAutoSaveDirectory()
+    const nextLocalAutoSave = useStore.getState().settings.localAutoSave
+    setDraft((currentDraft) => normalizeSettings({
+      ...currentDraft,
+      localAutoSave: nextLocalAutoSave,
+    }))
   }
 
   const updateCopyImportUrlOptions = (patch: Partial<CopyImportUrlOptions>) => {
@@ -1756,14 +1794,9 @@ export default function SettingsModal() {
                       </p>
                     </div>
                     <Checkbox
-                      checked={settings.localAutoSave.enabled}
-                      onChange={(enabled) => setSettings({
-                        localAutoSave: {
-                          ...settings.localAutoSave,
-                          enabled,
-                        },
-                      })}
-                      label={settings.localAutoSave.enabled ? '开启' : '关闭'}
+                      checked={localAutoSave.enabled}
+                      onChange={(enabled) => commitLocalAutoSaveSettings({ enabled })}
+                      label={localAutoSave.enabled ? '开启' : '关闭'}
                       disabled={!localAutoSaveSupported}
                       className={!localAutoSaveSupported ? 'opacity-50 cursor-not-allowed' : undefined}
                     />
@@ -1776,10 +1809,10 @@ export default function SettingsModal() {
                   ) : (
                     <>
                       <div className="rounded-xl bg-gray-50/80 p-3 text-xs leading-relaxed text-gray-600 dark:bg-white/[0.04] dark:text-gray-300">
-                        <div>保存位置：{settings.localAutoSave.directoryName ?? '未选择'}</div>
-                        <div>状态：{localAutoSaveNeedsPermission ? '需要重新授权保存位置' : settings.localAutoSave.directoryName ? '已选择，写入前会确认权限' : '未选择'}</div>
-                        {settings.localAutoSave.lastSavedFolderName ? (
-                          <div>最近保存：{settings.localAutoSave.lastSavedFolderName}</div>
+                        <div>保存位置：{localAutoSave.directoryName ?? '未选择'}</div>
+                        <div>状态：{localAutoSaveNeedsPermission ? '需要重新授权保存位置' : localAutoSave.directoryName ? '已选择，写入前会确认权限' : '未选择'}</div>
+                        {localAutoSave.lastSavedFolderName ? (
+                          <div>最近保存：{localAutoSave.lastSavedFolderName}</div>
                         ) : null}
                         {localAutoSaveNeedsPermission ? (
                           <div className="text-yellow-700 dark:text-yellow-200">请重新选择文件夹后再补保存。</div>
@@ -1787,7 +1820,7 @@ export default function SettingsModal() {
                         {pendingLocalAutoSaveCount > 0 ? (
                           <div>待补保存：{pendingLocalAutoSaveCount} 个</div>
                         ) : null}
-                        {!settings.localAutoSave.enabled && pendingLocalAutoSaveCount > 0 ? (
+                        {!localAutoSave.enabled && pendingLocalAutoSaveCount > 0 ? (
                           <div>开启本地自动保存后可补保存。</div>
                         ) : null}
                       </div>
@@ -1795,7 +1828,7 @@ export default function SettingsModal() {
                       <div className="grid gap-2 sm:grid-cols-2">
                         <button
                           type="button"
-                          onClick={() => { void selectLocalAutoSaveDirectory() }}
+                          onClick={() => { void handleSelectLocalAutoSaveDirectory() }}
                           className="rounded-xl bg-gray-100/80 px-4 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white"
                         >
                           选择文件夹

@@ -561,6 +561,7 @@ describe('local auto-save store integration', () => {
     expect(unsupportedPicker).not.toHaveBeenCalled()
     expect(useStore.getState().showToast).toHaveBeenCalledWith('本地自动保存仅支持桌面 Chrome/Edge', 'error')
 
+    useStore.setState({ settings: localAutoSaveSettings(false, { directoryName: null }) })
     const directory = fakeDirectoryHandle('Desktop Archive')
     const supportedPicker = setLocalAutoSaveBrowserSupport(true, vi.fn(async () => directory))
 
@@ -568,7 +569,31 @@ describe('local auto-save store integration', () => {
 
     expect(supportedPicker).toHaveBeenCalledWith({ mode: 'readwrite' })
     expect(await getLocalAutoSaveDirectoryHandle()).toMatchObject({ handle: directory, name: 'Desktop Archive' })
+    expect(useStore.getState().settings.localAutoSave.enabled).toBe(true)
     expect(useStore.getState().settings.localAutoSave.directoryName).toBe('Desktop Archive')
+  })
+
+  it('merges local auto-save setting patches without clearing saved directory metadata', () => {
+    useStore.setState({
+      settings: localAutoSaveSettings(true, {
+        directoryName: 'Desktop Archive',
+        lastSavedAt: 1_788_888_888,
+        lastSavedFolderName: '20260708_2160x3840_城市夜晚人像',
+      }),
+    })
+
+    useStore.getState().setSettings({
+      localAutoSave: {
+        enabled: false,
+      },
+    } as unknown as Partial<AppSettings>)
+
+    expect(useStore.getState().settings.localAutoSave).toEqual({
+      enabled: false,
+      directoryName: 'Desktop Archive',
+      lastSavedAt: 1_788_888_888,
+      lastSavedFolderName: '20260708_2160x3840_城市夜晚人像',
+    })
   })
 
   it('counts and retries pending, failed, permission, and stale saving local auto-saves', async () => {

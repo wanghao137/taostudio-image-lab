@@ -1293,7 +1293,16 @@ export const useStore = create<AppState>()(
           incoming.apiProxy !== undefined ||
           incoming.streamImages !== undefined ||
           incoming.streamPartialImages !== undefined
-        const merged = normalizeSettings({ ...previous, ...incoming })
+        const mergedIncoming = incoming.localAutoSave !== undefined
+          ? {
+              ...incoming,
+              localAutoSave: {
+                ...previous.localAutoSave,
+                ...incoming.localAutoSave,
+              },
+            }
+          : incoming
+        const merged = normalizeSettings({ ...previous, ...mergedIncoming })
         if (hasLegacyOverrides && incoming.profiles === undefined) {
           merged.profiles = merged.profiles.map((profile) =>
             profile.id === merged.activeProfileId
@@ -5108,6 +5117,7 @@ export async function selectLocalAutoSaveDirectory() {
     useStore.getState().setSettings({
       localAutoSave: {
         ...useStore.getState().settings.localAutoSave,
+        enabled: true,
         directoryName: handle.name,
       },
     })
