@@ -18,6 +18,24 @@ import { CloseIcon, CodeIcon, CopyIcon, DownloadIcon, EditIcon, LinkIcon, TrashI
 
 import ViewportTooltip from './ViewportTooltip'
 
+const refusalRecoveryCategoryLabels: Record<string, string> = {
+  age_ambiguity: '年龄不明确',
+  nudity_or_explicitness: '裸露/露骨',
+  private_or_voyeuristic_framing: '私密/窥视语境',
+  body_measurement_emphasis: '身体指标强调',
+  missing_reference_dependency: '缺少参考输入',
+  identity_exactness: '身份精确匹配',
+  unsupported_generation_profile: '生成配置不支持',
+  policy_or_safety_refusal: '安全策略拒绝',
+  unknown: '未知触发点',
+}
+
+function getRefusalRecoveryStatusText(status: string) {
+  if (status === 'recovered') return '已恢复'
+  if (status === 'blocked') return '已阻止'
+  return '未触发'
+}
+
 export default function DetailModal() {
   const tasks = useStore((s) => s.tasks)
   const detailTaskId = useStore((s) => s.detailTaskId)
@@ -254,6 +272,7 @@ export default function DetailModal() {
     ? baseActualParams
     : { ...(baseActualParams ?? {}), size: currentImageSize.replace('×', 'x') }
   const currentRevisedPrompt = currentOutputImageId ? task.revisedPromptByImage?.[currentOutputImageId]?.trim() : ''
+  const refusalRecovery = task.refusalRecovery
   // 将 @图N 等 mention 标记和透明背景追加提示词都按实际请求内容比较，
   // 避免仅由本地请求预处理导致的不一致被当作“API 改写”。
   const requestPrompt = task.transparentOutput && task.transparentPrompt
@@ -950,6 +969,32 @@ export default function DetailModal() {
                   value={currentRevisedPrompt}
                   className="max-w-full rounded px-2 py-1 text-left text-xs leading-relaxed whitespace-pre-wrap"
                 />
+              </div>
+            )}
+            {refusalRecovery && refusalRecovery.status !== 'not_triggered' && (
+              <div className="mb-4 rounded-lg border border-amber-200/70 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:border-amber-400/20 dark:bg-amber-500/10 dark:text-amber-200">
+                <div className="mb-1 flex flex-wrap items-center gap-2">
+                  <span className="font-medium">拒绝恢复</span>
+                  <span className="rounded bg-white/70 px-1.5 py-0.5 text-[11px] font-medium dark:bg-white/[0.08]">
+                    {getRefusalRecoveryStatusText(refusalRecovery.status)}
+                  </span>
+                  {refusalRecovery.rewrite.trigger_category && (
+                    <span className="rounded bg-white/70 px-1.5 py-0.5 text-[11px] dark:bg-white/[0.08]">
+                      {refusalRecoveryCategoryLabels[refusalRecovery.rewrite.trigger_category] ?? refusalRecovery.rewrite.trigger_category}
+                    </span>
+                  )}
+                </div>
+                {refusalRecovery.attempt_1.refusal_summary && (
+                  <p className="whitespace-pre-wrap break-words leading-relaxed">
+                    首次拒绝：{refusalRecovery.attempt_1.refusal_summary}
+                  </p>
+                )}
+                <p className="mt-1 whitespace-pre-wrap break-words leading-relaxed">
+                  改写：{refusalRecovery.rewrite.summary}
+                </p>
+                <p className="mt-1">
+                  二次结果：{refusalRecovery.attempt_2.result === 'success' ? '成功' : refusalRecovery.attempt_2.result === 'refused' ? '仍被拒绝' : '未运行'}
+                </p>
               </div>
             )}
 

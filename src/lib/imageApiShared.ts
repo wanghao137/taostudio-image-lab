@@ -1,4 +1,4 @@
-import type { AppSettings, TaskParams } from '../types'
+import type { AppSettings, RefusalRecoveryRecord, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
 
 export const MIME_MAP: Record<string, string> = {
@@ -35,6 +35,8 @@ export interface CallApiResult {
   rawImageUrls?: string[]
   /** 并发多图请求中失败的单张请求 */
   failedRequests?: Array<{ requestIndex: number; error: string }>
+  /** 审核/安全拒绝后的最小改写恢复记录 */
+  refusalRecovery?: RefusalRecoveryRecord
 }
 
 export function isHttpUrl(value: unknown): value is string {
@@ -160,6 +162,7 @@ export async function getApiErrorMessage(response: Response): Promise<string> {
   try {
     const errJson = await response.json()
     if (errJson.error?.message) errorMsg = errJson.error.message
+    else if (errJson.error?.code) errorMsg = errJson.error.code
     else if (typeof errJson.detail === 'string') errorMsg = errJson.detail
     else if (Array.isArray(errJson.detail)) errorMsg = errJson.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
     else if (typeof errJson.error === 'string') errorMsg = errJson.error

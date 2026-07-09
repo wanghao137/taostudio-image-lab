@@ -79,6 +79,154 @@ describe('callImageApi', () => {
     expect(body.prompt).toBe('prompt')
   })
 
+  it('sends low moderation by default on Images API requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(DEFAULT_PARAMS.moderation).toBe('low')
+    expect(body.moderation).toBe('low')
+  })
+
+  it('retries Images API once with a safety rewrite after moderation rejection', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'content_policy_violation: safety rejected' },
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const result = await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'private portrait',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
+    const retryBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
+    expect(firstBody.prompt).toBe('private portrait')
+    expect(retryBody.prompt).toContain('生成一版合规图像')
+    expect(retryBody.prompt).toContain('公开场景、授权拍摄、无隐私侵犯')
+    expect(result.images).toEqual(['data:image/png;base64,aW1hZ2U='])
+    expect(result.refusalRecovery).toMatchObject({
+      status: 'recovered',
+      attempt_1: {
+        result: 'refused',
+      },
+      rewrite: {
+        trigger_category: 'private_or_voyeuristic_framing',
+        preserved_constraints: ['subject', 'composition', 'style', 'lighting', 'aspect_ratio', 'deliverable'],
+      },
+      attempt_2: {
+        result: 'success',
+      },
+    })
+    expect(result.refusalRecovery?.attempt_1.refusal_summary).toContain('content_policy_violation')
+    expect(result.revisedPrompts?.[0]).toContain('生成一版合规图像')
+  })
+
+  it('retries Responses API image failures with a safety rewrite and bypasses the guard', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          status: 'failed',
+          error: { message: 'safety rejected' },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'aW1hZ2U=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const result = await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', apiMode: 'responses' },
+      prompt: 'private portrait',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
+    const retryBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
+    expect(firstBody.input).toBe('Use the following text as the complete prompt. Do not rewrite it:\nprivate portrait')
+    expect(retryBody.input).toContain('生成一版合规图像')
+    expect(retryBody.input).not.toContain('Do not rewrite it')
+    expect(result.images).toEqual(['data:image/png;base64,aW1hZ2U='])
+    expect(result.refusalRecovery).toMatchObject({
+      status: 'recovered',
+      attempt_1: {
+        result: 'refused',
+        refusal_summary: 'safety rejected',
+      },
+      attempt_2: {
+        result: 'success',
+      },
+    })
+  })
+
+  it('records blocked refusal recovery when the safety retry is refused again', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'content_policy_violation: safety rejected' },
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'content_policy_violation: still rejected' },
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    await expect(callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'private portrait',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toMatchObject({
+      refusalRecovery: {
+        status: 'blocked',
+        attempt_1: {
+          result: 'refused',
+        },
+        attempt_2: {
+          result: 'refused',
+        },
+      },
+    })
+  })
+
   it('records actual params returned on Images API responses in Codex CLI mode', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       output_format: 'png',

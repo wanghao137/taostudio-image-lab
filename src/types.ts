@@ -160,7 +160,7 @@ export const DEFAULT_PARAMS: TaskParams = {
   quality: 'auto',
   output_format: 'png',
   output_compression: null,
-  moderation: 'auto',
+  moderation: 'low',
   n: 1,
   transparent_output: false,
 }
@@ -179,6 +179,35 @@ export interface ExactSizeTransformRecord {
   drawWidth: number
   drawHeight: number
   aspectMismatch: boolean
+}
+
+export type RefusalRecoveryTriggerCategory =
+  | 'age_ambiguity'
+  | 'nudity_or_explicitness'
+  | 'private_or_voyeuristic_framing'
+  | 'body_measurement_emphasis'
+  | 'missing_reference_dependency'
+  | 'identity_exactness'
+  | 'unsupported_generation_profile'
+  | 'policy_or_safety_refusal'
+  | 'unknown'
+
+export interface RefusalRecoveryRecord {
+  status: 'not_triggered' | 'recovered' | 'blocked'
+  attempt_1: {
+    prompt_file: string | null
+    result: 'success' | 'refused'
+    refusal_summary: string | null
+  }
+  rewrite: {
+    trigger_category: RefusalRecoveryTriggerCategory | null
+    summary: string
+    preserved_constraints: string[]
+  }
+  attempt_2: {
+    prompt_file: string | null
+    result: 'success' | 'refused' | 'not_run'
+  }
 }
 
 // ===== 输入图片（UI 层面） =====
@@ -234,6 +263,8 @@ export interface TaskRecord {
   actualParamsByImage?: Record<string, Partial<TaskParams>>
   /** 输出图片对应的 API 改写提示词，key 为 outputImages 中的图片 id */
   revisedPromptByImage?: Record<string, string>
+  /** 审核/安全拒绝后的最小改写恢复记录 */
+  refusalRecovery?: RefusalRecoveryRecord
   /** 是否启用透明背景后处理 */
   transparentOutput?: boolean
   /** 实际发送给 API 的透明背景辅助提示词 */

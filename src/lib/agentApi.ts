@@ -1,4 +1,4 @@
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type RefusalRecoveryRecord, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import { appendStreamingFormatHint, maybeAppendStreamingHint, getApiErrorMessage, MIME_MAP, normalizeBase64Image, pickActualParams } from './imageApiShared'
 
@@ -8,6 +8,7 @@ export interface AgentApiResultImage {
   dataUrl: string
   actualParams?: Partial<TaskParams>
   revisedPrompt?: string
+  refusalRecovery?: RefusalRecoveryRecord
 }
 
 export interface AgentApiImageToolFailure {

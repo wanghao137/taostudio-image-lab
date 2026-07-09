@@ -17,6 +17,7 @@ import type {
   ResponsesOutputItem,
   StoredImage,
   ExactSizeTransformRecord,
+  RefusalRecoveryRecord,
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
 import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
@@ -1997,14 +1998,25 @@ function getApiRequestNetworkErrorHint(
   return `提示：请求等待较长时间后被断开，通常是反向代理或网关的超时限制，而非接口本身报错。可检查代理超时设置，或降低图片尺寸/质量后重试。${getTimeoutStreamingHint(profile)}`
 }
 
-function getRawErrorPayload(err: unknown): Pick<Partial<TaskRecord>, 'rawImageUrls' | 'rawResponsePayload'> {
+function isRefusalRecoveryRecord(value: unknown): value is RefusalRecoveryRecord {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Partial<RefusalRecoveryRecord>
+  return (record.status === 'not_triggered' || record.status === 'recovered' || record.status === 'blocked') &&
+    Boolean(record.attempt_1 && typeof record.attempt_1 === 'object') &&
+    Boolean(record.rewrite && typeof record.rewrite === 'object') &&
+    Boolean(record.attempt_2 && typeof record.attempt_2 === 'object')
+}
+
+function getRawErrorPayload(err: unknown): Pick<Partial<TaskRecord>, 'rawImageUrls' | 'rawResponsePayload' | 'refusalRecovery'> {
   if (!(err instanceof Error)) return {}
 
   const rawImageUrls = 'rawImageUrls' in err ? (err as { rawImageUrls?: unknown }).rawImageUrls : undefined
   const rawResponsePayload = 'rawResponsePayload' in err ? (err as { rawResponsePayload?: unknown }).rawResponsePayload : undefined
+  const refusalRecovery = 'refusalRecovery' in err ? (err as { refusalRecovery?: unknown }).refusalRecovery : undefined
   return {
     rawImageUrls: Array.isArray(rawImageUrls) && rawImageUrls.length ? rawImageUrls.filter((url): url is string => typeof url === 'string') : undefined,
     rawResponsePayload: typeof rawResponsePayload === 'string' ? rawResponsePayload : undefined,
+    refusalRecovery: isRefusalRecoveryRecord(refusalRecovery) ? refusalRecovery : undefined,
   }
 }
 
@@ -4038,6 +4050,7 @@ async function executeAgentRound(
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
+        refusalRecovery: image.refusalRecovery,
         rawResponsePayload,
         status: 'done',
         error: null,
@@ -4049,7 +4062,7 @@ async function executeAgentRound(
       return taskId
     }
 
-    const failAgentImageTask = (toolCallId: string, error: string, rawResponsePayload?: string) => {
+    const failAgentImageTask = (toolCallId: string, error: string, rawResponsePayload?: string, refusalRecovery?: RefusalRecoveryRecord) => {
       const taskId = taskIdByToolCallId.get(toolCallId)
       if (!taskId) return
       const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
@@ -4060,6 +4073,7 @@ async function executeAgentRound(
         status: 'error',
         error,
         rawResponsePayload,
+        refusalRecovery,
         falRecoverable: false,
         customRecoverable: false,
         finishedAt: Date.now(),
@@ -4232,13 +4246,16 @@ async function executeAgentRound(
           dataUrl,
           actualParams: result.actualParamsList?.[0] ?? result.actualParams,
           revisedPrompt: result.revisedPrompts?.[0] ?? opts.prompt,
+          refusalRecovery: result.refusalRecovery,
         } satisfies AgentApiResultImage : null,
         error: result.failedRequests?.[0]?.error ?? (dataUrl ? null : '接口未返回图片数据'),
+        refusalRecovery: result.refusalRecovery,
         rawResponsePayload: JSON.stringify({
           imageCount: result.images.length,
           actualParams: result.actualParams,
           actualParamsList: result.actualParamsList,
           revisedPrompts: result.revisedPrompts,
+          refusalRecovery: result.refusalRecovery,
           rawImageUrls: result.rawImageUrls,
           failedRequests: result.failedRequests,
         }, null, 2),
@@ -4289,13 +4306,14 @@ async function executeAgentRound(
           return JSON.stringify({ id: item.id, status: 'done' })
         }
 
-        failAgentImageTask(toolCallId, result.error!, result.rawResponsePayload)
+        failAgentImageTask(toolCallId, result.error!, result.rawResponsePayload, result.refusalRecovery)
         return JSON.stringify({ id: item.id, status: 'error', error: result.error })
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err)
         if (controller.signal.aborted) throw createAgentAbortError()
         if (pauseAgentImageTaskForRecovery(toolCallId, err)) throw createAgentRecoveryPauseError()
-        failAgentImageTask(toolCallId, error)
+        const errorPayload = getRawErrorPayload(err)
+        failAgentImageTask(toolCallId, error, errorPayload.rawResponsePayload, errorPayload.refusalRecovery)
         return JSON.stringify({ id: item.id, status: 'error', error })
       }
     }
@@ -4409,7 +4427,8 @@ async function executeAgentRound(
         if (settled.status === 'fulfilled') {
           const r = settled.value
           if (!r.image) {
-            failAgentImageTask(batchExecutionItems[i].batchToolCallId, r.error!, r.rawResponsePayload)
+            const refusalRecovery = 'refusalRecovery' in r ? r.refusalRecovery : undefined
+            failAgentImageTask(batchExecutionItems[i].batchToolCallId, r.error!, r.rawResponsePayload, refusalRecovery)
           }
           outputImages.push({
             id: r.batchItemId,
@@ -4422,7 +4441,8 @@ async function executeAgentRound(
             pausedForRecovery = true
             continue
           }
-          failAgentImageTask(batchExecutionItems[i].batchToolCallId, error)
+          const errorPayload = getRawErrorPayload(settled.reason)
+          failAgentImageTask(batchExecutionItems[i].batchToolCallId, error, errorPayload.rawResponsePayload, errorPayload.refusalRecovery)
           outputImages.push({
             id: batchItem.id,
             status: 'error',
@@ -4572,6 +4592,7 @@ async function executeAgentRound(
           actualParams,
           actualParamsByImage: { [stored.id]: actualParams },
           revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
+          refusalRecovery: image.refusalRecovery,
           rawResponsePayload: result.rawResponsePayload,
           status: 'done',
           error: null,
@@ -4928,7 +4949,7 @@ async function executeTask(taskId: string) {
       (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== promptSentToApi.trim(),
     )
     const hasRevisedPromptValue = shouldStoreRevisedPrompts && result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
-    if (taskProvider === 'openai' && activeProfile.apiMode === 'responses' && !activeProfile.codexCli) {
+    if (taskProvider === 'openai' && activeProfile.apiMode === 'responses' && !activeProfile.codexCli && !result.refusalRecovery) {
       if (promptWasRevised) {
         showCodexCliPrompt()
       } else if (!hasRevisedPromptValue) {
@@ -4956,6 +4977,7 @@ async function executeTask(taskId: string) {
       actualParams,
       actualParamsByImage,
       revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
+      refusalRecovery: result.refusalRecovery,
       status: 'done',
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,

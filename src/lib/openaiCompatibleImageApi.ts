@@ -1,4 +1,4 @@
-import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefinition, type CustomProviderPollMapping, type CustomProviderResultMapping, type CustomProviderSubmitMapping, type ImageApiResponse, type ImageResponseItem, type RefusalRecoveryRecord, type RefusalRecoveryTriggerCategory, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
@@ -108,6 +108,147 @@ function getErrorMessage(err: unknown): string {
 function getNumberValue(source: Record<string, unknown>, key: string): number | undefined {
   const value = source[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function isSafetyRefusalMessage(message: string): boolean {
+  return /content[_\s-]?policy|safety|moderation|moderated|refus|reject|blocked|disallowed|not allowed|inappropriate|violat|审核|安全|策略|政策|拒绝|不通过|违规|敏感|拦截|不合规|禁止/i.test(message)
+}
+
+function rewritePromptForSafety(prompt: string): string {
+  const replacements: Array<[RegExp, string]> = [
+    [/\b(?:underage|minor|child|kid|teen(?:ager)?|schoolgirl|schoolboy|loli|lolita)\b/gi, 'adult'],
+    [/未成年|未满十八岁|儿童|小孩|幼女|萝莉|童颜|少女|男孩|女孩/g, '成年人'],
+    [/\b(?:nude|naked|porn|sex|sexual|erotic|explicit|nsfw|nipple|nipples|areola|genital|genitals|cleavage|upskirt|lingerie)\b/gi, 'tasteful non-explicit fashion'],
+    [/全裸|裸露|裸体|露点|乳头|乳晕|生殖器|性交|性爱|色情|擦边|走光|爆乳|巨乳|罩杯|沟壑|内衣/g, '衣着得体的非露骨画面'],
+    [/\b(?:voyeur|leaked|hidden camera|private sexual|non-consensual|nonconsensual)\b/gi, 'consensual public scene'],
+    [/偷拍|泄露|私密|偷窥|强迫|非自愿/g, '公开授权场景'],
+    [/\b(?:gore|gory|bloody|dismembered|decapitated)\b/gi, 'non-graphic dramatic'],
+    [/血腥|断肢|斩首|尸体|内脏/g, '非血腥的戏剧化'],
+    [/\b(?:bypass|jailbreak|ignore safety|avoid moderation|evade policy)\b/gi, ''],
+    [/绕过审核|规避审核|无视安全|忽略政策|突破限制/g, ''],
+  ]
+  let text = prompt
+  for (const [pattern, replacement] of replacements) {
+    text = text.replace(pattern, replacement)
+  }
+  text = text
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return text || '一个合规、非露骨、非私密、非血腥的视觉创意'
+}
+
+function getSafetyRewriteConstraints(): string[] {
+  const constraints = ['subject', 'composition', 'style', 'lighting', 'aspect_ratio', 'deliverable']
+  return constraints.filter((value, index) => constraints.indexOf(value) === index)
+}
+
+function getSafetyRewriteGuidance(source: string): string[] {
+  const constraints = ['保留主体、构图、风格、光线、色彩和用途']
+  if (/underage|minor|child|teen|school|loli|未成年|儿童|小孩|幼女|萝莉|少女|男孩|女孩/i.test(source)) {
+    constraints.push('所有人物明确为成年人')
+  }
+  if (/nude|naked|porn|sex|sexual|erotic|explicit|nsfw|nipple|genital|cleavage|裸|色情|性爱|露点|乳头|生殖器|擦边|走光|内衣/i.test(source)) {
+    constraints.push('衣着得体、非裸露、非露骨、无性暗示')
+  }
+  if (/voyeur|leaked|hidden camera|private|non-consensual|偷拍|泄露|私密|偷窥|强迫|非自愿/i.test(source)) {
+    constraints.push('公开场景、授权拍摄、无隐私侵犯')
+  }
+  if (/gore|bloody|blood|dismember|decapitat|血腥|血|断肢|斩首|尸体|内脏/i.test(source)) {
+    constraints.push('非血腥、非写实伤害')
+  }
+  constraints.push('不要包含规避审核或政策的表述')
+  return [...new Set(constraints)]
+}
+
+function getRefusalTriggerCategory(source: string): RefusalRecoveryTriggerCategory {
+  if (/underage|minor|child|teen|school|loli|未成年|儿童|小孩|幼女|萝莉|少女|男孩|女孩/i.test(source)) {
+    return 'age_ambiguity'
+  }
+  if (/nude|naked|porn|sex|sexual|erotic|explicit|nsfw|nipple|genital|cleavage|裸|色情|性爱|露点|乳头|生殖器|擦边|走光|内衣/i.test(source)) {
+    return 'nudity_or_explicitness'
+  }
+  if (/voyeur|leaked|hidden camera|private|non-consensual|偷拍|泄露|私密|偷窥|强迫|非自愿/i.test(source)) {
+    return 'private_or_voyeuristic_framing'
+  }
+  if (/bust|cup size|implant|measurements|爆乳|巨乳|罩杯|三围/i.test(source)) {
+    return 'body_measurement_emphasis'
+  }
+  if (/reference|identity|same person|face match|参考图|身份|同一个人|保持脸|还原本人/i.test(source)) {
+    return 'identity_exactness'
+  }
+  if (/unsupported|not supported|invalid parameter|profile|不支持|参数无效|配置/i.test(source)) {
+    return 'unsupported_generation_profile'
+  }
+  if (isSafetyRefusalMessage(source)) return 'policy_or_safety_refusal'
+  return 'unknown'
+}
+
+interface SafetyPromptRewrite {
+  prompt: string
+  reason: string
+  triggerCategory: RefusalRecoveryTriggerCategory
+  summary: string
+  preservedConstraints: string[]
+}
+
+function createSafetyPromptRewrite(prompt: string, reason: string): SafetyPromptRewrite | null {
+  if (!prompt.trim() || !isSafetyRefusalMessage(reason)) return null
+  const rewrittenVisualIntent = rewritePromptForSafety(prompt)
+  const source = `${reason}\n${prompt}`
+  const constraints = getSafetyRewriteGuidance(source).join('；')
+  const triggerCategory = getRefusalTriggerCategory(source)
+  const summary = `根据首次拒绝原因移除或弱化「${triggerCategory}」触发点，保留主体、构图、风格、光线和交付规格。`
+  return {
+    reason,
+    triggerCategory,
+    summary,
+    preservedConstraints: getSafetyRewriteConstraints(),
+    prompt: [
+      '生成一版合规图像，保留原始视觉意图，只移除不合规内容。',
+      `安全改写方向：${constraints}。`,
+      `改写后的视觉意图：${rewrittenVisualIntent}`,
+    ].join('\n'),
+  }
+}
+
+function createRefusalRecoveryRecord(rewrite: SafetyPromptRewrite, attempt2Result: RefusalRecoveryRecord['attempt_2']['result']): RefusalRecoveryRecord {
+  return {
+    status: attempt2Result === 'success' ? 'recovered' : 'blocked',
+    attempt_1: {
+      prompt_file: 'request.prompt',
+      result: 'refused',
+      refusal_summary: rewrite.reason,
+    },
+    rewrite: {
+      trigger_category: rewrite.triggerCategory,
+      summary: rewrite.summary,
+      preserved_constraints: rewrite.preservedConstraints,
+    },
+    attempt_2: {
+      prompt_file: 'refusalRecovery.rewrite.prompt',
+      result: attempt2Result,
+    },
+  }
+}
+
+function attachRefusalRecoveryRecord(err: unknown, refusalRecovery: RefusalRecoveryRecord): never {
+  if (err && typeof err === 'object') {
+    ;(err as { refusalRecovery?: RefusalRecoveryRecord }).refusalRecovery = refusalRecovery
+  }
+  throw err
+}
+
+function withRefusalRecovery(result: CallApiResult, rewrite: SafetyPromptRewrite): CallApiResult {
+  const refusalRecovery = createRefusalRecoveryRecord(rewrite, 'success')
+  return {
+    ...result,
+    revisedPrompts: result.images.map((_, index) => {
+      const revisedPrompt = result.revisedPrompts?.[index]?.trim()
+      return revisedPrompt || rewrite.prompt
+    }),
+    refusalRecovery,
+  }
 }
 
 function getStreamEventErrorMessage(event: Record<string, unknown>): string | null {
@@ -266,7 +407,8 @@ function parseResponsesImageResults(payload: ResponsesApiResponse, fallbackMime:
   }
 
   if (!results.length) {
-    const err = new Error('接口没有返回可识别的图片数据，请查看原始响应内容确认服务商实际返回的数据结构。如果使用的是中转或兼容接口，建议创建并使用「自定义服务商」配置。')
+    const failureMessage = getResponsesImageFailureMessage(output)
+    const err = new Error(failureMessage ?? '接口没有返回可识别的图片数据，请查看原始响应内容确认服务商实际返回的数据结构。如果使用的是中转或兼容接口，建议创建并使用「自定义服务商」配置。')
     ;(err as any).rawResponsePayload = JSON.stringify(payload, null, 2)
     throw err
   }
@@ -290,6 +432,23 @@ function getResponsesImageResultBase64(result: ResponsesOutputItem['result']): s
     : ''
 
   return b64.trim() ? b64 : undefined
+}
+
+function getResponsesImageFailureMessage(output: ResponsesOutputItem[]): string | null {
+  for (const item of output) {
+    if (item?.type !== 'image_generation_call') continue
+    const record = item as Record<string, unknown>
+    const error = record.error
+    if (isRecordValue(error)) {
+      const message = getStringValue(error, 'message')
+      if (message) return message
+      const code = getStringValue(error, 'code')
+      if (code) return code
+    }
+    if (typeof error === 'string' && error.trim()) return error
+    if (item.status === 'failed') return '图像生成失败'
+  }
+  return null
 }
 
 async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, signal?: AbortSignal): Promise<CallApiResult> {
@@ -535,6 +694,7 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
     r.revisedPrompts?.length ? r.revisedPrompts : r.images.map(() => undefined),
   )
   const rawImageUrls = successfulResults.flatMap((r) => r.rawImageUrls ?? [])
+  const refusalRecovery = successfulResults.find((r) => r.refusalRecovery)?.refusalRecovery
   const actualParams = mergeActualParams(
     successfulResults[0]?.actualParams ?? {},
     { n: images.length },
@@ -547,12 +707,13 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
     ...(failedRequests.length ? { failedRequests } : {}),
+    ...(refusalRecovery ? { refusalRecovery } : {}),
   }
 }
 
 async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const { prompt: originalPrompt, params, inputImageDataUrls } = opts
-  const prompt = profile.codexCli && !opts.settings.allowPromptRewrite
+  const firstPrompt = profile.codexCli && !opts.settings.allowPromptRewrite
     ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${originalPrompt}`
     : originalPrompt
   const isEdit = inputImageDataUrls.length > 0
@@ -565,7 +726,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
 
-  try {
+  const sendRequest = async (prompt: string): Promise<CallApiResult> => {
     let response: Response
 
     if (isEdit) {
@@ -678,6 +839,21 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
     }
 
     return parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+  }
+
+  try {
+    try {
+      return await sendRequest(firstPrompt)
+    } catch (err) {
+      const reason = getErrorMessage(err)
+      const rewrite = createSafetyPromptRewrite(originalPrompt, reason)
+      if (!rewrite) throw err
+      try {
+        return withRefusalRecovery(await sendRequest(rewrite.prompt), rewrite)
+      } catch (retryErr) {
+        attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused'))
+      }
+    }
   } finally {
     clearTimeout(timeoutId)
   }
@@ -1020,6 +1196,7 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
     r.revisedPrompts?.length ? r.revisedPrompts : r.images.map(() => undefined),
   )
   const rawImageUrls = successfulResults.flatMap((r) => r.rawImageUrls ?? [])
+  const refusalRecovery = successfulResults.find((r) => r.refusalRecovery)?.refusalRecovery
   const actualParams = mergeActualParams(
     successfulResults[0]?.actualParams ?? {},
     images.length === opts.params.n ? { n: opts.params.n } : { n: images.length },
@@ -1032,6 +1209,7 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
     ...(failedRequests.length ? { failedRequests } : {}),
+    ...(refusalRecovery ? { refusalRecovery } : {}),
   }
 }
 
@@ -1054,48 +1232,63 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
         (opts.maskDataUrl ? getDataUrlEncodedByteSize(opts.maskDataUrl) : 0),
     )
 
-    const body: Record<string, unknown> = {
-      model: profile.model,
-      input: createResponsesInput(prompt, inputImageDataUrls, opts.settings.allowPromptRewrite),
-      tools: [createResponsesImageTool(params, inputImageDataUrls.length > 0, profile, opts.maskDataUrl)],
-      tool_choice: 'required',
-    }
-    if (profile.streamImages) {
-      body.stream = true
+    const sendRequest = async (requestPrompt: string, allowPromptRewrite: boolean): Promise<CallApiResult> => {
+      const body: Record<string, unknown> = {
+        model: profile.model,
+        input: createResponsesInput(requestPrompt, inputImageDataUrls, allowPromptRewrite),
+        tools: [createResponsesImageTool(params, inputImageDataUrls.length > 0, profile, opts.maskDataUrl)],
+        tool_choice: 'required',
+      }
+      if (profile.streamImages) {
+        body.stream = true
+      }
+
+      const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+        method: 'POST',
+        headers: {
+          ...requestHeaders,
+          'Content-Type': 'application/json',
+        },
+        cache: 'no-store',
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+
+      if (!response.ok) {
+        const errorMessage = await getApiErrorMessage(response)
+        throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      }
+
+      if (profile.streamImages && isEventStreamResponse(response)) {
+        return parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
+      }
+
+      const payload = await response.json() as ResponsesApiResponse
+      const imageResults = parseResponsesImageResults(payload, mime)
+      const actualParams = mergeActualParams(
+        imageResults[0]?.actualParams ?? {},
+      )
+      return {
+        images: imageResults.map((result) => result.image),
+        actualParams,
+        actualParamsList: imageResults.map((result) =>
+          mergeActualParams(result.actualParams ?? {}),
+        ),
+        revisedPrompts: imageResults.map((result) => result.revisedPrompt),
+      }
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
-      method: 'POST',
-      headers: {
-        ...requestHeaders,
-        'Content-Type': 'application/json',
-      },
-      cache: 'no-store',
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
-
-    if (!response.ok) {
-      const errorMessage = await getApiErrorMessage(response)
-      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
-    }
-
-    if (profile.streamImages && isEventStreamResponse(response)) {
-      return parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
-    }
-
-    const payload = await response.json() as ResponsesApiResponse
-    const imageResults = parseResponsesImageResults(payload, mime)
-    const actualParams = mergeActualParams(
-      imageResults[0]?.actualParams ?? {},
-    )
-    return {
-      images: imageResults.map((result) => result.image),
-      actualParams,
-      actualParamsList: imageResults.map((result) =>
-        mergeActualParams(result.actualParams ?? {}),
-      ),
-      revisedPrompts: imageResults.map((result) => result.revisedPrompt),
+    try {
+      return await sendRequest(prompt, opts.settings.allowPromptRewrite)
+    } catch (err) {
+      const reason = getErrorMessage(err)
+      const rewrite = createSafetyPromptRewrite(prompt, reason)
+      if (!rewrite) throw err
+      try {
+        return withRefusalRecovery(await sendRequest(rewrite.prompt, true), rewrite)
+      } catch (retryErr) {
+        attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused'))
+      }
     }
   } finally {
     clearTimeout(timeoutId)
