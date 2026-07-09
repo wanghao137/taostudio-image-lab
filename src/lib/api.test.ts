@@ -194,6 +194,74 @@ describe('callImageApi', () => {
     })
   })
 
+  it('retries Responses API completed refusals when the failed image call has no error field', async () => {
+    const refusalText = 'I\u2019m sorry, but I can\u2019t help create that image as requested.'
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        status: 'completed',
+        output: [
+          {
+            type: 'reasoning',
+            content: [],
+          },
+          {
+            type: 'image_generation_call',
+            status: 'failed',
+          },
+          {
+            type: 'message',
+            status: 'completed',
+            content: [
+              {
+                type: 'output_text',
+                text: refusalText,
+              },
+            ],
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'aW1hZ2U=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    const result = await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', apiMode: 'responses' },
+      prompt: 'tasteful clean gravure portrait, subtle sensual mood, large natural bust, ultra-thin cotton camisole, fabric tension',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const retryBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
+    expect(retryBody.input).toContain('natural silhouette')
+    expect(retryBody.input).toContain('opaque cotton camisole')
+    expect(retryBody.input).not.toContain('large natural bust')
+    expect(retryBody.input).not.toContain('Do not rewrite it')
+    expect(result.images).toEqual(['data:image/png;base64,aW1hZ2U='])
+    expect(result.refusalRecovery).toMatchObject({
+      status: 'recovered',
+      attempt_1: {
+        result: 'refused',
+        refusal_summary: refusalText,
+      },
+      rewrite: {
+        trigger_category: 'body_measurement_emphasis',
+      },
+      attempt_2: {
+        result: 'success',
+      },
+    })
+  })
+
   it('records blocked refusal recovery when the safety retry is refused again', async () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({

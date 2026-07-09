@@ -111,7 +111,7 @@ function getNumberValue(source: Record<string, unknown>, key: string): number | 
 }
 
 function isSafetyRefusalMessage(message: string): boolean {
-  return /content[_\s-]?policy|safety|moderation|moderated|refus|reject|blocked|disallowed|not allowed|inappropriate|violat|审核|安全|策略|政策|拒绝|不通过|违规|敏感|拦截|不合规|禁止/i.test(message)
+  return /content[_\s-]?policy|safety|moderation|moderated|refus|reject|blocked|disallowed|not allowed|inappropriate|violat|can(?:not|['\u2018\u2019]t)\s+(?:help|assist|comply|create|generate)|(?:unable|not able)\s+to\s+(?:help|assist|create|generate)|审核|安全|策略|政策|拒绝|不通过|违规|敏感|拦截|不合规|禁止/i.test(message)
 }
 
 function rewritePromptForSafety(prompt: string): string {
@@ -120,6 +120,12 @@ function rewritePromptForSafety(prompt: string): string {
     [/未成年|未满十八岁|儿童|小孩|幼女|萝莉|童颜|少女|男孩|女孩/g, '成年人'],
     [/\b(?:nude|naked|porn|sex|sexual|erotic|explicit|nsfw|nipple|nipples|areola|genital|genitals|cleavage|upskirt|lingerie)\b/gi, 'tasteful non-explicit fashion'],
     [/全裸|裸露|裸体|露点|乳头|乳晕|生殖器|性交|性爱|色情|擦边|走光|爆乳|巨乳|罩杯|沟壑|内衣/g, '衣着得体的非露骨画面'],
+    [/\b(?:gravure|pin-up|sexy|sensual|seductive|provocative)\b/gi, 'tasteful editorial'],
+    [/\b(?:large|huge|big)\s+(?:natural\s+)?bust\b/gi, 'natural silhouette'],
+    [/\b(?:bust|cup size|measurements)\b/gi, 'silhouette'],
+    [/\b(?:ultra-thin|see-through|transparent|sheer)\b/gi, 'opaque'],
+    [/\bfabric tension\b/gi, 'natural fabric drape'],
+    [/\bupper body line\b/gi, 'natural posture'],
     [/\b(?:voyeur|leaked|hidden camera|private sexual|non-consensual|nonconsensual)\b/gi, 'consensual public scene'],
     [/偷拍|泄露|私密|偷窥|强迫|非自愿/g, '公开授权场景'],
     [/\b(?:gore|gory|bloody|dismembered|decapitated)\b/gi, 'non-graphic dramatic'],
@@ -434,21 +440,46 @@ function getResponsesImageResultBase64(result: ResponsesOutputItem['result']): s
   return b64.trim() ? b64 : undefined
 }
 
+function getResponsesOutputTextMessages(output: ResponsesOutputItem[]): string[] {
+  const messages: string[] = []
+  for (const item of output) {
+    if (!isRecordValue(item)) continue
+    const directText = getStringValue(item, 'text')
+    if (directText) messages.push(directText)
+
+    if (!Array.isArray(item.content)) continue
+    for (const contentItem of item.content) {
+      if (!isRecordValue(contentItem)) continue
+      const text = getStringValue(contentItem, 'text')
+      if (text) messages.push(text)
+    }
+  }
+  return messages
+}
+
 function getResponsesImageFailureMessage(output: ResponsesOutputItem[]): string | null {
+  let imageFailureMessage: string | null = null
+  let hasFailedImageCall = false
+
   for (const item of output) {
     if (item?.type !== 'image_generation_call') continue
     const record = item as Record<string, unknown>
     const error = record.error
     if (isRecordValue(error)) {
       const message = getStringValue(error, 'message')
-      if (message) return message
+      if (message) imageFailureMessage ??= message
       const code = getStringValue(error, 'code')
-      if (code) return code
+      if (code) imageFailureMessage ??= code
     }
-    if (typeof error === 'string' && error.trim()) return error
-    if (item.status === 'failed') return '图像生成失败'
+    if (typeof error === 'string' && error.trim()) imageFailureMessage ??= error
+    if (item.status === 'failed') hasFailedImageCall = true
   }
-  return null
+
+  for (const text of getResponsesOutputTextMessages(output)) {
+    if (isSafetyRefusalMessage(text)) return text
+  }
+
+  return imageFailureMessage ?? (hasFailedImageCall ? '图像生成失败' : null)
 }
 
 async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, signal?: AbortSignal): Promise<CallApiResult> {
