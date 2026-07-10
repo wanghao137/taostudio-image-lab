@@ -5,10 +5,14 @@ import {
   DEFAULT_FAL_MODEL,
   DEFAULT_IMAGES_MODEL,
   DEFAULT_OPENAI_PROFILE_ID,
+  DEFAULT_RESPONSES_MODEL,
   DEFAULT_SETTINGS,
+  LEGACY_DEFAULT_RESPONSES_MODEL,
   createDefaultOpenAIProfile,
   createDefaultFalProfile,
   getActiveApiProfile,
+  getDefaultOpenAIModel,
+  isManagedDefaultOpenAIModel,
   findEquivalentApiProfile,
   importCustomProviderDefinitionFromJson,
   importCustomProviderSettingsFromJson,
@@ -105,6 +109,44 @@ describe('default API URL env', () => {
 
     expect(DEFAULT_SETTINGS.baseUrl).toBe('')
     expect(DEFAULT_SETTINGS.profiles[0].baseUrl).toBe('')
+  })
+})
+
+describe('OpenAI model defaults by API mode', () => {
+  it('uses gpt-image-2 for Images API and gpt-5.6-sol for Responses API', () => {
+    expect(createDefaultOpenAIProfile({ apiMode: 'images' }).model).toBe('gpt-image-2')
+    expect(createDefaultOpenAIProfile({ apiMode: 'responses' }).model).toBe('gpt-5.6-sol')
+    expect(DEFAULT_RESPONSES_MODEL).toBe('gpt-5.6-sol')
+  })
+
+  it('migrates the legacy Responses default model while preserving custom models', () => {
+    const legacyProfile = {
+      ...createDefaultOpenAIProfile({ id: 'legacy-responses', apiMode: 'responses', model: 'custom-placeholder' }),
+      model: 'gpt-5.5',
+    }
+    const customProfile = createDefaultOpenAIProfile({
+      id: 'custom-responses',
+      apiMode: 'responses',
+      model: 'provider/custom-text-model',
+    })
+
+    const normalized = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [legacyProfile, customProfile],
+      activeProfileId: legacyProfile.id,
+    })
+
+    expect(normalized.profiles.find((profile) => profile.id === legacyProfile.id)?.model).toBe('gpt-5.6-sol')
+    expect(normalized.profiles.find((profile) => profile.id === customProfile.id)?.model).toBe('provider/custom-text-model')
+  })
+
+  it('maps API modes and recognizes managed default model IDs', () => {
+    expect(getDefaultOpenAIModel('images')).toBe(DEFAULT_IMAGES_MODEL)
+    expect(getDefaultOpenAIModel('responses')).toBe(DEFAULT_RESPONSES_MODEL)
+    expect(isManagedDefaultOpenAIModel(DEFAULT_IMAGES_MODEL)).toBe(true)
+    expect(isManagedDefaultOpenAIModel(DEFAULT_RESPONSES_MODEL)).toBe(true)
+    expect(isManagedDefaultOpenAIModel(LEGACY_DEFAULT_RESPONSES_MODEL)).toBe(true)
+    expect(isManagedDefaultOpenAIModel('provider/custom-text-model')).toBe(false)
   })
 })
 

@@ -15,9 +15,11 @@ import {
   findEquivalentApiProfile,
   getApiProviderLabel,
   getActiveApiProfile,
+  getDefaultOpenAIModel,
   importCustomProviderSettingsFromJson,
   isDefaultConfigOnlyEnabled,
   isAgentTextApiProfile,
+  isManagedDefaultOpenAIModel,
   isOpenAICompatibleProvider,
   mergeImportedSettings,
   normalizeAgentMaxToolRounds,
@@ -409,9 +411,6 @@ export default function SettingsModal() {
     })
   ]
 
-  const getDefaultModelForMode = (apiMode: AppSettings['apiMode']) =>
-    apiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL
-
   const enabledZipDownloadRouteCount = ZIP_DOWNLOAD_ROUTE_OPTIONS
     .filter((option) => draft.zipDownloadRoutes.includes(option.route))
     .length
@@ -554,7 +553,7 @@ export default function SettingsModal() {
       const normalizedBaseUrl = profile.provider === 'fal'
         ? profile.baseUrl.trim().replace(/\/+$/, '') || DEFAULT_FAL_BASE_URL
         : shouldKeepEmptyBaseUrl ? '' : normalizeBaseUrl(profile.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl)
-      const defaultModel = profile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(profile.apiMode)
+      const defaultModel = profile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultOpenAIModel(profile.apiMode)
       return {
         ...profile,
         name: profile.name.trim() || (profile.id === DEFAULT_OPENAI_PROFILE_ID ? '默认' : '新配置'),
@@ -645,7 +644,7 @@ export default function SettingsModal() {
         url.searchParams.set('apiKey', '{key}')
       }
       url.searchParams.set('apiMode', profile.apiMode)
-      const model = profile.model.trim() || getDefaultModelForMode(profile.apiMode)
+      const model = profile.model.trim() || getDefaultOpenAIModel(profile.apiMode)
       url.searchParams.set('model', !options.includeApiKey && options.useNewApiModel ? '{model}' : model)
       if (profile.name.trim()) url.searchParams.set('profileName', profile.name.trim())
       if (profile.codexCli) url.searchParams.set('codexCli', 'true')
@@ -1619,10 +1618,9 @@ export default function SettingsModal() {
                     value={activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode}
                     onChange={(value) => {
                       const apiMode = value as AppSettings['apiMode']
-                      const nextModel =
-                        activeProfile.model === DEFAULT_IMAGES_MODEL || activeProfile.model === DEFAULT_RESPONSES_MODEL
-                          ? getDefaultModelForMode(apiMode)
-                          : activeProfile.model
+                      const nextModel = isManagedDefaultOpenAIModel(activeProfile.model)
+                        ? getDefaultOpenAIModel(apiMode)
+                        : activeProfile.model
                       updateActiveProfile({ apiMode, model: nextModel }, true)
                     }}
                     options={[
@@ -1647,7 +1645,7 @@ export default function SettingsModal() {
                   onChange={(e) => updateActiveProfile({ model: e.target.value })}
                   onBlur={(e) => commitActiveProfilePatch({ model: e.target.value })}
                   type="text"
-                  placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
+                  placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultOpenAIModel(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">

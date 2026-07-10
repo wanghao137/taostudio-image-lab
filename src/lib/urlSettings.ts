@@ -2,9 +2,8 @@ import type { ApiMode, AppSettings } from '../types'
 import { normalizeBaseUrl } from './devProxy'
 import {
   createDefaultOpenAIProfile,
-  DEFAULT_IMAGES_MODEL,
-  DEFAULT_RESPONSES_MODEL,
   findEquivalentApiProfile,
+  getDefaultOpenAIModel,
   isDefaultConfigOnlyEnabled,
   mergeImportedSettings,
   normalizeSettings,
@@ -180,7 +179,7 @@ export function buildSettingsFromUrlParams(currentSettings: Partial<AppSettings>
       id: createUrlProfileId(new Set(settings.profiles.map((item) => item.id))),
       name: 'URL 参数配置',
       apiMode: profileApiMode,
-      model: profileApiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL,
+      model: getDefaultOpenAIModel(profileApiMode),
     })
     if (apiUrlParam !== null) profile.baseUrl = normalizeBaseUrl(apiUrlParam.trim())
     if (apiKeyParam !== null) profile.apiKey = apiKeyParam.trim()

@@ -31,11 +31,33 @@ const DEFAULT_API_URL_PATCH = isImportableConfigUrl(RAW_DEFAULT_API_URL)
   : parseDefaultApiUrl(RAW_DEFAULT_API_URL || (DOCKER_DEPLOYMENT && DEFAULT_OPENAI_API_PROXY ? '' : OPENAI_DEFAULT_BASE_URL))
 const DEFAULT_BASE_URL = DEFAULT_API_URL_PATCH?.baseUrl ?? ''
 export const DEFAULT_IMAGES_MODEL = 'gpt-image-2'
-export const DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
+export const DEFAULT_RESPONSES_MODEL = 'gpt-5.6-sol'
+export const LEGACY_DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
 export const DEFAULT_FAL_BASE_URL = 'https://fal.run'
 export const DEFAULT_FAL_MODEL = 'openai/gpt-image-2'
 export const DEFAULT_OPENAI_PROFILE_ID = 'default-openai'
 export const DEFAULT_API_TIMEOUT = 600
+
+export function getDefaultOpenAIModel(apiMode: ApiMode): string {
+  return apiMode === 'responses' ? DEFAULT_RESPONSES_MODEL : DEFAULT_IMAGES_MODEL
+}
+
+export function isManagedDefaultOpenAIModel(model: string): boolean {
+  const normalized = model.trim()
+  return normalized === DEFAULT_IMAGES_MODEL ||
+    normalized === DEFAULT_RESPONSES_MODEL ||
+    normalized === LEGACY_DEFAULT_RESPONSES_MODEL
+}
+
+function normalizeOpenAIModelForMode(model: unknown, apiMode: ApiMode): string {
+  const rawModel = typeof model === 'string' ? model : ''
+  const normalized = rawModel.trim()
+  if (!normalized) return getDefaultOpenAIModel(apiMode)
+  if (apiMode === 'responses' && normalized === LEGACY_DEFAULT_RESPONSES_MODEL) {
+    return DEFAULT_RESPONSES_MODEL
+  }
+  return rawModel
+}
 
 export const DEFAULT_LOCAL_AUTO_SAVE_SETTINGS: LocalAutoSaveSettings = {
   enabled: false,
@@ -341,6 +363,10 @@ export function normalizeCustomProviderDefinitions(input: unknown): CustomProvid
 
 export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}): ApiProfile {
   const apiMode = overrides.apiMode ?? DEFAULT_API_URL_PATCH?.apiMode ?? 'images'
+  const model = normalizeOpenAIModelForMode(
+    overrides.model ?? DEFAULT_API_URL_PATCH?.model,
+    apiMode,
+  )
   const streamImages = overrides.streamImages ?? DEFAULT_API_URL_PATCH?.streamImages ?? getDefaultStreamImages('openai', apiMode)
 
   return {
@@ -349,13 +375,13 @@ export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}):
     provider: 'openai',
     baseUrl: DEFAULT_BASE_URL,
     apiKey: DEFAULT_API_URL_PATCH?.apiKey ?? '',
-    model: DEFAULT_API_URL_PATCH?.model ?? DEFAULT_IMAGES_MODEL,
     timeout: DEFAULT_API_TIMEOUT,
     codexCli: DEFAULT_API_URL_PATCH?.codexCli ?? false,
     apiProxy: DEFAULT_OPENAI_API_PROXY,
     streamPartialImages: DEFAULT_API_URL_PATCH?.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES,
     ...overrides,
     apiMode,
+    model,
     streamImages,
   }
 }
@@ -439,7 +465,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     ...profile,
     provider,
     baseUrl: savedDraft?.baseUrl ?? DEFAULT_BASE_URL,
-    model: savedDraft?.model ?? DEFAULT_IMAGES_MODEL,
+    model: normalizeOpenAIModelForMode(savedDraft?.model, nextApiMode),
     apiMode: nextApiMode,
     codexCli: savedDraft?.codexCli ?? profile.codexCli,
     apiProxy: savedDraft?.apiProxy ?? DEFAULT_OPENAI_API_PROXY,
@@ -502,7 +528,9 @@ export function normalizeApiProfile(input: unknown, fallback?: Partial<ApiProfil
     provider,
     baseUrl: provider === 'fal' ? rawBaseUrl.trim().replace(/\/+$/, '') || DEFAULT_FAL_BASE_URL : rawBaseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : defaults.apiKey,
-    model: typeof record.model === 'string' && record.model.trim() ? record.model : defaults.model,
+    model: provider === 'openai'
+      ? normalizeOpenAIModelForMode(typeof record.model === 'string' ? record.model : defaults.model, apiMode)
+      : typeof record.model === 'string' && record.model.trim() ? record.model : defaults.model,
     timeout: typeof record.timeout === 'number' && Number.isFinite(record.timeout) ? record.timeout : defaults.timeout,
     apiMode,
     codexCli: Boolean(record.codexCli),
@@ -535,7 +563,9 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   const legacyProfile = createDefaultOpenAIProfile({
     baseUrl: typeof record.baseUrl === 'string' ? record.baseUrl : DEFAULT_BASE_URL,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : '',
-    model: typeof record.model === 'string' && record.model.trim() ? record.model : DEFAULT_IMAGES_MODEL,
+    model: typeof record.model === 'string' && record.model.trim()
+      ? record.model
+      : getDefaultOpenAIModel(legacyApiMode),
     timeout: typeof record.timeout === 'number' && Number.isFinite(record.timeout) ? record.timeout : DEFAULT_API_TIMEOUT,
     apiMode: legacyApiMode,
     codexCli: Boolean(record.codexCli),
@@ -873,7 +903,7 @@ export function mergeImportedSettings(currentSettings: Partial<AppSettings> | un
 export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   baseUrl: DEFAULT_BASE_URL,
   apiKey: DEFAULT_API_URL_PATCH?.apiKey ?? '',
-  model: DEFAULT_API_URL_PATCH?.model ?? DEFAULT_IMAGES_MODEL,
+  model: DEFAULT_API_URL_PATCH?.model ?? getDefaultOpenAIModel(DEFAULT_API_URL_PATCH?.apiMode ?? 'images'),
   timeout: DEFAULT_API_TIMEOUT,
   apiMode: DEFAULT_API_URL_PATCH?.apiMode ?? 'images',
   codexCli: DEFAULT_API_URL_PATCH?.codexCli ?? false,

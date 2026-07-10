@@ -3,6 +3,7 @@ import {
   createDefaultFalProfile,
   createDefaultOpenAIProfile,
   DEFAULT_IMAGES_MODEL,
+  DEFAULT_RESPONSES_MODEL,
   DEFAULT_SETTINGS,
   normalizeSettings,
 } from './apiProfiles'
@@ -51,6 +52,32 @@ describe('URL settings params', () => {
       apiKey: 'test-key',
       model: 'custom-image-model',
       apiMode: 'images',
+    })
+  })
+
+  it('uses the Responses default model when URL params only select Responses API', () => {
+    const current = normalizeSettings(DEFAULT_SETTINGS)
+    const next = normalizeSettings({
+      ...current,
+      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiMode=responses')),
+    })
+
+    expect(next.profiles.find((profile) => profile.id === next.activeProfileId)).toMatchObject({
+      apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL,
+    })
+  })
+
+  it('preserves an explicit custom Responses model from URL params', () => {
+    const current = normalizeSettings(DEFAULT_SETTINGS)
+    const next = normalizeSettings({
+      ...current,
+      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiMode=responses&model=provider/custom-text-model')),
+    })
+
+    expect(next.profiles.find((profile) => profile.id === next.activeProfileId)).toMatchObject({
+      apiMode: 'responses',
+      model: 'provider/custom-text-model',
     })
   })
 
