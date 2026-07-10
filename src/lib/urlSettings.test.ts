@@ -404,6 +404,51 @@ describe('URL settings params', () => {
     })
   })
 
+  it('maps a managed Images model to the Responses default when only default config is shown', async () => {
+    const { buildSettingsFromUrlParams } = await importDefaultConfigOnlyUrlSettings()
+    const current = normalizeSettings(DEFAULT_SETTINGS)
+    const next = normalizeSettings({
+      ...current,
+      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiMode=responses')),
+    })
+
+    expect(next.profiles[0]).toMatchObject({
+      apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL,
+    })
+  })
+
+  it('preserves a custom model across API mode changes when only default config is shown', async () => {
+    const { buildSettingsFromUrlParams } = await importDefaultConfigOnlyUrlSettings()
+    const current = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [createDefaultOpenAIProfile({ model: 'provider/custom-text-model' })],
+    })
+    const next = normalizeSettings({
+      ...current,
+      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiMode=responses')),
+    })
+
+    expect(next.profiles[0]).toMatchObject({
+      apiMode: 'responses',
+      model: 'provider/custom-text-model',
+    })
+  })
+
+  it('keeps an explicit URL model authoritative when only default config is shown', async () => {
+    const { buildSettingsFromUrlParams } = await importDefaultConfigOnlyUrlSettings()
+    const current = normalizeSettings(DEFAULT_SETTINGS)
+    const next = normalizeSettings({
+      ...current,
+      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiMode=responses&model=provider/explicit-text-model')),
+    })
+
+    expect(next.profiles[0]).toMatchObject({
+      apiMode: 'responses',
+      model: 'provider/explicit-text-model',
+    })
+  })
+
   it('ignores imported custom providers and non-default provider profiles when only default config is shown', async () => {
     const { buildSettingsFromUrlParams } = await importDefaultConfigOnlyUrlSettings()
     const importedSettings = {

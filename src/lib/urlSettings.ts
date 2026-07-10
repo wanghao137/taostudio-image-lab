@@ -5,6 +5,7 @@ import {
   findEquivalentApiProfile,
   getDefaultOpenAIModel,
   isDefaultConfigOnlyEnabled,
+  isManagedDefaultOpenAIModel,
   mergeImportedSettings,
   normalizeSettings,
   normalizeStreamPartialImages,
@@ -133,6 +134,15 @@ function buildDefaultConfigOnlySettingsFromUrlParams(currentSettings: Partial<Ap
     if (codexCliParam !== null) patch.codexCli = codexCliParam.trim().toLowerCase() === 'true'
     if (streamImagesParam !== null) patch.streamImages = streamImagesParam.trim().toLowerCase() === 'true'
     if (streamPartialImagesParam !== null) patch.streamPartialImages = normalizeStreamPartialImages(streamPartialImagesParam)
+  }
+
+  if (
+    patch.apiMode !== undefined &&
+    patch.apiMode !== activeProfile.apiMode &&
+    patch.model === undefined &&
+    isManagedDefaultOpenAIModel(activeProfile.model)
+  ) {
+    patch.model = getDefaultOpenAIModel(patch.apiMode)
   }
 
   if (Object.keys(patch).length === 0) return {}
