@@ -1297,12 +1297,8 @@ export default function InputBar() {
     const el = textareaRef.current
     if (!el) return
 
-    // 计算图片区域等固定高度
-    const imagesHeight = imagesRef.current?.offsetHeight ?? 0
-    const fixedOverhead = imagesHeight + 140
-
-    // 常驻栏高度上限 8rem（128px，约 3 行），不小于 42px（单行最小）
-    const maxH = Math.max(128 - fixedOverhead, 42)
+    // 提示词框自身高度上限 8rem（128px，约 3 行）
+    const maxH = 128
 
     // 1. 清零高度以获取真实文本高度
     el.style.transition = 'none'
@@ -2517,6 +2513,7 @@ export default function InputBar() {
               onClick={() => { dismissAllTooltips(); setShowSizePicker(true) }}
               className="rounded-xl border border-gray-200/60 bg-white/50 px-3 py-2 font-mono text-xs text-left shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]"
               title="选择尺寸"
+              aria-label="选择尺寸"
             >
               {params.size}
             </button>
