@@ -423,6 +423,27 @@ function AtImageOptionThumb({ option }: { option: AtImageOption }) {
   )
 }
 
+/** localStorage key for persisting the params panel expand/collapse state. */
+export const PARAMS_EXPANDED_KEY = 'inputBar.paramsExpanded'
+
+/** Read persisted params-expanded preference. Defaults to false (collapsed). */
+export function readParamsExpanded(): boolean {
+  try {
+    return localStorage.getItem(PARAMS_EXPANDED_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+/** Persist params-expanded preference. Silently ignores quota/private-mode errors. */
+export function writeParamsExpanded(value: boolean): void {
+  try {
+    localStorage.setItem(PARAMS_EXPANDED_KEY, String(value))
+  } catch {
+    // ignore
+  }
+}
+
 export default function InputBar() {
   const addInputImage = useStore((s) => s.addInputImage)
   const replaceInputImage = useStore((s) => s.replaceInputImage)
@@ -723,6 +744,16 @@ export default function InputBar() {
   const [attachHover, setAttachHover] = useState(false)
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
+
+  const [paramsExpanded, setParamsExpanded] = useState(() => readParamsExpanded())
+
+  const toggleParamsExpanded = useCallback(() => {
+    setParamsExpanded((prev) => {
+      const next = !prev
+      writeParamsExpanded(next)
+      return next
+    })
+  }, [])
   const [showSizePicker, setShowSizePicker] = useState(false)
   const [showMobileUploadMenu, setShowMobileUploadMenu] = useState(false)
   const [maskPreviewUrl, setMaskPreviewUrl] = useState('')
@@ -1266,12 +1297,8 @@ export default function InputBar() {
     const el = textareaRef.current
     if (!el) return
 
-    // 计算图片区域等固定高度
-    const imagesHeight = imagesRef.current?.offsetHeight ?? 0
-    const fixedOverhead = imagesHeight + 140
-
-    // 最大高度限制在页面 40% 减固定开销，不小于 80px
-    const maxH = Math.max(window.innerHeight * 0.4 - fixedOverhead, 80)
+    // 提示词框自身高度上限 8rem（128px，约 3 行）
+    const maxH = 128
 
     // 1. 清零高度以获取真实文本高度
     el.style.transition = 'none'
@@ -1530,10 +1557,10 @@ export default function InputBar() {
       e.dataTransfer.effectAllowed = 'move'
       e.dataTransfer.setData('text/plain', String(idx))
       const preview = document.createElement('div')
-      preview.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:52px;height:52px;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.25);'
+      preview.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:40px;height:40px;border-radius:8px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.25);'
       const previewImg = document.createElement('img')
       previewImg.src = displaySrc
-      previewImg.style.cssText = 'width:52px;height:52px;object-fit:cover;display:block;'
+      previewImg.style.cssText = 'width:40px;height:40px;object-fit:cover;display:block;'
       preview.appendChild(previewImg)
       document.body.appendChild(preview)
       imageDragPreviewRef.current = preview
@@ -1620,7 +1647,7 @@ export default function InputBar() {
       <div
         key={img.id}
         data-input-image-index={idx}
-        className={`relative group inline-block h-[52px] w-[52px] shrink-0 self-start transition-opacity ${isImageDragging ? 'opacity-40' : ''}`}
+        className={`relative group inline-block h-[40px] w-[40px] shrink-0 self-start transition-opacity ${isImageDragging ? 'opacity-40' : ''}`}
         style={{ touchAction: isMaskTarget ? 'auto' : 'none' }}
         draggable={!isMobile}
         onMouseLeave={hideImageHint}
@@ -1666,7 +1693,7 @@ export default function InputBar() {
           <div className="absolute -right-[5px] top-0 bottom-0 w-[2px] bg-blue-500 rounded-full z-40 shadow-sm pointer-events-none" />
         )}
         <div
-          className={`relative w-[52px] h-[52px] rounded-xl overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
+          className={`relative w-[40px] h-[40px] rounded-lg overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
             isMaskTarget
               ? 'border-2 border-blue-500'
               : 'border border-gray-200 dark:border-white/[0.08]'
@@ -1744,7 +1771,7 @@ export default function InputBar() {
           action: () => clearInputImages(),
         })
       }
-      className="w-[52px] h-[52px] rounded-xl border border-dashed border-gray-300 dark:border-white/[0.08] flex flex-col items-center justify-center gap-0.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:border-red-300 hover:bg-red-50/50 dark:hover:bg-red-950/30 transition-all cursor-pointer flex-shrink-0"
+      className="w-[40px] h-[40px] rounded-lg border border-dashed border-gray-300 dark:border-white/[0.08] flex flex-col items-center justify-center gap-0.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:border-red-300 hover:bg-red-50/50 dark:hover:bg-red-950/30 transition-all cursor-pointer flex-shrink-0"
       title={maskTargetImage ? '清空遮罩主图、参考图和遮罩' : '清空全部参考图'}
     >
       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1757,13 +1784,13 @@ export default function InputBar() {
   const renderImageThumbs = () => {
     return (
       <div ref={imagesRef}>
-        <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3 mb-3">
+        <div className="grid grid-cols-[repeat(auto-fill,40px)] justify-between gap-x-2 gap-y-2 mb-2">
           {inputImages.map((img, idx) => renderImageThumb(img, idx))}
           {renderClearAllButton()}
         </div>
         {touchDragPreview?.src && createPortal(
           <div
-            className="fixed z-[140] h-[52px] w-[52px] overflow-hidden rounded-xl shadow-xl pointer-events-none opacity-90"
+            className="fixed z-[140] h-[40px] w-[40px] overflow-hidden rounded-lg shadow-xl pointer-events-none opacity-90"
             style={{ left: touchDragPreview.x, top: touchDragPreview.y, transform: 'translate(-50%, -50%)' }}
           >
             <img src={touchDragPreview.src} className="h-full w-full object-cover" alt="" />
@@ -2467,67 +2494,102 @@ export default function InputBar() {
             )}
           </div>
 
-          {/* 参数 + 按钮 */}
-          <div className="mt-3">
-            {renderGenerationStrategy()}
-            {/* 桌面端布局 */}
-            <div className="hidden sm:flex items-end justify-between gap-3">
-              {renderParams('grid-cols-7')}
-
-              <div className="flex gap-2 flex-shrink-0 mb-0.5">
-                <div
-                  className="relative"
-                  onMouseEnter={() => setAttachHover(true)}
-                  onMouseLeave={() => setAttachHover(false)}
-                >
-                  <ButtonTooltip visible={attachHover} text={uploadImageTooltipText} />
-                  <button
-                    onClick={() => !atImageLimit && fileInputRef.current?.click()}
-                    className={`p-2.5 rounded-xl transition-all shadow-sm ${
-                      atImageLimit
-                        ? 'bg-gray-200 dark:bg-white/[0.04] text-gray-300 dark:text-gray-500 cursor-not-allowed'
-                        : 'bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 hover:shadow'
-                    }`}
-                    aria-label={uploadImageTooltipText}
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                    </svg>
-                  </button>
-                </div>
-                <div
-                  className="relative"
-                  onMouseEnter={() => setSubmitHover(true)}
-                  onMouseLeave={() => setSubmitHover(false)}
-                >
-                  <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig) && submitHover} text={submitTooltipText} />
-                  <button
-                    onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
-                    disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
-                    className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
-                      activeAgentIsRunning
-                        ? 'bg-red-500 text-white hover:bg-red-600'
-                        : !hasSubmitApiConfig
-                        ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
-                        : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
-                    }`}
-                    aria-label={submitButtonAriaLabel}
-                  >
-                    {activeAgentIsRunning ? (
-                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                        <rect x="7" y="7" width="10" height="10" rx="1.5" />
-                      </svg>
-                    ) : (
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                      </svg>
-                    )}
-                  </button>
-                </div>
+          {/* 可折叠展开区：4K 策略卡 + 桌面 7 列参数行 */}
+          <div className={`mt-3 collapse-section${paramsExpanded ? '' : ' collapsed'}`}>
+            <div className="collapse-inner">
+              {renderGenerationStrategy()}
+              {/* 桌面端参数行 */}
+              <div className="hidden sm:block">
+                {renderParams('grid-cols-7')}
               </div>
             </div>
+          </div>
 
-            {/* 移动端布局 */}
+          {/* 常驻操作行：参数切换钮 + （原桌面布局的）上传与生成按钮 */}
+          <div className="mt-3 hidden sm:flex items-center justify-between gap-2">
+            {/* 尺寸快接胶囊（高频） */}
+            <button
+              type="button"
+              onClick={() => { dismissAllTooltips(); setShowSizePicker(true) }}
+              className="rounded-xl border border-gray-200/60 bg-white/50 px-3 py-2 font-mono text-xs text-left shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]"
+              title="选择尺寸"
+              aria-label="选择尺寸"
+            >
+              {params.size}
+            </button>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleParamsExpanded}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-all duration-200 shadow-sm ${
+                  paramsExpanded
+                    ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                    : 'border-gray-200/60 bg-white/50 text-gray-500 hover:bg-white hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400 dark:hover:bg-white/[0.06] dark:hover:text-gray-200'
+                }`}
+                aria-expanded={paramsExpanded}
+                aria-label={paramsExpanded ? '收起参数' : '展开参数'}
+                title={paramsExpanded ? '收起参数' : '展开参数'}
+              >
+                <SlidersHorizontal className={`h-4 w-4 transition-transform duration-200 ${paramsExpanded ? 'rotate-90' : ''}`} />
+                <span>参数</span>
+              </button>
+
+              <div className="flex gap-2 flex-shrink-0">
+              <div
+                className="relative"
+                onMouseEnter={() => setAttachHover(true)}
+                onMouseLeave={() => setAttachHover(false)}
+              >
+                <ButtonTooltip visible={attachHover} text={uploadImageTooltipText} />
+                <button
+                  onClick={() => !atImageLimit && fileInputRef.current?.click()}
+                  className={`p-2.5 rounded-xl transition-all shadow-sm ${
+                    atImageLimit
+                      ? 'bg-gray-200 dark:bg-white/[0.04] text-gray-300 dark:text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 hover:shadow'
+                  }`}
+                  aria-label={uploadImageTooltipText}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                  </svg>
+                </button>
+              </div>
+              <div
+                className="relative"
+                onMouseEnter={() => setSubmitHover(true)}
+                onMouseLeave={() => setSubmitHover(false)}
+              >
+                <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig) && submitHover} text={submitTooltipText} />
+                <button
+                  onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
+                  disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
+                  className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
+                    activeAgentIsRunning
+                      ? 'bg-red-500 text-white hover:bg-red-600'
+                      : !hasSubmitApiConfig
+                      ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
+                      : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
+                  }`}
+                  aria-label={submitButtonAriaLabel}
+                >
+                  {activeAgentIsRunning ? (
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <rect x="7" y="7" width="10" height="10" rx="1.5" />
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+            </div>
+          </div>
+
+          {/* 移动端布局 */}
             <div className="sm:hidden flex flex-col gap-2">
               <div className={`collapse-section${mobileCollapsed ? ' collapsed' : ''}`}>
                 <div className="collapse-inner">
@@ -2634,7 +2696,6 @@ export default function InputBar() {
                 </div>
               </div>
             </div>
-          </div>
 
           <input
             ref={fileInputRef}
