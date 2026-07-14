@@ -1301,8 +1301,8 @@ export default function InputBar() {
     const imagesHeight = imagesRef.current?.offsetHeight ?? 0
     const fixedOverhead = imagesHeight + 140
 
-    // 最大高度限制在页面 40% 减固定开销，不小于 80px
-    const maxH = Math.max(window.innerHeight * 0.4 - fixedOverhead, 80)
+    // 常驻栏高度上限 8rem（128px，约 3 行），不小于 42px（单行最小）
+    const maxH = Math.max(128 - fixedOverhead, 42)
 
     // 1. 清零高度以获取真实文本高度
     el.style.transition = 'none'
@@ -1561,10 +1561,10 @@ export default function InputBar() {
       e.dataTransfer.effectAllowed = 'move'
       e.dataTransfer.setData('text/plain', String(idx))
       const preview = document.createElement('div')
-      preview.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:52px;height:52px;border-radius:12px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.25);'
+      preview.style.cssText = 'position:fixed;left:-1000px;top:-1000px;width:40px;height:40px;border-radius:8px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.25);'
       const previewImg = document.createElement('img')
       previewImg.src = displaySrc
-      previewImg.style.cssText = 'width:52px;height:52px;object-fit:cover;display:block;'
+      previewImg.style.cssText = 'width:40px;height:40px;object-fit:cover;display:block;'
       preview.appendChild(previewImg)
       document.body.appendChild(preview)
       imageDragPreviewRef.current = preview
@@ -1651,7 +1651,7 @@ export default function InputBar() {
       <div
         key={img.id}
         data-input-image-index={idx}
-        className={`relative group inline-block h-[52px] w-[52px] shrink-0 self-start transition-opacity ${isImageDragging ? 'opacity-40' : ''}`}
+        className={`relative group inline-block h-[40px] w-[40px] shrink-0 self-start transition-opacity ${isImageDragging ? 'opacity-40' : ''}`}
         style={{ touchAction: isMaskTarget ? 'auto' : 'none' }}
         draggable={!isMobile}
         onMouseLeave={hideImageHint}
@@ -1697,7 +1697,7 @@ export default function InputBar() {
           <div className="absolute -right-[5px] top-0 bottom-0 w-[2px] bg-blue-500 rounded-full z-40 shadow-sm pointer-events-none" />
         )}
         <div
-          className={`relative w-[52px] h-[52px] rounded-xl overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
+          className={`relative w-[40px] h-[40px] rounded-lg overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
             isMaskTarget
               ? 'border-2 border-blue-500'
               : 'border border-gray-200 dark:border-white/[0.08]'
@@ -1775,7 +1775,7 @@ export default function InputBar() {
           action: () => clearInputImages(),
         })
       }
-      className="w-[52px] h-[52px] rounded-xl border border-dashed border-gray-300 dark:border-white/[0.08] flex flex-col items-center justify-center gap-0.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:border-red-300 hover:bg-red-50/50 dark:hover:bg-red-950/30 transition-all cursor-pointer flex-shrink-0"
+      className="w-[40px] h-[40px] rounded-lg border border-dashed border-gray-300 dark:border-white/[0.08] flex flex-col items-center justify-center gap-0.5 text-gray-400 dark:text-gray-500 hover:text-red-500 hover:border-red-300 hover:bg-red-50/50 dark:hover:bg-red-950/30 transition-all cursor-pointer flex-shrink-0"
       title={maskTargetImage ? '清空遮罩主图、参考图和遮罩' : '清空全部参考图'}
     >
       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1788,13 +1788,13 @@ export default function InputBar() {
   const renderImageThumbs = () => {
     return (
       <div ref={imagesRef}>
-        <div className="grid grid-cols-[repeat(auto-fill,52px)] justify-between gap-x-2 gap-y-3 mb-3">
+        <div className="grid grid-cols-[repeat(auto-fill,40px)] justify-between gap-x-2 gap-y-2 mb-2">
           {inputImages.map((img, idx) => renderImageThumb(img, idx))}
           {renderClearAllButton()}
         </div>
         {touchDragPreview?.src && createPortal(
           <div
-            className="fixed z-[140] h-[52px] w-[52px] overflow-hidden rounded-xl shadow-xl pointer-events-none opacity-90"
+            className="fixed z-[140] h-[40px] w-[40px] overflow-hidden rounded-lg shadow-xl pointer-events-none opacity-90"
             style={{ left: touchDragPreview.x, top: touchDragPreview.y, transform: 'translate(-50%, -50%)' }}
           >
             <img src={touchDragPreview.src} className="h-full w-full object-cover" alt="" />
@@ -2510,24 +2510,35 @@ export default function InputBar() {
           </div>
 
           {/* 常驻操作行：参数切换钮 + （原桌面布局的）上传与生成按钮 */}
-          <div className="mt-3 hidden sm:flex items-center justify-end gap-2">
+          <div className="mt-3 hidden sm:flex items-center justify-between gap-2">
+            {/* 尺寸快接胶囊（高频） */}
             <button
               type="button"
-              onClick={toggleParamsExpanded}
-              className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-all duration-200 shadow-sm ${
-                paramsExpanded
-                  ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
-                  : 'border-gray-200/60 bg-white/50 text-gray-500 hover:bg-white hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400 dark:hover:bg-white/[0.06] dark:hover:text-gray-200'
-              }`}
-              aria-expanded={paramsExpanded}
-              aria-label={paramsExpanded ? '收起参数' : '展开参数'}
-              title={paramsExpanded ? '收起参数' : '展开参数'}
+              onClick={() => { dismissAllTooltips(); setShowSizePicker(true) }}
+              className="rounded-xl border border-gray-200/60 bg-white/50 px-3 py-2 font-mono text-xs text-left shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]"
+              title="选择尺寸"
             >
-              <SlidersHorizontal className={`h-4 w-4 transition-transform duration-200 ${paramsExpanded ? 'rotate-90' : ''}`} />
-              <span>参数</span>
+              {params.size}
             </button>
 
-            <div className="flex gap-2 flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleParamsExpanded}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-all duration-200 shadow-sm ${
+                  paramsExpanded
+                    ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300'
+                    : 'border-gray-200/60 bg-white/50 text-gray-500 hover:bg-white hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400 dark:hover:bg-white/[0.06] dark:hover:text-gray-200'
+                }`}
+                aria-expanded={paramsExpanded}
+                aria-label={paramsExpanded ? '收起参数' : '展开参数'}
+                title={paramsExpanded ? '收起参数' : '展开参数'}
+              >
+                <SlidersHorizontal className={`h-4 w-4 transition-transform duration-200 ${paramsExpanded ? 'rotate-90' : ''}`} />
+                <span>参数</span>
+              </button>
+
+              <div className="flex gap-2 flex-shrink-0">
               <div
                 className="relative"
                 onMouseEnter={() => setAttachHover(true)}
@@ -2577,6 +2588,7 @@ export default function InputBar() {
                   )}
                 </button>
               </div>
+            </div>
             </div>
           </div>
 
