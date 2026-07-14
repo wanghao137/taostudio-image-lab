@@ -423,6 +423,27 @@ function AtImageOptionThumb({ option }: { option: AtImageOption }) {
   )
 }
 
+/** localStorage key for persisting the params panel expand/collapse state. */
+export const PARAMS_EXPANDED_KEY = 'inputBar.paramsExpanded'
+
+/** Read persisted params-expanded preference. Defaults to false (collapsed). */
+export function readParamsExpanded(): boolean {
+  try {
+    return localStorage.getItem(PARAMS_EXPANDED_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+/** Persist params-expanded preference. Silently ignores quota/private-mode errors. */
+export function writeParamsExpanded(value: boolean): void {
+  try {
+    localStorage.setItem(PARAMS_EXPANDED_KEY, String(value))
+  } catch {
+    // ignore
+  }
+}
+
 export default function InputBar() {
   const addInputImage = useStore((s) => s.addInputImage)
   const replaceInputImage = useStore((s) => s.replaceInputImage)
@@ -723,6 +744,16 @@ export default function InputBar() {
   const [attachHover, setAttachHover] = useState(false)
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
+
+  const [paramsExpanded, setParamsExpanded] = useState(() => readParamsExpanded())
+
+  const toggleParamsExpanded = useCallback(() => {
+    setParamsExpanded((prev) => {
+      const next = !prev
+      writeParamsExpanded(next)
+      return next
+    })
+  }, [])
   const [showSizePicker, setShowSizePicker] = useState(false)
   const [showMobileUploadMenu, setShowMobileUploadMenu] = useState(false)
   const [maskPreviewUrl, setMaskPreviewUrl] = useState('')
