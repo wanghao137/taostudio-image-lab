@@ -222,7 +222,7 @@ export default function App() {
               <AgentWorkspace />
             </Suspense>
           ) : (
-            <main data-home-main data-drag-select-surface className="pb-48">
+            <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">
               <div className="safe-area-x max-w-7xl mx-auto">
                 <GalleryWorkspaceHeader />
                 <SearchBar />
