@@ -881,6 +881,7 @@ interface AppState {
   setTaskStreamPreview: (taskId: string, image?: string, requestIndex?: number) => void
   localAutoSaveRunningTaskIds: Record<string, true>
   selectLocalAutoSaveDirectory: () => Promise<void>
+  authorizeLocalAutoSaveDirectory: () => Promise<boolean>
   retryPendingLocalAutoSaves: () => Promise<void>
 
   // 搜索和筛选
@@ -1597,6 +1598,7 @@ export const useStore = create<AppState>()(
       }),
       localAutoSaveRunningTaskIds: {},
       selectLocalAutoSaveDirectory: async () => selectLocalAutoSaveDirectory(),
+      authorizeLocalAutoSaveDirectory: async () => authorizeLocalAutoSaveDirectory(),
       retryPendingLocalAutoSaves: async () => retryPendingLocalAutoSaves(),
 
       // Search & Filter
@@ -5136,6 +5138,7 @@ export async function selectLocalAutoSaveDirectory() {
       showDirectoryPicker: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
     }).showDirectoryPicker({ mode: 'readwrite' })
     await putLocalAutoSaveDirectoryHandle(handle)
+    void (navigator.storage?.persist?.() ?? Promise.resolve(false)).catch(() => false)
     useStore.getState().setSettings({
       localAutoSave: {
         ...useStore.getState().settings.localAutoSave,
@@ -5148,6 +5151,38 @@ export async function selectLocalAutoSaveDirectory() {
     if (err instanceof DOMException && err.name === 'AbortError') return
     const message = err instanceof Error ? err.message : String(err)
     useStore.getState().showToast(`设置本地自动保存位置失败：${message}`, 'error')
+  }
+}
+
+type PermissionCapableDirectoryHandle = FileSystemDirectoryHandle & {
+  queryPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
+  requestPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
+}
+
+export async function authorizeLocalAutoSaveDirectory() {
+  try {
+    const handle = await getSelectedLocalAutoSaveDirectoryHandle() as PermissionCapableDirectoryHandle | null
+    if (!handle) {
+      useStore.getState().showToast('未找到已保存的位置，请重新选择文件夹', 'error')
+      return false
+    }
+
+    const descriptor = { mode: 'readwrite' as const }
+    const queried = await handle.queryPermission?.(descriptor)
+    const permission = queried === 'granted'
+      ? queried
+      : await handle.requestPermission?.(descriptor)
+    if (permission !== 'granted') {
+      useStore.getState().showToast('未获得文件夹写入权限，请允许后重试', 'error')
+      return false
+    }
+
+    useStore.getState().showToast('原保存位置已重新授权', 'success')
+    return true
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    useStore.getState().showToast(`重新授权保存位置失败：${message}`, 'error')
+    return false
   }
 }
 

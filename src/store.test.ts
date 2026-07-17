@@ -207,7 +207,7 @@ import { formatExportFileTime } from './lib/exportFileName'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { cleanStaleAgentInputDrafts, clearData, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, retryPendingLocalAutoSaves, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { authorizeLocalAutoSaveDirectory, cleanStaleAgentInputDrafts, clearData, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, retryPendingLocalAutoSaves, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
@@ -551,6 +551,24 @@ describe('local auto-save store integration', () => {
       status: 'needs_permission',
       error: '需要重新授权保存位置',
     })
+  })
+
+  it('reauthorizes the stored directory without opening the folder picker again', async () => {
+    const requestPermission = vi.fn(async () => 'granted' as PermissionState)
+    const directory = {
+      name: 'Archive',
+      queryPermission: vi.fn(async () => 'prompt' as PermissionState),
+      requestPermission,
+    } as unknown as FileSystemDirectoryHandle
+    await putLocalAutoSaveDirectoryHandle(directory)
+    const picker = setLocalAutoSaveBrowserSupport(true)
+
+    await expect(authorizeLocalAutoSaveDirectory()).resolves.toBe(true)
+
+    expect(requestPermission).toHaveBeenCalledWith({ mode: 'readwrite' })
+    expect(picker).not.toHaveBeenCalled()
+    expect(await getLocalAutoSaveDirectoryHandle()).toMatchObject({ handle: directory, name: 'Archive' })
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('原保存位置已重新授权', 'success')
   })
 
   it('selects a directory only when strict desktop browser support passes', async () => {

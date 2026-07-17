@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import SettingsModal from '../SettingsModal'
 import { useStore } from '../../store'
 import { DEFAULT_SETTINGS, normalizeSettings } from '../../lib/apiProfiles'
-import type { AppSettings } from '../../types'
+import type { AppSettings, TaskRecord } from '../../types'
 
 function setDesktopDirectoryPickerSupport() {
   Object.defineProperty(window, 'showDirectoryPicker', {
@@ -22,6 +22,8 @@ function setDesktopDirectoryPickerSupport() {
 
 describe('SettingsModal local auto-save settings', () => {
   const originalSelectLocalAutoSaveDirectory = useStore.getState().selectLocalAutoSaveDirectory
+  const originalAuthorizeLocalAutoSaveDirectory = useStore.getState().authorizeLocalAutoSaveDirectory
+  const originalRetryPendingLocalAutoSaves = useStore.getState().retryPendingLocalAutoSaves
 
   beforeEach(() => {
     setDesktopDirectoryPickerSupport()
@@ -40,6 +42,8 @@ describe('SettingsModal local auto-save settings', () => {
       tasks: [],
       showToast: vi.fn(),
       selectLocalAutoSaveDirectory: originalSelectLocalAutoSaveDirectory,
+      authorizeLocalAutoSaveDirectory: originalAuthorizeLocalAutoSaveDirectory,
+      retryPendingLocalAutoSaves: originalRetryPendingLocalAutoSaves,
     })
   })
 
@@ -133,6 +137,44 @@ describe('SettingsModal local auto-save settings', () => {
     await waitFor(() => {
       expect(useStore.getState().settings.localAutoSave.lastSavedAt).toBe(1_788_888_888)
       expect(useStore.getState().settings.localAutoSave.lastSavedFolderName).toBe('20260708_2160x3840_城市夜晚人像')
+    })
+  }, 15_000)
+
+  it('reauthorizes the saved directory before retrying without selecting it again', async () => {
+    const authorizeLocalAutoSaveDirectory = vi.fn(async () => true)
+    const retryPendingLocalAutoSaves = vi.fn(async () => undefined)
+    const selectLocalAutoSaveDirectory = vi.fn(async () => undefined)
+    useStore.setState({
+      authorizeLocalAutoSaveDirectory,
+      retryPendingLocalAutoSaves,
+      selectLocalAutoSaveDirectory,
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        localAutoSave: {
+          enabled: true,
+          directoryName: 'Desktop Archive',
+          lastSavedAt: null,
+          lastSavedFolderName: null,
+        },
+      }),
+      tasks: [{
+        id: 'permission-task',
+        status: 'done',
+        prompt: 'test',
+        outputImages: [],
+        createdAt: Date.now(),
+        localAutoSave: { status: 'needs_permission', error: '需要重新授权保存位置' },
+      } as unknown as TaskRecord],
+    })
+
+    render(<SettingsModal />)
+    fireEvent.click(screen.getByRole('button', { name: '数据管理' }))
+    fireEvent.click(screen.getByRole('button', { name: '重新授权并补保存（1）' }))
+
+    await waitFor(() => {
+      expect(authorizeLocalAutoSaveDirectory).toHaveBeenCalledTimes(1)
+      expect(retryPendingLocalAutoSaves).toHaveBeenCalledTimes(1)
+      expect(selectLocalAutoSaveDirectory).not.toHaveBeenCalled()
     })
   }, 15_000)
 })
