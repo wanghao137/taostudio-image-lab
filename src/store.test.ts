@@ -207,7 +207,7 @@ import { formatExportFileTime } from './lib/exportFileName'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { authorizeLocalAutoSaveDirectory, cleanStaleAgentInputDrafts, clearData, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, retryPendingLocalAutoSaves, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { authorizeLocalAutoSaveDirectory, cleanStaleAgentInputDrafts, clearData, clearFailedTasks, deleteAgentRoundFromConversation, deleteFavoriteCollection, editOutputs, getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, markInterruptedOpenAIRunningTasks, migratePersistedState, regenerateAgentAssistantMessage, remapAgentRoundMentionsForPathChange, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
@@ -3498,5 +3498,187 @@ describe('reused task API profile', () => {
       cancelText: '放弃提交',
     }))
     expect(state.showSettings).toBe(false)
+  })
+})
+
+describe('restoreLocalAutoSavePermissionOnUserActivation', () => {
+  function fakePermissionHandle(opts: {
+    query?: PermissionState
+    request?: PermissionState
+    onRequest?: (descriptor: { mode: 'readwrite' }) => void
+  }): { handle: FileSystemDirectoryHandle; querySpy: ReturnType<typeof vi.fn>; requestSpy: ReturnType<typeof vi.fn> } {
+    const querySpy = vi.fn(async () => opts.query as PermissionState)
+    const requestSpy = vi.fn(async (descriptor: { mode: 'readwrite' }) => {
+      opts.onRequest?.(descriptor)
+      return opts.request as PermissionState
+    })
+    return {
+      handle: {
+        name: 'Archive',
+        queryPermission: opts.query !== undefined ? querySpy : undefined,
+        requestPermission: opts.request !== undefined ? requestSpy : undefined,
+      } as unknown as FileSystemDirectoryHandle,
+      querySpy,
+      requestSpy,
+    }
+  }
+
+  // 安装可控的 window 事件方法：捕获注册的监听器，测试可直接触发它。
+  // jsdom 的 window 不一定把 addEventListener/dispatchEvent 作为可枚举方法暴露，
+  // 所以这里显式定义到 window 上，覆盖恢复器的调用目标。
+  type CapturedListener = (event: Event) => void
+  function installControlledWindowEvents() {
+    const listeners = new Map<string, Set<CapturedListener>>()
+    const win = window as unknown as {
+      addEventListener?: unknown
+      removeEventListener?: unknown
+    }
+    Object.defineProperty(window, 'addEventListener', {
+      configurable: true,
+      writable: true,
+      value: (type: string, listener: CapturedListener) => {
+        if (!listeners.has(type)) listeners.set(type, new Set())
+        listeners.get(type)!.add(listener)
+      },
+    })
+    Object.defineProperty(window, 'removeEventListener', {
+      configurable: true,
+      writable: true,
+      value: (type: string, listener: CapturedListener) => {
+        listeners.get(type)?.delete(listener)
+      },
+    })
+    return {
+      // jsdom 在每个测试间会重置 window，这里只清空捕获的监听器集合即可
+      restore() {
+        listeners.clear()
+        win.addEventListener = undefined
+        win.removeEventListener = undefined
+      },
+      trigger(type: string) {
+        const set = listeners.get(type)
+        if (!set) return
+        const event = new Event(type)
+        for (const listener of [...set]) listener(event)
+      },
+      count: () =>
+        [...listeners.values()].reduce((sum, set) => sum + set.size, 0),
+    }
+  }
+
+  // 触发已挂载的一次性 pointerdown 监听器并等其异步链跑完
+  async function fireOneShotUserActivation(events: ReturnType<typeof installControlledWindowEvents>) {
+    events.trigger('pointerdown')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearLocalAutoSaveDirectoryHandle()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(writeLocalAutoSaveArchive).mockClear()
+    setLocalAutoSaveBrowserSupport(true)
+    // 重置恢复器的 window 级挂载标志，确保每个用例从干净状态开始
+    delete (window as unknown as Record<string, unknown>).__taostudioLocalAutoSaveRestoreAttached
+    useStore.setState({
+      settings: localAutoSaveSettings(true),
+      tasks: [],
+      localAutoSaveRunningTaskIds: {},
+      showToast: vi.fn(),
+    })
+  })
+
+  it('does nothing when local auto-save is disabled', async () => {
+    useStore.setState({ settings: localAutoSaveSettings(false) })
+    const { handle, querySpy, requestSpy } = fakePermissionHandle({ query: 'prompt', request: 'granted' })
+    await putLocalAutoSaveDirectoryHandle(handle)
+
+    await restoreLocalAutoSavePermissionOnUserActivation()
+
+    expect(querySpy).not.toHaveBeenCalled()
+    expect(requestSpy).not.toHaveBeenCalled()
+  })
+
+  it('does nothing when directoryName is empty', async () => {
+    useStore.setState({ settings: localAutoSaveSettings(true, { directoryName: null }) })
+    const { handle, querySpy, requestSpy } = fakePermissionHandle({ query: 'prompt', request: 'granted' })
+    await putLocalAutoSaveDirectoryHandle(handle)
+
+    await restoreLocalAutoSavePermissionOnUserActivation()
+
+    expect(querySpy).not.toHaveBeenCalled()
+    expect(requestSpy).not.toHaveBeenCalled()
+  })
+
+  it('does nothing when no handle is stored in IndexedDB', async () => {
+    const { querySpy } = fakePermissionHandle({ query: 'prompt' })
+
+    // 不 putLocalAutoSaveDirectoryHandle，IDB 为空
+
+    await restoreLocalAutoSavePermissionOnUserActivation()
+
+    expect(querySpy).not.toHaveBeenCalled()
+  })
+
+  it('does not attach listener when permission is already granted', async () => {
+    const { handle, requestSpy } = fakePermissionHandle({ query: 'granted', request: 'granted' })
+    await putLocalAutoSaveDirectoryHandle(handle)
+
+    await restoreLocalAutoSavePermissionOnUserActivation()
+
+    // granted 路径不请求权限、不挂监听器
+    expect(requestSpy).not.toHaveBeenCalled()
+  })
+
+  it('attaches one-shot listener and restores on first user activation when permission is prompt', async () => {
+    const showToast = vi.fn()
+    useStore.setState({ showToast })
+    const events = installControlledWindowEvents()
+    try {
+      const { handle, requestSpy } = fakePermissionHandle({ query: 'prompt', request: 'granted' })
+      await putLocalAutoSaveDirectoryHandle(handle)
+
+      await restoreLocalAutoSavePermissionOnUserActivation()
+
+      // 监听器已挂载（pointerdown + keydown），但尚未触发权限请求
+      expect(events.count()).toBeGreaterThan(0)
+      expect(requestSpy).not.toHaveBeenCalled()
+
+      await fireOneShotUserActivation(events)
+
+      expect(requestSpy).toHaveBeenCalledWith({ mode: 'readwrite' })
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining('Archive'), 'success')
+    } finally {
+      events.restore()
+    }
+  })
+
+  it('stays silent when user denies the permission prompt', async () => {
+    const showToast = vi.fn()
+    useStore.setState({ showToast })
+    const events = installControlledWindowEvents()
+    try {
+      const { handle, requestSpy } = fakePermissionHandle({ query: 'prompt', request: 'denied' })
+      await putLocalAutoSaveDirectoryHandle(handle)
+
+      await restoreLocalAutoSavePermissionOnUserActivation()
+      await fireOneShotUserActivation(events)
+
+      expect(requestSpy).toHaveBeenCalledWith({ mode: 'readwrite' })
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      events.restore()
+    }
+  })
+
+  it('does not attach listener when permission was explicitly denied', async () => {
+    const { handle, requestSpy } = fakePermissionHandle({ query: 'denied', request: 'granted' })
+    await putLocalAutoSaveDirectoryHandle(handle)
+
+    await restoreLocalAutoSavePermissionOnUserActivation()
+
+    expect(requestSpy).not.toHaveBeenCalled()
   })
 })

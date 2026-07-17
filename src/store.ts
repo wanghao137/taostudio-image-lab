@@ -2424,6 +2424,9 @@ export async function initStore() {
         : {}),
     })
   }
+
+  // 启动后尝试恢复本地自动保存的会话级权限（若有目录已选且权限降级为 prompt）
+  void restoreLocalAutoSavePermissionOnUserActivation()
 }
 
 /** 提交新任务 */
@@ -5183,6 +5186,74 @@ export async function authorizeLocalAutoSaveDirectory() {
     const message = err instanceof Error ? err.message : String(err)
     useStore.getState().showToast(`重新授权保存位置失败：${message}`, 'error')
     return false
+  }
+}
+
+// 防止 React StrictMode 双调用或多次 initStore 重复挂监听器。
+// 标志挂在 window 上而非模块级变量，便于测试在 beforeEach 中重置。
+const RESTORE_FLAG_KEY = '__taostudioLocalAutoSaveRestoreAttached'
+
+type PermissionCapableHandle = FileSystemDirectoryHandle & {
+  queryPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
+  requestPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
+}
+
+function attachOneShotPermissionRequestor(handle: PermissionCapableHandle, directoryName: string) {
+  const w = window as unknown as Record<string, unknown>
+  if (w[RESTORE_FLAG_KEY]) return
+  w[RESTORE_FLAG_KEY] = true
+
+  const tryOnce = async () => {
+    window.removeEventListener('pointerdown', tryOnce)
+    window.removeEventListener('keydown', tryOnce)
+    try {
+      const permission = await handle.requestPermission?.({ mode: 'readwrite' })
+      if (permission === 'granted') {
+        useStore.getState().showToast(`已恢复自动保存到「${directoryName}」`, 'success')
+        await retryPendingLocalAutoSaves()
+      }
+      // 非 granted（用户拒绝或关闭弹条）→ 静默，留给设置页手动处理
+    } catch {
+      // requestPermission 抛错（如非 user activation 上下文）→ 静默
+    } finally {
+      w[RESTORE_FLAG_KEY] = false
+    }
+  }
+  window.addEventListener('pointerdown', tryOnce, { once: true })
+  window.addEventListener('keydown', tryOnce, { once: true })
+}
+
+/**
+ * 应用启动后调用一次：检查本地自动保存的目录权限，若已降级为 prompt，
+ * 则挂一次性 user-activation 监听器，用户下次点击页面时自动 requestPermission。
+ * handle 仍在 IndexedDB 中（不随会话失效），只是权限状态会降级，因此无需重选文件夹。
+ */
+export async function restoreLocalAutoSavePermissionOnUserActivation() {
+  try {
+    const { localAutoSave } = useStore.getState().settings
+    if (!localAutoSave.enabled) return
+    const directoryName = localAutoSave.directoryName?.trim()
+    if (!directoryName) return
+
+    const stored = await getLocalAutoSaveDirectoryHandle()
+    const handle = stored?.handle as PermissionCapableHandle | undefined
+    if (!handle) return
+
+    const descriptor = { mode: 'readwrite' as const }
+    const permission = await handle.queryPermission?.(descriptor)
+    if (permission === 'granted') {
+      // 会话内仍有效，顺手补一次 pending（若有）
+      await retryPendingLocalAutoSaves()
+      return
+    }
+    // denied / prompt / undefined
+    // denied：用户曾显式拒绝，不打扰，留给设置页处理
+    // prompt：注册一次性 user-activation 监听器
+    if (permission === 'prompt') {
+      attachOneShotPermissionRequestor(handle, directoryName)
+    }
+  } catch {
+    // 全流程静默，绝不打断用户
   }
 }
 
