@@ -11,17 +11,17 @@ export const COMMON_SIZE_PRESETS = Object.freeze({
   '1K': Object.freeze({
     '1:1': '1024x1024', '3:2': '1536x1024', '2:3': '1024x1536',
     '16:9': '1280x720', '9:16': '720x1280', '4:3': '1024x768',
-    '3:4': '768x1024', '21:9': '1280x544',
+    '3:4': '768x1024', '21:9': '1280x549',
   }),
   '2K': Object.freeze({
     '1:1': '2048x2048', '3:2': '2160x1440', '2:3': '1440x2160',
     '16:9': '2560x1440', '9:16': '1440x2560', '4:3': '2048x1536',
-    '3:4': '1536x2048', '21:9': '2560x1088',
+    '3:4': '1536x2048', '21:9': '2560x1097',
   }),
   '4K': Object.freeze({
     '1:1': '2880x2880', '3:2': '3456x2304', '2:3': '2304x3456',
     '16:9': '3840x2160', '9:16': '2160x3840', '4:3': '3200x2400',
-    '3:4': '2400x3200', '21:9': '3840x1600',
+    '3:4': '2400x3200', '21:9': '3840x1646',
   }),
 })
 
@@ -104,6 +104,31 @@ export function ratioMatchesWithinOnePixel(left, right) {
   return shortestEdge > 0 && ratioMatches(left, right, 1 / shortestEdge)
 }
 
+export function ratioMatchesExactly(left, right) {
+  return positiveInteger(left?.width) && positiveInteger(left?.height)
+    && positiveInteger(right?.width) && positiveInteger(right?.height)
+    && left.width * right.height === right.width * left.height
+}
+
+export function deriveExactSourceTarget(base, final) {
+  if (!positiveInteger(base?.width) || !positiveInteger(base?.height) || !positiveInteger(final?.width) || !positiveInteger(final?.height)) {
+    throw new TypeError('base and final dimensions must be positive integers')
+  }
+  if (ratioMatchesExactly(base, final)) return { ...base }
+
+  const divisor = greatestCommonDivisor(final.width, final.height)
+  const reduced = { width: final.width / divisor, height: final.height / divisor }
+  const basePixels = base.width * base.height
+  let best = null
+  for (let factor = 1; factor <= divisor; factor += 1) {
+    if (divisor % factor !== 0) continue
+    const candidate = { width: reduced.width * factor, height: reduced.height * factor }
+    const score = Math.abs(Math.log((candidate.width * candidate.height) / basePixels))
+    if (!best || score < best.score) best = { ...candidate, score }
+  }
+  return { width: best.width, height: best.height }
+}
+
 export function computeResizePlan(source, target, mode = 'cover') {
   if (!['cover', 'contain'].includes(mode)) throw new Error('resize mode must be cover or contain')
   if (!positiveInteger(source?.width) || !positiveInteger(source?.height) || !positiveInteger(target?.width) || !positiveInteger(target?.height)) {
@@ -139,6 +164,11 @@ export function calculateImageSize(tier, ratio) {
   if (COMMON_SIZE_PRESETS[tier][original]) return COMMON_SIZE_PRESETS[tier][original]
   const exact = formatExactRatio(parsed.width, parsed.height)
   if (exact && COMMON_SIZE_PRESETS[tier][exact]) return COMMON_SIZE_PRESETS[tier][exact]
+  const equivalentPresetRatio = COMMON_IMAGE_RATIOS.find((commonRatio) => {
+    const commonOutput = parseImageSize(COMMON_SIZE_PRESETS['4K'][commonRatio])
+    return ratioMatchesWithinOnePixel(parsed, commonOutput)
+  })
+  if (equivalentPresetRatio) return COMMON_SIZE_PRESETS[tier][equivalentPresetRatio]
 
   const targetRatio = parsed.width / parsed.height
   let best = null
@@ -244,6 +274,6 @@ export function verifySourceFinalInvariant(source, final) {
   if (source.kind !== 'source') errors.push('source manifest kind must be source')
   if (final.kind !== 'final') errors.push('final manifest kind must be final')
   if (final.parentAssetId !== source.assetId) errors.push('final.parentAssetId must reference source asset')
-  if (!ratioMatchesWithinOnePixel(source, final)) errors.push('source and final ratios differ')
+  if (!ratioMatchesExactly(source, final)) errors.push('source and final ratios differ at integer-pixel precision')
   return { valid: errors.length === 0, errors }
 }

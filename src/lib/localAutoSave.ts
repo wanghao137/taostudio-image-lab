@@ -2,7 +2,7 @@ import type { LocalAutoSaveStatus, StoredImage, TaskRecord } from '../types'
 import { dataUrlToBytes } from './dataUrl'
 import { formatExportFileTime, sanitizeFileNamePart } from './exportFileName'
 import { getExactImageSizeTarget } from './exactImageSize'
-import { calculateImageSize } from './size'
+import { calculateImageSize, COMMON_IMAGE_RATIOS } from './size'
 
 export type LocalAutoSaveIneligibilityReason =
   | 'agent_task'
@@ -125,7 +125,8 @@ export function isConfirmed4kSize(size: { width?: number; height?: number } | nu
     return false
   }
 
-  return calculateImageSize('4K', `${width}:${height}`) === `${width}x${height}`
+  const dimensions = `${width}x${height}`
+  return COMMON_IMAGE_RATIOS.some(({ value }) => calculateImageSize('4K', value) === dimensions)
 }
 
 export function getLocalAutoSaveIntentSize(task: Pick<TaskRecord, 'params'>): LocalAutoSaveSize | null {

@@ -64,6 +64,7 @@ server.registerTool('image_job_create', {
     model: z.string().min(1).default('mock-v1'),
     enhancement: z.enum(['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']).default('auto'),
     contentClass: z.enum(['photo', 'illustration', 'text', 'logo', 'ui']).default('photo'),
+    maxAttempts: z.number().int().min(1).max(5).default(3),
     sourceAssetId: z.string().optional(),
     testBehavior: z.enum(['fail', 'fail-once', 'timeout']).optional(),
   },
@@ -78,7 +79,7 @@ server.registerTool('image_job_create', {
       composition: { ratio: input.ratio },
       generation: { provider: input.provider, model: input.model, ...(input.testBehavior ? { testBehavior: input.testBehavior } : {}) },
       output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: input.dimensions, enhancement: input.enhancement, contentClass: input.contentClass },
-      retry: { maxAttempts: 3 },
+      retry: { maxAttempts: input.maxAttempts },
     }),
   })
   return textResult({ replayed: response.headers.get('idempotency-replayed') === 'true', job: await response.json() })
@@ -91,7 +92,7 @@ server.registerTool('image_job_get', {
 
 server.registerTool('image_job_wait', {
   description: 'Wait for an image job to succeed, fail, or be cancelled.',
-  inputSchema: { jobId: z.string().min(1), timeoutMs: z.number().int().min(100).max(300_000).default(120_000) },
+  inputSchema: { jobId: z.string().min(1), timeoutMs: z.number().int().min(100).max(1_800_000).default(1_200_000) },
 }, async ({ jobId, timeoutMs }) => textResult(await waitForJob(jobId, timeoutMs)))
 
 server.registerTool('image_job_cancel', {

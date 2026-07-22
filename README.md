@@ -95,6 +95,18 @@ The header theme control supports:
 
 The preference is stored in browser `localStorage` under `taostudio.imageLab.theme`.
 
+## Agent Integration
+
+- Image Task API: `docs/local-image-task-api.md`
+- MCP tools: `docs/image-task-mcp.md`
+- Independent Generate Image Asset Skill: `docs/generate-image-asset-skill.md`
+- 50-prompt real-provider report: `docs/youmind-50-prompt-e2e-report.md`
+- OpenAPI contract: `server/task-api/openapi.yaml`
+
+The Task API is currently a local reference service and is not deployed with the Vercel frontend.
+
+The YouMind real-provider regression harness is available through `npm run test:youmind -- <output-directory> <skill-directory>`. After generation, run `npm run verify:youmind -- <output-directory>` to re-read every source/final PNG and verify signatures, hashes, dimensions, inherited ratios, and transparent-edge safety.
+
 ## Verification
 
 Run the available gates before considering a change complete:

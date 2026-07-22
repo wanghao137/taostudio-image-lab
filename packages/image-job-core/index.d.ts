@@ -17,6 +17,8 @@ export function formatExactRatio(width: number, height: number): string | null
 export function relativeRatioError(left: ImageDimensions, right: ImageDimensions): number
 export function ratioMatches(left: ImageDimensions, right: ImageDimensions, tolerance?: number): boolean
 export function ratioMatchesWithinOnePixel(left: ImageDimensions, right: ImageDimensions): boolean
+export function ratioMatchesExactly(left: ImageDimensions, right: ImageDimensions): boolean
+export function deriveExactSourceTarget(base: ImageDimensions, final: ImageDimensions): ImageDimensions
 export function computeResizePlan(source: ImageDimensions, target: ImageDimensions, mode?: 'cover' | 'contain'): { mode: 'cover' | 'contain'; sourceWidth: number; sourceHeight: number; targetWidth: number; targetHeight: number; scale: number; drawX: number; drawY: number; drawWidth: number; drawHeight: number; aspectMismatch: boolean }
 export function calculateImageSize(tier: ImageTier, ratio: string): string | null
 export function deriveInheritedTarget(source: ImageDimensions, options?: { maxEdge?: number; maxPixels?: number }): ImageDimensions & { ratio: string | null; ratioError: number }

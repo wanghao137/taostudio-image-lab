@@ -8,8 +8,11 @@ import {
   assertTransition,
   calculateImageSize,
   createAssetManifest,
+  deriveExactSourceTarget,
   deriveInheritedTarget,
   parseImageSize,
+  parseRatio,
+  ratioMatchesExactly,
   ratioMatchesWithinOnePixel,
   resolveEnhancementPolicy,
   validateImageJobRequest,
@@ -21,6 +24,116 @@ const ACTIVE_STATES = ['validating', 'generating', 'source_ready', 'enhancing', 
 
 function now() { return new Date().toISOString() }
 function sha256(data) { return createHash('sha256').update(data).digest('hex') }
+function safeProviderText(value) {
+  if (typeof value !== 'string') return null
+  return value
+    .replace(/bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:sk|key|token)-[a-z0-9_-]{8,}\b/gi, '[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300) || null
+}
+
+function providerPayloadError(payload, fallbackRetryable = true) {
+  const body = payload && typeof payload === 'object' ? payload : {}
+  const nested = body.error && typeof body.error === 'object' ? body.error : null
+  const providerCode = safeProviderText(nested?.code ?? nested?.type ?? body.code ?? body.type)
+  const providerMessage = safeProviderText(nested?.message ?? body.message)
+  const classification = `${providerCode || ''} ${providerMessage || ''}`.toLowerCase()
+  const permanent = /(content[_ -]?policy|moderation|safety|invalid[_ -]?request|authentication|authorization|permission|billing|quota|not[_ -]?found)/.test(classification)
+  const transient = /(rate[_ -]?limit|timeout|temporar|overload|capacity|server|internal|upstream|gateway|unavailable|generation[_ -]?failed)/.test(classification)
+  const error = Object.assign(new Error(
+    providerCode ? `provider reported ${providerCode}${providerMessage ? `: ${providerMessage}` : ''}` : 'provider response did not contain an image',
+  ), {
+    code: 'PROVIDER_RESPONSE_ERROR',
+    providerCode,
+    retryable: permanent ? false : transient ? true : fallbackRetryable,
+    diagnostics: { responseKeys: Object.keys(body).sort().slice(0, 20) },
+  })
+  return error
+}
+
+function providerPrompt(request) {
+  const ratio = request.composition?.ratio
+  if (!ratio) return request.input.prompt
+  return `${request.input.prompt}\n\nHighest-priority canvas requirement: compose the complete image for an exact ${ratio} aspect ratio. Keep every essential subject and all required text inside the canvas safe area. This requirement overrides any conflicting aspect-ratio wording above.`
+}
+
+function responseShape(text) {
+  const trimmed = text.trimStart()
+  return {
+    responseBytes: Buffer.byteLength(text),
+    responseKind: !trimmed ? 'empty' : trimmed.startsWith('<') ? 'html-like' : /^[{[]/.test(trimmed) ? 'json-like' : 'text-like',
+    responseSha256: sha256(text),
+  }
+}
+
+function providerNetworkError(error, phase, signal) {
+  if (signal?.aborted) {
+    return Object.assign(new Error('provider request aborted'), { name: 'AbortError', code: 'PROVIDER_TIMEOUT', retryable: true })
+  }
+  const networkCode = safeProviderText(error?.cause?.code ?? error?.code)
+  return Object.assign(new Error(`provider network failed during ${phase}${networkCode ? `: ${networkCode}` : ''}`), {
+    code: 'PROVIDER_NETWORK_ERROR',
+    retryable: true,
+    diagnostics: { phase, ...(networkCode ? { networkCode } : {}) },
+  })
+}
+
+async function providerFetch(url, init, phase) {
+  try {
+    return await fetch(url, init)
+  } catch (error) {
+    throw providerNetworkError(error, phase, init?.signal)
+  }
+}
+
+async function providerResponseText(response, signal) {
+  try {
+    return await response.text()
+  } catch (error) {
+    throw providerNetworkError(error, 'response-body', signal)
+  }
+}
+
+function processIsRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+async function acquireStateDirectoryLock(stateDir) {
+  const lockPath = join(stateDir, '.task-api.lock')
+  const token = randomUUID()
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await mkdir(lockPath)
+      await writeFile(join(lockPath, 'owner.json'), JSON.stringify({ pid: process.pid, token, createdAt: now() }), 'utf8')
+      return async () => {
+        const owner = await readFile(join(lockPath, 'owner.json'), 'utf8').then(JSON.parse).catch(() => null)
+        if (owner?.token === token) await rm(lockPath, { recursive: true, force: true })
+      }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      const owner = await readFile(join(lockPath, 'owner.json'), 'utf8').then(JSON.parse).catch(() => null)
+      if (processIsRunning(owner?.pid)) {
+        throw Object.assign(new Error(`task API state directory is already in use by process ${owner.pid}`), { code: 'STATE_DIR_LOCKED' })
+      }
+      const stalePath = `${lockPath}.stale-${randomUUID()}`
+      try {
+        await rename(lockPath, stalePath)
+        await rm(stalePath, { recursive: true, force: true })
+      } catch (renameError) {
+        if (!['ENOENT', 'EACCES', 'EPERM'].includes(renameError?.code)) throw renameError
+      }
+    }
+  }
+  throw Object.assign(new Error('task API state directory lock could not be acquired'), { code: 'STATE_DIR_LOCKED' })
+}
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
@@ -226,33 +339,105 @@ async function compatibleGenerate(request, providerConfig, signal) {
   if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
   const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
   const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/images/generations`)
-  const response = await fetch(endpoint, {
+  const response = await providerFetch(endpoint, {
     method: 'POST',
     signal,
     headers: { authorization: `Bearer ${providerConfig.apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       model: request.generation.model || providerConfig.model,
-      prompt: request.input.prompt,
+      prompt: providerPrompt(request),
       size: request.generation.baseSize || calculateImageSize('1K', request.composition.ratio),
       quality: 'high',
       output_format: 'png',
       n: 1,
     }),
-  })
-  if (!response.ok) throw Object.assign(new Error(`provider returned HTTP ${response.status}`), { retryable: response.status === 429 || response.status >= 500 })
+  }, 'generation-request')
   const contentType = response.headers.get('content-type') || ''
-  if (!contentType.toLowerCase().includes('application/json')) {
-    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), { retryable: false })
+  const responseText = await providerResponseText(response, signal)
+  const isJson = contentType.toLowerCase().includes('application/json')
+  if (!response.ok) {
+    let errorPayload = null
+    if (isJson) {
+      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
+    }
+    const error = errorPayload
+      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
+      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
+          code: 'PROVIDER_HTTP_ERROR',
+          retryable: response.status === 429 || response.status >= 500,
+          diagnostics: responseShape(responseText),
+        })
+    error.httpStatus = response.status
+    throw error
   }
-  const payload = await response.json()
+  if (!isJson) {
+    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
+    })
+  }
+  let payload
+  try {
+    payload = JSON.parse(responseText)
+  } catch {
+    throw Object.assign(new Error('provider returned malformed JSON'), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType, ...responseShape(responseText) },
+    })
+  }
   const entry = payload?.data?.[0]
   if (entry?.b64_json) return Buffer.from(entry.b64_json, 'base64')
   if (entry?.url) {
-    const imageResponse = await fetch(entry.url, { signal })
+    const imageResponse = await providerFetch(entry.url, { signal }, 'asset-download')
     if (!imageResponse.ok) throw Object.assign(new Error(`provider asset returned HTTP ${imageResponse.status}`), { retryable: true })
-    return Buffer.from(await imageResponse.arrayBuffer())
+    try {
+      return Buffer.from(await imageResponse.arrayBuffer())
+    } catch (error) {
+      throw providerNetworkError(error, 'asset-body', signal)
+    }
   }
-  throw Object.assign(new Error('provider response did not contain an image'), { retryable: false })
+  throw providerPayloadError(payload, true)
+}
+
+async function normalizeSourceCanvas(request, rawBuffer) {
+  const metadata = await sharp(rawBuffer).metadata()
+  if (!metadata.width || !metadata.height) {
+    throw Object.assign(new Error('provider image dimensions are unavailable'), { code: 'PROVIDER_IMAGE_INVALID', retryable: true })
+  }
+  const providerDimensions = { width: metadata.width, height: metadata.height }
+  const requestedRatio = parseRatio(request.composition?.ratio)
+  const baseSize = request.generation?.baseSize || calculateImageSize('1K', request.composition?.ratio)
+  const target = parseImageSize(baseSize)
+  const outputTarget = parseImageSize(request.output?.dimensions)
+  const ratioTarget = outputTarget || target
+  if (!requestedRatio || (ratioTarget && ratioMatchesExactly(providerDimensions, ratioTarget))) {
+    if (metadata.format === 'png') return { buffer: rawBuffer, transform: null }
+    return {
+      buffer: await sharp(rawBuffer).png().toBuffer(),
+      transform: { geometry: 'format-only', providerDimensions, requestedRatio: request.composition?.ratio ?? null },
+    }
+  }
+
+  if (!target || !ratioMatchesWithinOnePixel(requestedRatio, target) || (outputTarget && !ratioMatchesWithinOnePixel(target, outputTarget))) {
+    throw Object.assign(new Error('generation base size conflicts with the requested composition ratio'), { retryable: false })
+  }
+  const exactTarget = outputTarget ? deriveExactSourceTarget(target, outputTarget) : target
+  const buffer = await sharp(rawBuffer)
+    .resize(exactTarget.width, exactTarget.height, { fit: 'cover', position: 'centre', kernel: sharp.kernel.lanczos3 })
+    .png()
+    .toBuffer()
+  return {
+    buffer,
+    transform: {
+      geometry: 'cover',
+      reason: 'provider-ratio-normalization',
+      providerDimensions,
+      exactPixels: exactTarget,
+      requestedRatio: request.composition.ratio,
+    },
+  }
 }
 
 export class TaskWorkerPool {
@@ -260,9 +445,10 @@ export class TaskWorkerPool {
     this.repository = options.repository
     this.assetRoot = options.assetRoot
     this.providerConfig = options.providerConfig ?? {}
-    this.concurrency = options.concurrency ?? 2
+    this.concurrency = options.concurrency ?? 1
     this.pollIntervalMs = options.pollIntervalMs ?? 50
-    this.providerTimeoutMs = options.providerTimeoutMs ?? 180_000
+    this.providerTimeoutMs = options.providerTimeoutMs ?? 300_000
+    this.providerRetryBaseMs = options.providerRetryBaseMs ?? 500
     this.running = false
     this.loops = []
     this.controllers = new Map()
@@ -326,21 +512,29 @@ export class TaskWorkerPool {
       if (request.input.sourceAssetId) {
         const existing = this.repository.getAsset(request.input.sourceAssetId)
         if (!existing) throw Object.assign(new Error('source asset not found'), { retryable: false })
-        sourceManifest = existing.manifest
+        const rawBuffer = await readFile(existing.filePath)
+        const normalized = await normalizeSourceCanvas(request, rawBuffer)
+        sourceManifest = normalized.transform
+          ? await this.createStoredAsset(jobId, 'source', normalized.buffer, existing.manifest.assetId, normalized.transform)
+          : existing.manifest
       } else {
         const controller = new AbortController()
         this.controllers.set(jobId, controller)
         const timeout = setTimeout(() => controller.abort(new Error('provider timeout')), this.providerTimeoutMs)
         let sourceBuffer
+        let sourceTransform = null
         try {
-          sourceBuffer = request.generation.provider === 'mock'
+          const providerBuffer = request.generation.provider === 'mock'
             ? await mockGenerate(request, controller.signal, this.repository.getJob(jobId).attempts)
             : await compatibleGenerate(request, this.providerConfig, controller.signal)
+          const normalized = await normalizeSourceCanvas(request, providerBuffer)
+          sourceBuffer = normalized.buffer
+          sourceTransform = normalized.transform
         } finally {
           clearTimeout(timeout)
           this.controllers.delete(jobId)
         }
-        sourceManifest = await this.createStoredAsset(jobId, 'source', sourceBuffer)
+        sourceManifest = await this.createStoredAsset(jobId, 'source', sourceBuffer, null, sourceTransform)
       }
       this.repository.transition(jobId, 'source_ready', { sourceAssetId: sourceManifest.assetId })
       if (this.repository.shouldCancel(jobId)) return void this.repository.transition(jobId, 'cancelled')
@@ -354,11 +548,11 @@ export class TaskWorkerPool {
       const target = request.output.dimensions
         ? parseImageSize(request.output.dimensions)
         : deriveInheritedTarget(sourceDimensions)
-      if (!target || !ratioMatchesWithinOnePixel(sourceDimensions, target)) {
+      if (!target || !ratioMatchesExactly(sourceDimensions, target)) {
         throw Object.assign(new Error('inherit ratio conflict'), { retryable: false })
       }
       const finalBuffer = await sharp(sourceBuffer)
-        .resize(target.width, target.height, { fit: 'contain', kernel: sharp.kernel.lanczos3, background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .resize(target.width, target.height, { fit: 'cover', position: 'centre', kernel: sharp.kernel.lanczos3 })
         .png()
         .toBuffer()
 
@@ -378,12 +572,21 @@ export class TaskWorkerPool {
     } catch (error) {
       const current = this.repository.getJob(jobId)
       if (!current || ['cancelled', 'succeeded'].includes(current.state)) return
+      if (!ACTIVE_STATES.includes(current.state)) return
       if (current.cancelRequested) return void this.repository.transition(jobId, 'cancelled')
       const retryable = error?.retryable !== false && current.attempts < current.maxAttempts
-      const detail = { code: error?.name === 'AbortError' ? 'PROVIDER_TIMEOUT' : 'JOB_FAILED', message: error instanceof Error ? error.message : String(error), stage, retryable }
-      this.repository.transition(jobId, 'failed', { error: detail })
+      const detail = {
+        code: error?.name === 'AbortError' ? 'PROVIDER_TIMEOUT' : error?.code || 'JOB_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+        stage,
+        retryable,
+      }
+      if (error?.providerCode) detail.providerCode = error.providerCode
+      if (error?.httpStatus) detail.httpStatus = error.httpStatus
+      if (error?.diagnostics) detail.diagnostics = error.diagnostics
+      this.repository.transition(jobId, 'failed', { error: detail, detail })
       if (retryable) {
-        const delay = Math.min(500 * (2 ** (current.attempts - 1)), 5_000)
+        const delay = Math.min(this.providerRetryBaseMs * (2 ** (current.attempts - 1)), this.providerRetryBaseMs * 4)
         this.repository.transition(jobId, 'queued', { availableAt: Date.now() + delay, detail: { reason: 'automatic_retry', delay } })
       }
     }
@@ -393,11 +596,26 @@ export class TaskWorkerPool {
 export async function createTaskApi(options = {}) {
   const stateDir = resolve(options.stateDir ?? '.local-task-api')
   const assetRoot = join(stateDir, 'assets')
+  await mkdir(stateDir, { recursive: true })
+  const releaseStateLock = await acquireStateDirectoryLock(stateDir)
   await mkdir(assetRoot, { recursive: true })
-  const repository = new TaskRepository(join(stateDir, 'jobs.sqlite'))
+  let repository
+  try {
+    repository = new TaskRepository(join(stateDir, 'jobs.sqlite'))
+  } catch (error) {
+    await releaseStateLock()
+    throw error
+  }
   const recoveredJobs = repository.recoverInterruptedJobs()
   const token = options.token || randomBytes(24).toString('hex')
-  const workerPool = new TaskWorkerPool({ repository, assetRoot, concurrency: options.concurrency, providerConfig: options.providerConfig, providerTimeoutMs: options.providerTimeoutMs })
+  const workerPool = new TaskWorkerPool({
+    repository,
+    assetRoot,
+    concurrency: options.concurrency,
+    providerConfig: options.providerConfig,
+    providerTimeoutMs: options.providerTimeoutMs,
+    providerRetryBaseMs: options.providerRetryBaseMs,
+  })
 
   const server = createServer(async (request, response) => {
     const origin = request.headers.origin
@@ -461,6 +679,7 @@ export async function createTaskApi(options = {}) {
     }
   })
 
+  let closed = false
   return {
     token,
     recoveredJobs,
@@ -476,9 +695,12 @@ export async function createTaskApi(options = {}) {
       return { host, port: address.port, url: `http://${host}:${address.port}` }
     },
     async close() {
+      if (closed) return
+      closed = true
       await workerPool.stop()
-      await new Promise((resolvePromise) => server.close(resolvePromise))
+      if (server.listening) await new Promise((resolvePromise) => server.close(resolvePromise))
       repository.close()
+      await releaseStateLock()
     },
     async destroy() {
       await this.close()

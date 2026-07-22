@@ -171,6 +171,9 @@ export interface ExactSizeTransformRecord {
   mode: ExactSizeFitMode
   sourceWidth: number
   sourceHeight: number
+  rawSourceWidth?: number
+  rawSourceHeight?: number
+  sourceNormalized?: boolean
   targetWidth: number
   targetHeight: number
   scale: number
@@ -272,6 +275,7 @@ export interface TaskRecord {
   /** 透明背景后处理前的原始输出图片 id，顺序对应 outputImages */
   transparentOriginalImages?: string[]
   /** 精确尺寸后处理前的原始输出图片 id，顺序对应 outputImages */
+  /** Canonical source image ids whose pixel ratios exactly match their final outputs. */
   exactSizeOriginalImages?: string[]
   /** 精确尺寸本地后处理几何信息，key 为 outputImages 中的图片 id */
   exactSizeTransforms?: Record<string, ExactSizeTransformRecord>

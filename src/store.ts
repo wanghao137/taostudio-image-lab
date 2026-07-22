@@ -2968,9 +2968,10 @@ async function storeGeneratedOutputImage(
   if (targetSize) {
     const resized = await resizeImageDataUrlToExactSize(outputDataUrl, targetSize, params.output_format, 'cover')
     if (resized.resized) {
-      const original = await storeImageWithSize(outputDataUrl, 'generated')
+      const sourceDataUrl = resized.sourceDataUrl ?? outputDataUrl
+      const original = await storeImageWithSize(sourceDataUrl, 'generated')
       storedImageIds.push(original.id)
-      cacheImage(original.id, outputDataUrl)
+      cacheImage(original.id, sourceDataUrl)
       exactSizeOriginalImageId = original.id
       outputDataUrl = resized.dataUrl
       if (resized.drawPlan) {
@@ -2978,6 +2979,9 @@ async function storeGeneratedOutputImage(
           mode: resized.drawPlan.mode,
           sourceWidth: resized.drawPlan.sourceWidth,
           sourceHeight: resized.drawPlan.sourceHeight,
+          rawSourceWidth: resized.rawSourceWidth,
+          rawSourceHeight: resized.rawSourceHeight,
+          sourceNormalized: resized.sourceNormalized,
           targetWidth: resized.drawPlan.targetWidth,
           targetHeight: resized.drawPlan.targetHeight,
           scale: resized.drawPlan.scale,

@@ -18,6 +18,7 @@ dev-proxy.config.json
 .benchmark-env/
 .quality-models/
 output/quality-benchmark/
+output/
 
 node_modules
 dist

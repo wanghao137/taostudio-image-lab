@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import sharp from 'sharp'
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createTaskApi } from './service.mjs'
 
 const running = []
+const providerServers = []
 
 function request(overrides = {}) {
   return {
@@ -53,6 +55,9 @@ afterEach(async () => {
     const instance = running.pop()
     if (!instance.closed) await instance.api.close()
     await rm(instance.stateDir, { recursive: true, force: true })
+  }
+  while (providerServers.length) {
+    await new Promise((resolvePromise) => providerServers.pop().close(resolvePromise))
   }
 })
 
@@ -129,6 +134,177 @@ describe('local Image Task API', () => {
     expect(job.events.filter((event) => event.state === 'queued')).toHaveLength(2)
   })
 
+  it('retries a malformed JSON gateway response on the same job', async () => {
+    const png = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#336699' } }).png().toBuffer()
+    let providerCalls = 0
+    const provider = createServer((incoming, response) => {
+      providerCalls += 1
+      response.setHeader('content-type', 'application/json')
+      if (providerCalls === 1) return void response.end('<!doctype html><title>temporary gateway response</title>')
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
+    const payload = request({
+      idempotencyKey: 'malformed-json-retry-001',
+      generation: { provider: 'configured', model: 'test-model', baseSize: '720x1280' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x3840', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    })
+    const created = await create(url, payload)
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ id: created.body.id, state: 'succeeded', attempts: 2 })
+    expect(providerCalls).toBe(2)
+  })
+
+  it('retries a provider response whose body terminates early', async () => {
+    const png = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#426b8a' } }).png().toBuffer()
+    let providerCalls = 0
+    const provider = createServer((incoming, response) => {
+      providerCalls += 1
+      response.setHeader('content-type', 'application/json')
+      if (providerCalls === 1) {
+        response.setHeader('content-length', '4096')
+        response.write('{"data":[')
+        return void response.socket.destroy()
+      }
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
+    const created = await create(url, request({
+      idempotencyKey: 'terminated-body-retry-001',
+      generation: { provider: 'configured', model: 'test-model', baseSize: '720x1280' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x3840', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ id: created.body.id, state: 'succeeded', attempts: 2 })
+    expect(job.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: 'failed', detail: expect.objectContaining({ code: 'PROVIDER_NETWORK_ERROR', retryable: true }) }),
+    ]))
+    expect(providerCalls).toBe(2)
+  })
+
+  it('retries an HTTP 200 provider response that contains no image', async () => {
+    const png = await sharp({ create: { width: 1536, height: 1024, channels: 4, background: '#6688aa' } }).png().toBuffer()
+    let providerCalls = 0
+    const provider = createServer((incoming, response) => {
+      providerCalls += 1
+      response.setHeader('content-type', 'application/json')
+      if (providerCalls === 1) return void response.end(JSON.stringify({ data: [] }))
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
+    const created = await create(url, request({
+      idempotencyKey: 'empty-image-retry-001',
+      composition: { ratio: '3:2' },
+      generation: { provider: 'configured', model: 'test-model', baseSize: '1536x1024' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '3456x2304', enhancement: 'lanczos3', contentClass: 'photo' },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ id: created.body.id, state: 'succeeded', attempts: 2 })
+    expect(providerCalls).toBe(2)
+  })
+
+  it('does not retry a provider content policy error returned with HTTP 200', async () => {
+    let providerCalls = 0
+    const provider = createServer((incoming, response) => {
+      providerCalls += 1
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ error: { code: 'content_policy_violation', message: 'request was blocked' } }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
+    const created = await create(url, request({
+      idempotencyKey: 'content-policy-no-retry-001',
+      generation: { provider: 'configured', model: 'test-model', baseSize: '720x1280' },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({
+      state: 'failed',
+      attempts: 1,
+      error: { code: 'PROVIDER_RESPONSE_ERROR', providerCode: 'content_policy_violation', retryable: false },
+    })
+    expect(providerCalls).toBe(1)
+  })
+
+  it('normalizes a provider-native canvas to the requested source ratio before 4K enhancement', async () => {
+    const png = await sharp({ create: { width: 1536, height: 1024, channels: 4, background: '#224466' } }).png().toBuffer()
+    const provider = createServer((incoming, response) => {
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
+    const created = await create(url, request({
+      idempotencyKey: 'provider-ratio-normalization-001',
+      composition: { ratio: '21:9' },
+      generation: { provider: 'configured', model: 'test-model', baseSize: '1280x549' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '3840x1646', enhancement: 'lanczos3', contentClass: 'photo' },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job.state).toBe('succeeded')
+    const sourceManifest = await (await fetch(`${url}/v1/assets/${job.sourceAssetId}?manifest=1`, { headers: headers() })).json()
+    const finalManifest = await (await fetch(`${url}/v1/assets/${job.finalAssetId}?manifest=1`, { headers: headers() })).json()
+    expect(sourceManifest).toMatchObject({
+      width: 1920,
+      height: 823,
+      transform: {
+        geometry: 'cover',
+        reason: 'provider-ratio-normalization',
+        providerDimensions: { width: 1536, height: 1024 },
+        requestedRatio: '21:9',
+      },
+    })
+    expect(finalManifest).toMatchObject({ width: 3840, height: 1646, parentAssetId: job.sourceAssetId })
+    expect(sourceManifest.width * finalManifest.height).toBe(finalManifest.width * sourceManifest.height)
+    const finalBuffer = Buffer.from(await (await fetch(`${url}/v1/assets/${job.finalAssetId}`, { headers: headers() })).arrayBuffer())
+    const finalStats = await sharp(finalBuffer).ensureAlpha().stats()
+    expect(finalStats.channels[3].min).toBe(255)
+  })
+
+  it('normalizes a near-ratio provider canvas when it still conflicts with exact final pixels', async () => {
+    const png = await sharp({ create: { width: 941, height: 1672, channels: 4, background: '#335577' } }).png().toBuffer()
+    const provider = createServer((incoming, response) => {
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
+    const created = await create(url, request({
+      idempotencyKey: 'near-ratio-normalization-001',
+      composition: { ratio: '9:16' },
+      generation: { provider: 'configured', model: 'test-model', baseSize: '720x1280' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x3840', enhancement: 'lanczos3', contentClass: 'photo' },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job.state).toBe('succeeded')
+    const sourceManifest = await (await fetch(`${url}/v1/assets/${job.sourceAssetId}?manifest=1`, { headers: headers() })).json()
+    expect(sourceManifest).toMatchObject({
+      width: 720,
+      height: 1280,
+      transform: {
+        geometry: 'cover',
+        providerDimensions: { width: 941, height: 1672 },
+        requestedRatio: '9:16',
+      },
+    })
+  })
+
   it('interrupts an active provider call when cancelled', async () => {
     const { url } = await start({ providerTimeoutMs: 20_000 })
     const created = await create(url, request({
@@ -156,7 +332,16 @@ describe('local Image Task API', () => {
     const secondApi = await createTaskApi({ stateDir: first.stateDir, token: 'test-token', concurrency: 0 })
     expect(secondApi.recoveredJobs).toBe(1)
     expect(secondApi.repository.getJob(created.body.id).state).toBe('queued')
-    secondApi.repository.close()
+    await secondApi.close()
+  })
+
+  it('prevents two task API instances from driving the same state directory', async () => {
+    const first = await start({ concurrency: 0 })
+    await expect(createTaskApi({ stateDir: first.stateDir, token: 'other-token', concurrency: 0 })).rejects.toMatchObject({ code: 'STATE_DIR_LOCKED' })
+    await first.api.close()
+    first.closed = true
+    const replacement = await createTaskApi({ stateDir: first.stateDir, token: 'replacement-token', concurrency: 0 })
+    await replacement.close()
   })
 
   it('accepts immutable PNG uploads and uses the asset as a job source', async () => {

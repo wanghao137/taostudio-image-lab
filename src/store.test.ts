@@ -151,22 +151,47 @@ vi.mock('./lib/exactImageSize', () => ({
     fitMode = 'cover',
   ) => {
     const sourceMatch = dataUrl.match(/(\d+)x(\d+)/)
-    const sourceWidth = sourceMatch ? Number(sourceMatch[1]) : 1024
-    const sourceHeight = sourceMatch ? Number(sourceMatch[2]) : 1024
-    if (sourceWidth === target.width && sourceHeight === target.height) {
-      return { dataUrl, width: sourceWidth, height: sourceHeight, sourceWidth, sourceHeight, resized: false }
+    const rawSourceWidth = sourceMatch ? Number(sourceMatch[1]) : 1024
+    const rawSourceHeight = sourceMatch ? Number(sourceMatch[2]) : 1024
+    if (rawSourceWidth === target.width && rawSourceHeight === target.height) {
+      return {
+        dataUrl,
+        sourceDataUrl: dataUrl,
+        width: rawSourceWidth,
+        height: rawSourceHeight,
+        sourceWidth: rawSourceWidth,
+        sourceHeight: rawSourceHeight,
+        rawSourceWidth,
+        rawSourceHeight,
+        sourceNormalized: false,
+        resized: false,
+      }
     }
+    const ratioMatches = rawSourceWidth * target.height === target.width * rawSourceHeight
+    const canonicalSource = ratioMatches
+      ? { width: rawSourceWidth, height: rawSourceHeight }
+      : target.width === 2160 && target.height === 3840
+        ? { width: 720, height: 1280 }
+        : target.width === 3840 && target.height === 1646
+          ? { width: 1920, height: 823 }
+          : target
     return {
       dataUrl: `data:image/png;base64,resized-${target.width}x${target.height}`,
+      sourceDataUrl: ratioMatches
+        ? dataUrl
+        : `data:image/png;base64,source-${canonicalSource.width}x${canonicalSource.height}`,
       width: target.width,
       height: target.height,
-      sourceWidth,
-      sourceHeight,
+      sourceWidth: canonicalSource.width,
+      sourceHeight: canonicalSource.height,
+      rawSourceWidth,
+      rawSourceHeight,
+      sourceNormalized: !ratioMatches,
       resized: true,
       drawPlan: {
         mode: fitMode,
-        sourceWidth,
-        sourceHeight,
+        sourceWidth: canonicalSource.width,
+        sourceHeight: canonicalSource.height,
         targetWidth: target.width,
         targetHeight: target.height,
         scale: 1,
@@ -174,7 +199,7 @@ vi.mock('./lib/exactImageSize', () => ({
         drawY: 0,
         drawWidth: target.width,
         drawHeight: target.height,
-        aspectMismatch: sourceWidth / sourceHeight !== target.width / target.height,
+        aspectMismatch: canonicalSource.width * target.height !== target.width * canonicalSource.height,
       },
     }
   }),
@@ -951,18 +976,26 @@ describe('mask draft lifecycle in store actions', () => {
     expect(task.exactSizeOriginalImages).toHaveLength(1)
     expect(task.exactSizeTransforms?.[task.outputImages[0]]).toMatchObject({
       mode: 'cover',
-      sourceWidth: 1254,
-      sourceHeight: 1254,
+      sourceWidth: 720,
+      sourceHeight: 1280,
+      rawSourceWidth: 1254,
+      rawSourceHeight: 1254,
+      sourceNormalized: true,
       targetWidth: 2160,
       targetHeight: 3840,
-      aspectMismatch: true,
+      aspectMismatch: false,
     })
     expect(task.actualParams).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high', n: 1 })
     expect(task.actualParamsByImage?.[task.outputImages[0]]).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high' })
     const outputImage = await getImage(task.outputImages[0])
     const sourceImage = await getImage(task.exactSizeOriginalImages![0])
     expect(outputImage?.dataUrl).toBe('data:image/png;base64,resized-2160x3840')
-    expect(sourceImage?.dataUrl).toBe('data:image/png;base64,actual-1254x1254')
+    expect(sourceImage).toMatchObject({
+      dataUrl: 'data:image/png;base64,source-720x1280',
+      width: 720,
+      height: 1280,
+    })
+    expect(sourceImage!.width! * outputImage!.height!).toBe(outputImage!.width! * sourceImage!.height!)
     await clearTasks()
     await clearImages()
   })

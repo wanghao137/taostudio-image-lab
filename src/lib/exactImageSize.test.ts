@@ -1,5 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { computeExactSizeDrawPlan } from './exactImageSize'
+import { computeExactSizeDrawPlan, getExactImageCanonicalSourceSize } from './exactImageSize'
+
+describe('getExactImageCanonicalSourceSize', () => {
+  it('keeps an already exact-ratio source unchanged', () => {
+    expect(getExactImageCanonicalSourceSize(
+      { width: 1080, height: 1920 },
+      { width: 2160, height: 3840 },
+    )).toEqual({ width: 1080, height: 1920 })
+  })
+
+  it('normalizes a square provider response to the requested 9:16 source canvas', () => {
+    expect(getExactImageCanonicalSourceSize(
+      { width: 1254, height: 1254 },
+      { width: 2160, height: 3840 },
+    )).toEqual({ width: 720, height: 1280 })
+  })
+
+  it('uses an integer-exact source canvas for the 21:9 final preset', () => {
+    expect(getExactImageCanonicalSourceSize(
+      { width: 1915, height: 821 },
+      { width: 3840, height: 1646 },
+    )).toEqual({ width: 1920, height: 823 })
+  })
+})
 
 describe('computeExactSizeDrawPlan', () => {
   it('uses full-canvas resize when source and target ratios already match', () => {
