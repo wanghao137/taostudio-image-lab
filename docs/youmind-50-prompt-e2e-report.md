@@ -99,4 +99,4 @@
 - ESLint：零错误。
 - TypeScript / Vite 生产构建：通过；仅保留既有的大 chunk 提示。
 
-生产 `verify:ui` 在部署完成后执行。
+生产 `npm run verify:ui -- https://image.taostudioai.com/` 已通过。
