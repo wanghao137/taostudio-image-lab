@@ -2,6 +2,7 @@ import type { TaskParams } from '../types'
 import { canvasToBlob, loadImage } from './canvasImage'
 import { blobToDataUrl } from './dataUrl'
 import { parseImageSize, type ImageSize } from './size'
+import { computeResizePlan } from '../../packages/image-job-core/index.mjs'
 
 const OUTPUT_MIME_BY_FORMAT: Record<TaskParams['output_format'], string> = {
   png: 'image/png',
@@ -35,47 +36,12 @@ export interface ExactSizeDrawPlan {
   aspectMismatch: boolean
 }
 
-const ASPECT_EPSILON = 0.01
-
-function round6(value: number) {
-  return Math.round(value * 1_000_000) / 1_000_000
-}
-
-function roundPixel(value: number) {
-  const rounded = Math.round(value)
-  return Object.is(rounded, -0) ? 0 : rounded
-}
-
 export function computeExactSizeDrawPlan(
   source: ImageSize,
   target: ImageSize,
   mode: ExactSizeFitMode = 'cover',
 ): ExactSizeDrawPlan {
-  const widthScale = target.width / source.width
-  const heightScale = target.height / source.height
-  const scale = mode === 'contain'
-    ? Math.min(widthScale, heightScale)
-    : Math.max(widthScale, heightScale)
-  const drawWidth = roundPixel(source.width * scale)
-  const drawHeight = roundPixel(source.height * scale)
-  const drawX = roundPixel((target.width - drawWidth) / 2)
-  const drawY = roundPixel((target.height - drawHeight) / 2)
-  const sourceAspect = source.width / source.height
-  const targetAspect = target.width / target.height
-
-  return {
-    mode,
-    sourceWidth: source.width,
-    sourceHeight: source.height,
-    targetWidth: target.width,
-    targetHeight: target.height,
-    scale: round6(scale),
-    drawX,
-    drawY,
-    drawWidth,
-    drawHeight,
-    aspectMismatch: Math.abs(sourceAspect - targetAspect) > ASPECT_EPSILON,
-  }
+  return computeResizePlan(source, target, mode)
 }
 
 export function getExactImageSizeTarget(params: Pick<TaskParams, 'size' | 'exact_size'>): ImageSize | null {

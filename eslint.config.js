@@ -4,7 +4,23 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'node_modules', '.wrangler', '.upstream', '.upstream/**', '.omx', '.omx/**']),
+  globalIgnores([
+    'dist',
+    'node_modules',
+    '.wrangler',
+    '.upstream',
+    '.upstream/**',
+    '.omx',
+    '.omx/**',
+    '.benchmark-env',
+    '.benchmark-env/**',
+    '.local-tools',
+    '.local-tools/**',
+    '.quality-models',
+    '.quality-models/**',
+    '.local-task-api',
+    '.local-task-api/**',
+  ]),
   {
     files: ['**/*.{ts,tsx}'],
     languageOptions: {

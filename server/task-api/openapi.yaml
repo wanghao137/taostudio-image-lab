@@ -1,0 +1,61 @@
+openapi: 3.1.0
+info:
+  title: TaoStudio Image Task API
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:9789
+security:
+  - bearerAuth: []
+paths:
+  /v1/assets/uploads:
+    post:
+      operationId: uploadImageAsset
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema: { type: string, contentEncoding: binary }
+      responses:
+        '201': { description: Uploaded source asset }
+  /v1/image-jobs:
+    post:
+      operationId: createImageJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
+      responses:
+        '201': { description: Job created }
+        '200': { description: Existing idempotent job returned }
+        '409': { description: Idempotency key conflict }
+  /v1/image-jobs/{id}:
+    get:
+      operationId: getImageJob
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Job and transition events }
+  /v1/image-jobs/{id}/cancel:
+    post:
+      operationId: cancelImageJob
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Cancellation state }
+  /v1/assets/{id}:
+    get:
+      operationId: getImageAsset
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: PNG bytes
+          content:
+            image/png: { schema: { type: string, contentEncoding: binary } }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

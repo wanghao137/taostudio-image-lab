@@ -54,7 +54,7 @@ import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
-import { validateMaskMatchesImage } from './lib/canvasImage'
+import { imageDataUrlToPngBlob, validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
@@ -63,6 +63,12 @@ import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, readExportZip, readExportZipFileAsDataUrl } from './lib/exportZip'
 import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { appendTargetAspectPromptHint, createTargetAspectPromptHint } from './lib/targetAspectPrompt'
+import { calculateImageSize, formatImageRatio, parseImageSize } from './lib/size'
+import {
+  executeImageTask,
+  readLocalImageTaskApiConfig,
+  uploadImageAsset,
+} from './lib/imageTaskApi'
 import {
   buildLocalAutoSaveFolderName,
   buildLocalAutoSaveMetadata,
@@ -4217,6 +4223,52 @@ async function executeAgentRound(
       signal: AbortSignal
       onPartialImage?: (event: { image: string; partialImageIndex?: number }) => void | Promise<void>
     }) => {
+      const taskApiConfig = readLocalImageTaskApiConfig()
+      if (taskApiConfig) {
+        const requestedSize = parseImageSize(opts.taskParams.size)
+        if (!requestedSize) throw new Error('本地任务 API 需要明确的图像尺寸')
+        const ratio = formatImageRatio(requestedSize.width, requestedSize.height).replace(/^≈/, '')
+        let sourceAssetId: string | undefined
+        if (opts.referenceImageDataUrls.length > 0) {
+          if (opts.referenceImageDataUrls.length > 1) throw new Error('本地任务 API v1 暂不支持多张参考图')
+          const uploaded = await uploadImageAsset(
+            taskApiConfig,
+            await imageDataUrlToPngBlob(opts.referenceImageDataUrls[0]),
+          )
+          sourceAssetId = uploaded.assetId
+        }
+        const taskRequest = {
+          contractVersion: '1',
+          idempotencyKey: `web-agent:${opts.taskId}`,
+          input: sourceAssetId ? { prompt: opts.prompt, sourceAssetId } : { prompt: opts.prompt },
+          composition: { ratio },
+          generation: {
+            provider: imageProfile.provider,
+            model: imageProfile.model,
+            baseSize: calculateImageSize('1K', ratio) ?? opts.taskParams.size,
+          },
+          output: {
+            ratioMode: 'inherit',
+            format: 'png',
+            quality: 'high',
+            dimensions: opts.taskParams.size,
+            enhancement: opts.taskParams.exact_size ? 'auto' : 'lanczos3',
+            contentClass: 'photo',
+          },
+        } as const
+        const completed = await executeImageTask(taskApiConfig, taskRequest, { timeoutMs: imageProfile.timeout * 1000, signal: opts.signal })
+        const dataUrl = await blobToDataUrl(completed.image, 'image/png')
+        return {
+          image: {
+            dataUrl,
+            actualParams: { ...opts.taskParams, size: opts.taskParams.size, output_format: 'png', quality: 'high', n: 1 },
+            revisedPrompt: opts.prompt,
+          } satisfies AgentApiResultImage,
+          error: null,
+          rawResponsePayload: JSON.stringify({ imageJobId: completed.job.id, sourceAssetId: completed.job.sourceAssetId, finalAssetId: completed.job.finalAssetId }, null, 2),
+        }
+      }
+
       const result = await callImageApi({
         settings: imageRequestSettings,
         prompt: appendTargetAspectPromptHint(

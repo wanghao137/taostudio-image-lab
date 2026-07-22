@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://image.taostudioai.com/schemas/image-asset-manifest-v1.schema.json",
+  "title": "Image Asset Manifest v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["manifestVersion", "assetId", "jobId", "kind", "mediaType", "width", "height", "ratio", "bytes", "sha256", "storagePath", "createdAt"],
+  "properties": {
+    "manifestVersion": { "const": "1" },
+    "assetId": { "type": "string", "minLength": 1 },
+    "jobId": { "type": "string", "minLength": 1 },
+    "kind": { "enum": ["source", "final"] },
+    "parentAssetId": { "type": ["string", "null"] },
+    "mediaType": { "const": "image/png" },
+    "width": { "type": "integer", "minimum": 1 },
+    "height": { "type": "integer", "minimum": 1 },
+    "ratio": { "type": "string" },
+    "bytes": { "type": "integer", "minimum": 1 },
+    "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+    "storagePath": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "@taostudio/image-job-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./index.mjs",
+  "types": "./index.d.ts"
+}

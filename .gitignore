@@ -11,6 +11,13 @@ lerna-debug.log*
 .env.*
 !.env.example
 dev-proxy.config.json
+.local-task-api*/
+.zcode/config.json
+.playwright-cli/
+.local-tools/
+.benchmark-env/
+.quality-models/
+output/quality-benchmark/
 
 node_modules
 dist

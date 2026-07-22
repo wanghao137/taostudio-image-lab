@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://image.taostudioai.com/schemas/image-job-contract-v1.schema.json",
+  "title": "Image Job Contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "idempotencyKey", "input", "composition", "generation", "output"],
+  "properties": {
+    "contractVersion": { "const": "1" },
+    "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 200 },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prompt": { "type": "string", "minLength": 1 },
+        "sourceAssetId": { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [{ "required": ["prompt"] }, { "required": ["sourceAssetId"] }]
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ratio"],
+      "properties": { "ratio": { "type": "string", "pattern": "^[0-9.]+:[0-9.]+$" } }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "baseSize": { "type": "string" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ratioMode", "format", "quality", "enhancement"],
+      "properties": {
+        "ratioMode": { "const": "inherit" },
+        "format": { "const": "png" },
+        "quality": { "const": "high" },
+        "dimensions": { "type": "string", "pattern": "^[0-9]+x[0-9]+$" },
+        "enhancement": { "enum": ["auto", "none", "lanczos3", "real-esrgan", "hat"] },
+        "contentClass": { "enum": ["photo", "illustration", "text", "logo", "ui"] }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 5 } }
+    }
+  }
+}
