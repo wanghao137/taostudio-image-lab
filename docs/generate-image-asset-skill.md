@@ -32,6 +32,24 @@ py -3 scripts\run_image_job.py `
 
 长任务的轮询窗口会按照 `maxAttempts * 330` 秒自动扩展，避免服务端仍在重试时 Skill 提前退出。
 
+`--api-mode`（默认 `images`）选择 Provider 端点：`images` 打 `/images/generations`（图像模型如 `gpt-image-2`），`responses` 打 `/responses` + `image_generation` 工具（文本模型如 `gpt-5.6-sol`）。用文本模型生图时同时改 `--model` 和 `--api-mode`：
+
+```powershell
+py -3 scripts\run_image_job.py `
+  --backend task-api `
+  --prompt-file work\imagegen\prompt.txt `
+  --model gpt-5.6-sol `
+  --api-mode responses `
+  --provider configured `
+  --size 2880x2880 `
+  --quality high `
+  --output-format png `
+  --content-class illustration `
+  --enhancement lanczos3 `
+  --max-attempts 5 `
+  --out output\imagegen\example.png
+```
+
 ## 输出
 
 - `example-source.png`：规范源图。

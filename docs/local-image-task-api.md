@@ -11,6 +11,10 @@ Image Task API 是 TaoStudio 的服务端任务参考实现，负责排队、重
 5. source 和 final 都是不可变 PNG，包含 SHA-256、尺寸、父子资产 ID 和处理清单。
 6. 同一个 `idempotencyKey` 代表同一个生成意图；自动重试不会创建重复计费任务。
 7. 同一状态目录只允许一个服务实例。跨进程锁用于阻止两个 worker 同时驱动同一 SQLite。
+8. `generation.apiMode` 决定 Provider 端点路由：
+   - `images`（默认）→ `POST /images/generations`，用于图像模型（如 `gpt-image-2`）。
+   - `responses` → `POST /responses` + `image_generation` 工具，用于通过 Responses API 输出图片的文本模型（如 `gpt-5.6-sol`）。
+   两种 mode 可在同一个服务实例上共存；不填 `apiMode` 时走 `images`，所有旧请求行为不变。两种 mode 都复用同一条 cover 规范化 + Lanczos 放大管线，最终产物满足相同的严格同率约束。
 
 流程：
 
@@ -81,6 +85,36 @@ Content-Type: application/json
 ```
 
 支持比例：`1:1`、`3:2`、`2:3`、`16:9`、`9:16`、`4:3`、`3:4`、`21:9`。
+
+### Responses mode（文本模型生图）
+
+当 Provider 是通过 Responses API 输出图片的文本模型（如 `gpt-5.6-sol`）时，把 `generation.apiMode` 设为 `responses`。服务会改打 `/responses` 并附带 `image_generation` 工具，其余契约（ratio、dimensions、enhancement）与 images mode 完全一致：
+
+```json
+{
+  "contractVersion": "1",
+  "idempotencyKey": "agent:poster:responses-001",
+  "input": { "prompt": "极简科技品牌横幅插画" },
+  "composition": { "ratio": "1:1" },
+  "generation": {
+    "provider": "configured",
+    "model": "gpt-5.6-sol",
+    "apiMode": "responses",
+    "baseSize": "1024x1024"
+  },
+  "output": {
+    "ratioMode": "inherit",
+    "format": "png",
+    "quality": "high",
+    "dimensions": "2880x2880",
+    "enhancement": "lanczos3",
+    "contentClass": "illustration"
+  },
+  "retry": { "maxAttempts": 5 }
+}
+```
+
+Responses mode 的失败处理与 images mode 有一个关键差异：Responses API 即使在内容策略拒绝时也常返回 HTTP 200，失败信息藏在 `output[].image_generation_call.status === 'failed'` 里。服务会识别这类"HTTP 200 但调用失败"的情况，按内容策略/安全类归为不可重试（`retryable: false`），其余视为可重试。
 
 ## 端点
 

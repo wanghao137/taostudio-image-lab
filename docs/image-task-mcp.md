@@ -42,6 +42,7 @@
   "dimensions": "2400x3200",
   "provider": "configured",
   "model": "gpt-image-2",
+  "apiMode": "images",
   "enhancement": "lanczos3",
   "contentClass": "text",
   "maxAttempts": 5
@@ -49,6 +50,27 @@
 ```
 
 `ratio` 决定第一次生成的画布，`dimensions` 只决定最终像素。两者必须是同一比例。Agent 不应在 4K 阶段再次选择比例。
+
+`apiMode`（可选，默认 `images`）选择 Provider 端点：
+- `images`：打 `/images/generations`，用于图像模型（`gpt-image-2` 等）。
+- `responses`：打 `/responses` + `image_generation` 工具，用于通过 Responses API 生图的文本模型（`gpt-5.6-sol` 等）。
+
+省略 `apiMode` 时走 `images`，已有调用无需改动。要切换到文本模型生图，同时改 `model` 和 `apiMode`：
+
+```json
+{
+  "idempotencyKey": "external-agent:poster:responses-001",
+  "prompt": "极简科技品牌横幅插画",
+  "ratio": "1:1",
+  "dimensions": "2880x2880",
+  "provider": "configured",
+  "model": "gpt-5.6-sol",
+  "apiMode": "responses",
+  "enhancement": "lanczos3",
+  "contentClass": "illustration",
+  "maxAttempts": 5
+}
+```
 
 ## Agent 调用顺序
 
