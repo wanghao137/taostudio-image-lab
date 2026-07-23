@@ -7,6 +7,12 @@ export const MAX_EDGE = 3840
 export const MAX_PIXELS = 8_294_400
 export const COMMON_IMAGE_RATIOS = Object.freeze(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9'])
 
+// generation.apiMode selects the provider endpoint for a job.
+// 'images' (default) -> POST /images/generations for image models (gpt-image-2).
+// 'responses' -> POST /responses with an image_generation tool for text models
+// that expose image output through the Responses API (gpt-5.6-sol).
+export const API_MODES = Object.freeze(['images', 'responses'])
+
 export const COMMON_SIZE_PRESETS = Object.freeze({
   '1K': Object.freeze({
     '1:1': '1024x1024', '3:2': '1536x1024', '2:3': '1024x1536',
@@ -249,6 +255,7 @@ export function validateImageJobRequest(request) {
   if (!request.input || typeof request.input !== 'object') errors.push('input is required')
   if (!request.input?.prompt && !request.input?.sourceAssetId) errors.push('input.prompt or input.sourceAssetId is required')
   if (request.composition?.ratio && !parseRatio(request.composition.ratio)) errors.push('composition.ratio is invalid')
+  if (request.generation?.apiMode !== undefined && !API_MODES.includes(request.generation.apiMode)) errors.push(`generation.apiMode must be one of ${API_MODES.join(', ')}`)
   if (request.output?.ratioMode !== 'inherit') errors.push('output.ratioMode must be inherit')
   if (request.output?.format !== 'png') errors.push('output.format must be png in contract v1')
   if (request.output?.quality !== 'high') errors.push('output.quality must be high in contract v1')

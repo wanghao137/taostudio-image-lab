@@ -365,4 +365,106 @@ describe('local Image Task API', () => {
     const stored = await readFile(join(running.at(-1).stateDir, 'assets', 'source', `${asset.assetId}.png`))
     expect(createHash('sha256').update(stored).digest('hex')).toBe(asset.manifest.sha256)
   })
+
+  it('routes generation.apiMode responses through /responses and decodes the image_generation_call', async () => {
+    const png = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#cc7755' } }).png().toBuffer()
+    let requests = []
+    const provider = createServer((incoming, response) => {
+      let body = ''
+      incoming.on('data', (chunk) => { body += chunk })
+      incoming.on('end', () => {
+        requests.push({ url: incoming.url, body })
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          id: 'resp_test',
+          status: 'completed',
+          output: [
+            { id: 'ig_test', type: 'image_generation_call', status: 'completed', result: png.toString('base64') },
+          ],
+        }))
+      })
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'gpt-5.6-sol' } })
+    const created = await create(url, request({
+      idempotencyKey: 'responses-mode-success-001',
+      generation: { provider: 'configured', model: 'gpt-5.6-sol', baseSize: '720x1280', apiMode: 'responses' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x3840', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ state: 'succeeded' })
+    expect(job.sourceAssetId).toMatch(/^asset_/)
+    expect(job.finalAssetId).toMatch(/^asset_/)
+    // The request must have hit /responses (not /images/generations).
+    expect(requests).toHaveLength(1)
+    expect(requests[0].url).toBe('/v1/responses')
+    const parsed = JSON.parse(requests[0].body)
+    expect(parsed.tools[0]).toMatchObject({ type: 'image_generation', action: 'generate', size: '720x1280', output_format: 'png' })
+    expect(parsed.tool_choice).toBe('required')
+    const finalManifest = await (await fetch(`${url}/v1/assets/${job.finalAssetId}?manifest=1`, { headers: headers() })).json()
+    expect(finalManifest).toMatchObject({ width: 2160, height: 3840, ratio: '9:16', parentAssetId: job.sourceAssetId })
+  })
+
+  it('treats a failed image_generation_call in responses mode as a permanent content-policy error', async () => {
+    const provider = createServer((incoming, response) => {
+      response.setHeader('content-type', 'application/json')
+      // HTTP 200 but the image_generation_call failed — Responses API reports
+      // refusals inside output, not via status codes.
+      response.end(JSON.stringify({
+        status: 'completed',
+        output: [
+          { id: 'ig_fail', type: 'image_generation_call', status: 'failed', error: { code: 'content_policy_violation', message: 'image blocked by safety' } },
+        ],
+      }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'gpt-5.6-sol' } })
+    const created = await create(url, request({
+      idempotencyKey: 'responses-mode-failed-001',
+      generation: { provider: 'configured', model: 'gpt-5.6-sol', baseSize: '720x1280', apiMode: 'responses' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job.state).toBe('failed')
+    expect(job.error).toMatchObject({ code: 'PROVIDER_RESPONSE_ERROR', providerCode: 'content_policy_violation', retryable: false })
+  })
+
+  it('retries a responses-mode transient gateway error on the same job', async () => {
+    const png = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#5588cc' } }).png().toBuffer()
+    let providerCalls = 0
+    const provider = createServer((incoming, response) => {
+      providerCalls += 1
+      response.setHeader('content-type', 'application/json')
+      if (providerCalls === 1) return void response.end('<!doctype html><title>temporary gateway response</title>')
+      response.end(JSON.stringify({ status: 'completed', output: [{ type: 'image_generation_call', status: 'completed', result: png.toString('base64') }] }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'gpt-5.6-sol' } })
+    const created = await create(url, request({
+      idempotencyKey: 'responses-mode-retry-001',
+      generation: { provider: 'configured', model: 'gpt-5.6-sol', baseSize: '720x1280', apiMode: 'responses' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x3840', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ state: 'succeeded', attempts: 2 })
+    expect(providerCalls).toBe(2)
+  })
+
+  it('rejects an invalid generation.apiMode value', async () => {
+    const { url } = await start()
+    const created = await create(url, request({
+      idempotencyKey: 'invalid-api-mode-001',
+      generation: { provider: 'configured', model: 'gpt-image-2', apiMode: 'bogus' },
+    }))
+    expect(created.response.status).toBe(400)
+    expect(created.body.error.details).toEqual(expect.arrayContaining([expect.stringMatching(/apiMode/)]))
+  })
 })

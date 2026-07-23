@@ -401,6 +401,126 @@ async function compatibleGenerate(request, providerConfig, signal) {
   throw providerPayloadError(payload, true)
 }
 
+// Extract base64 image bytes from a Responses API image_generation_call result.
+// The result may be a bare base64 string or an object exposing one of several
+// known keys, mirroring the frontend ResponsesOutputItem handling.
+function responsesImageResultBase64(result) {
+  if (typeof result === 'string') return result.trim() || undefined
+  if (result && typeof result === 'object') {
+    for (const key of ['b64_json', 'base64', 'image', 'data']) {
+      if (typeof result[key] === 'string' && result[key].trim()) return result[key]
+    }
+  }
+  return undefined
+}
+
+// Detect safety/refusal wording in Responses API output text. Mirrors the
+// frontend isSafetyRefusalMessage classifier so refusals are treated as
+// permanent rather than retried.
+const SAFETY_REFUSAL_PATTERN = /content[_\s-]?policy|safety|moderation|moderated|refus|reject|blocked|disallowed|not allowed|inappropriate|violat|can(?:not|['\u2018\u2019]t)\s+(?:help|assist|comply|create|generate)|(?:unable|not able)\s+to\s+(?:help|assist|create|generate)|审核|安全|策略|政策|拒绝|不通过|违规|敏感|拦截|不合规|禁止/i
+
+function responsesOutputTextMessages(output) {
+  const messages = []
+  if (!Array.isArray(output)) return messages
+  for (const item of output) {
+    if (typeof item?.text === 'string') messages.push(item.text)
+    if (Array.isArray(item?.content)) {
+      for (const part of item.content) {
+        if (typeof part?.text === 'string') messages.push(part.text)
+      }
+    }
+  }
+  return messages
+}
+
+// Responses API image generation: POST /responses with an image_generation
+// tool. Used by text models that expose image output through the Responses
+// API (e.g. gpt-5.6-sol) when generation.apiMode === 'responses'. Returns a
+// raw image Buffer that feeds the same normalize/enhance/finalize pipeline
+// as images mode.
+async function responsesGenerate(request, providerConfig, signal) {
+  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
+  const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
+  const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/responses`)
+  const response = await providerFetch(endpoint, {
+    method: 'POST',
+    signal,
+    headers: { authorization: `Bearer ${providerConfig.apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: request.generation.model || providerConfig.model,
+      input: providerPrompt(request),
+      tools: [{
+        type: 'image_generation',
+        action: 'generate',
+        size: request.generation.baseSize || calculateImageSize('1K', request.composition.ratio),
+        output_format: 'png',
+        quality: 'high',
+        moderation: 'low',
+      }],
+      tool_choice: 'required',
+    }),
+  }, 'generation-request')
+  const contentType = response.headers.get('content-type') || ''
+  const responseText = await providerResponseText(response, signal)
+  const isJson = contentType.toLowerCase().includes('application/json')
+  if (!response.ok) {
+    let errorPayload = null
+    if (isJson) {
+      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
+    }
+    const error = errorPayload
+      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
+      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
+          code: 'PROVIDER_HTTP_ERROR',
+          retryable: response.status === 429 || response.status >= 500,
+          diagnostics: responseShape(responseText),
+        })
+    error.httpStatus = response.status
+    throw error
+  }
+  if (!isJson) {
+    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
+    })
+  }
+  let payload
+  try {
+    payload = JSON.parse(responseText)
+  } catch {
+    throw Object.assign(new Error('provider returned malformed JSON'), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType, ...responseShape(responseText) },
+    })
+  }
+  const output = Array.isArray(payload?.output) ? payload.output : []
+  // Find a completed image_generation_call and decode its bytes.
+  for (const item of output) {
+    if (item?.type !== 'image_generation_call') continue
+    if (item.status === 'failed') continue
+    const b64 = responsesImageResultBase64(item.result)
+    if (b64) return Buffer.from(b64, 'base64')
+  }
+  // No usable image. Surface the most informative failure: prefer a safety
+  // refusal in output text, then the first failed image_generation_call's
+  // error, then fall back to the raw payload. Refusals and explicit call
+  // failures are permanent; an image-less response for any other reason is
+  // treated as a transient response error so the worker can retry.
+  const refusalText = responsesOutputTextMessages(output).find(text => SAFETY_REFUSAL_PATTERN.test(text))
+  const failedCall = output.find(item => item?.type === 'image_generation_call' && item?.status === 'failed')
+  if (refusalText || failedCall) {
+    const errorSource = refusalText
+      ? { error: { message: refusalText.slice(0, 300), code: 'content_policy' } }
+      : (failedCall.error && typeof failedCall.error === 'object'
+        ? { error: failedCall.error }
+        : { error: { message: typeof failedCall.error === 'string' ? failedCall.error.slice(0, 300) : 'image_generation_call failed' } })
+    throw providerPayloadError(errorSource, false)
+  }
+  throw providerPayloadError(payload, true)
+}
+
 async function normalizeSourceCanvas(request, rawBuffer) {
   const metadata = await sharp(rawBuffer).metadata()
   if (!metadata.width || !metadata.height) {
@@ -524,9 +644,12 @@ export class TaskWorkerPool {
         let sourceBuffer
         let sourceTransform = null
         try {
+          const apiMode = request.generation.apiMode || 'images'
           const providerBuffer = request.generation.provider === 'mock'
             ? await mockGenerate(request, controller.signal, this.repository.getJob(jobId).attempts)
-            : await compatibleGenerate(request, this.providerConfig, controller.signal)
+            : apiMode === 'responses'
+              ? await responsesGenerate(request, this.providerConfig, controller.signal)
+              : await compatibleGenerate(request, this.providerConfig, controller.signal)
           const normalized = await normalizeSourceCanvas(request, providerBuffer)
           sourceBuffer = normalized.buffer
           sourceTransform = normalized.transform
