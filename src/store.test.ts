@@ -27,9 +27,9 @@ vi.mock('./lib/db', () => {
     deleteTask: async (id: string) => {
       tasks.delete(id)
     },
-    clearTasks: async () => {
+    clearTasks: vi.fn(async () => {
       tasks.clear()
-    },
+    }),
     getAllAgentConversations: async () => [...agentConversations.values()],
     putAgentConversation: async (conversation: AgentConversation) => {
       agentConversations.set(conversation.id, conversation)
@@ -38,9 +38,9 @@ vi.mock('./lib/db', () => {
     deleteAgentConversation: async (id: string) => {
       agentConversations.delete(id)
     },
-    clearAgentConversations: async () => {
+    clearAgentConversations: vi.fn(async () => {
       agentConversations.clear()
-    },
+    }),
     replaceAgentConversations: async (conversations: AgentConversation[]) => {
       agentConversations.clear()
       for (const conversation of conversations) agentConversations.set(conversation.id, conversation)
@@ -75,10 +75,10 @@ vi.mock('./lib/db', () => {
       images.delete(id)
       thumbnails.delete(id)
     },
-    clearImages: async () => {
+    clearImages: vi.fn(async () => {
       images.clear()
       thumbnails.clear()
-    },
+    }),
     storeImage: async (dataUrl: string, source: StoredImage['source'] = 'upload') => {
       const id = `stored-image-${++imageSeq}`
       images.set(id, { id, dataUrl, source, createdAt: Date.now() })
@@ -224,7 +224,7 @@ vi.mock('./lib/agentApi', () => ({
     }
   }),
 }))
-import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, getAllAgentConversations, getAllTasks, getImage, getLocalAutoSaveDirectoryHandle, putAgentConversation, putImage, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
+import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getLocalAutoSaveDirectoryHandle, putAgentConversation, putImage, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
@@ -3713,5 +3713,241 @@ describe('restoreLocalAutoSavePermissionOnUserActivation', () => {
     await restoreLocalAutoSavePermissionOnUserActivation()
 
     expect(requestSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('clearData', () => {
+  function fakeDirectoryHandle(name = 'Archive') {
+    return { name } as unknown as FileSystemDirectoryHandle
+  }
+
+  beforeEach(async () => {
+    vi.mocked(clearTasks).mockClear()
+    vi.mocked(clearAgentConversations).mockClear()
+    vi.mocked(clearImages).mockClear()
+    await clearTasks()
+    await clearAgentConversations()
+    await clearImages()
+    await clearLocalAutoSaveDirectoryHandle()
+    useStore.setState({
+      tasks: [],
+      agentConversations: [],
+      activeAgentConversationId: null,
+      inputImages: [],
+      maskDraft: null,
+      settings: normalizeSettings(DEFAULT_SETTINGS),
+      params: { ...DEFAULT_PARAMS },
+      favoriteCollections: [],
+      defaultFavoriteCollectionId: null,
+      showToast: vi.fn(),
+    })
+  })
+
+  it('clears all tasks, conversations, and images from IndexedDB and memory', async () => {
+    // Populate data
+    await putDbTask(task({ id: 'task-1' }))
+    await putDbTask(task({ id: 'task-2' }))
+    await putAgentConversation(agentConversation({ id: 'conv-1' }))
+    await putAgentConversation(agentConversation({ id: 'conv-2' }))
+    await putImage({ id: 'img-a', dataUrl: 'data:image/png;base64,aaa', source: 'upload', createdAt: 1 })
+    await putImage({ id: 'img-b', dataUrl: 'data:image/png;base64,bbb', source: 'generated', createdAt: 2 })
+
+    // Verify populated
+    expect((await getAllTasks()).length).toBe(2)
+    expect((await getAllAgentConversations()).length).toBe(2)
+    expect((await getAllImageIds()).length).toBe(2)
+
+    useStore.setState({
+      tasks: [task({ id: 'task-1' }), task({ id: 'task-2' })],
+      agentConversations: [agentConversation({ id: 'conv-1' }), agentConversation({ id: 'conv-2' })],
+      activeAgentConversationId: 'conv-1',
+    })
+
+    // Clear
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    // IndexedDB must be empty
+    expect((await getAllTasks()).length).toBe(0)
+    expect((await getAllAgentConversations()).length).toBe(0)
+    expect((await getAllImageIds()).length).toBe(0)
+
+    // Memory must be empty
+    expect(useStore.getState().tasks.length).toBe(0)
+    expect(useStore.getState().agentConversations.length).toBe(0)
+    expect(useStore.getState().activeAgentConversationId).toBeNull()
+
+    // Toast must report success
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('所选数据已清空', 'success')
+  })
+
+  it('initStore finds nothing after full clear (simulated page reload)', async () => {
+    // Populate data via IndexedDB
+    await putDbTask(task({ id: 'task-1', prompt: 'test prompt' }))
+    await putAgentConversation(agentConversation({ id: 'conv-1' }))
+    await putImage({ id: 'img-1', dataUrl: 'data:image/png;base64,xxx', source: 'generated', createdAt: 1 })
+
+    useStore.setState({
+      tasks: [task({ id: 'task-1', prompt: 'test prompt' })],
+      agentConversations: [agentConversation({ id: 'conv-1' })],
+    })
+
+    // Clear everything
+    await clearData({ clearTasks: true, clearConfig: true })
+
+    // Simulate page reload: initStore should find nothing
+    await initStore()
+
+    expect(useStore.getState().tasks.length).toBe(0)
+    expect(useStore.getState().agentConversations.length).toBe(0)
+    expect((await getAllTasks()).length).toBe(0)
+    expect((await getAllAgentConversations()).length).toBe(0)
+  })
+
+  it('clears config without touching tasks when clearTasks is false', async () => {
+    await putDbTask(task({ id: 'task-1' }))
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('Saved Archive'))
+    useStore.setState({
+      tasks: [task({ id: 'task-1' })],
+      settings: localAutoSaveSettings(true, { directoryName: 'Saved Archive' }),
+    })
+
+    await clearData({ clearTasks: false, clearConfig: true })
+
+    // Tasks must survive
+    expect(useStore.getState().tasks.length).toBe(1)
+    expect((await getAllTasks()).length).toBe(1)
+
+    // Config must be reset
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+    expect(useStore.getState().settings.localAutoSave.directoryName).toBeNull()
+  })
+
+  it('clears tasks without touching config when clearConfig is false', async () => {
+    await putDbTask(task({ id: 'task-1' }))
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('Saved Archive'))
+    useStore.setState({
+      tasks: [task({ id: 'task-1' })],
+      settings: localAutoSaveSettings(true, { directoryName: 'Saved Archive' }),
+    })
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    // Tasks must be gone
+    expect(useStore.getState().tasks.length).toBe(0)
+    expect((await getAllTasks()).length).toBe(0)
+
+    // Config must survive
+    const handle = await getLocalAutoSaveDirectoryHandle()
+    expect(handle).toBeDefined()
+    expect(handle!.name).toBe('Saved Archive')
+  })
+
+  it('reports partial failure when task clear throws', async () => {
+    // 让第一次 clearTasks 调用抛出异常，模拟 IndexedDB 事务失败
+    vi.mocked(clearTasks).mockRejectedValueOnce(new DOMException('QuotaExceededError', 'QuotaExceededError'))
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    expect(useStore.getState().showToast).toHaveBeenCalledWith(
+      '部分数据清空失败，请刷新页面后重试',
+      'error',
+    )
+  })
+
+  it('reports partial failure when images clear throws', async () => {
+    vi.mocked(clearImages).mockRejectedValueOnce(new Error('IndexedDB connection lost'))
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    expect(useStore.getState().showToast).toHaveBeenCalledWith(
+      '部分数据清空失败，请刷新页面后重试',
+      'error',
+    )
+  })
+
+  it('does not show error toast when all clears succeed', async () => {
+    await putDbTask(task({ id: 'task-1' }))
+    useStore.setState({ tasks: [task({ id: 'task-1' })] })
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('所选数据已清空', 'success')
+    expect(useStore.getState().showToast).not.toHaveBeenCalledWith(
+      '部分数据清空失败，请刷新页面后重试',
+      'error',
+    )
+  })
+
+  it('cancels pending fal recovery timers so cleared tasks do not resurrect', async () => {
+    // Setup a fal profile and a recoverable fal task
+    const falProfile = createDefaultFalProfile({ id: 'fal-profile', apiKey: 'fal-key' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [falProfile], activeProfileId: falProfile.id }),
+      showToast: vi.fn(),
+    })
+    const falTask = task({
+      id: 'fal-recoverable-task',
+      apiProvider: 'fal',
+      apiProfileId: 'fal-profile',
+      apiProfileName: 'fal',
+      apiModel: 'fal-model',
+      status: 'error',
+      error: '连接已断开，等待自动恢复',
+      falRequestId: 'fal-request-id',
+      falEndpoint: 'fal-endpoint',
+      falRecoverable: true,
+      finishedAt: null,
+      elapsed: null,
+    })
+    await putDbTask(falTask)
+    // initStore schedules a fal recovery timer (delayMs=0)
+    await initStore()
+
+    // Clear data — this must cancel the pending recovery timer
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    // Make getFalQueuedImageResult return a result so that IF the timer
+    // were still alive, it would write data back.
+    vi.mocked(getFalQueuedImageResult).mockResolvedValueOnce({
+      images: ['data:image/png;base64,resurrected'],
+      actualParams: { output_format: 'png' },
+      actualParamsList: [{ output_format: 'png' }],
+      revisedPrompts: [],
+    })
+
+    // Flush all pending timers + microtasks
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    // The task must NOT have been resurrected
+    expect((await getAllTasks()).length).toBe(0)
+    expect(useStore.getState().tasks.length).toBe(0)
+    // getFalQueuedImageResult should not have been called after clear
+    expect(vi.mocked(getFalQueuedImageResult)).not.toHaveBeenCalled()
+  })
+
+  it('cancels pending custom recovery timers so cleared tasks do not resurrect', async () => {
+    const customTask = task({
+      id: 'custom-recoverable-task',
+      apiProvider: 'custom',
+      customTaskId: 'custom-request-id',
+      status: 'error',
+      error: '连接已断开，等待自动恢复',
+      customRecoverable: true,
+      finishedAt: null,
+      elapsed: null,
+    })
+    await putDbTask(customTask)
+    await initStore()
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    // Flush timers
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    expect((await getAllTasks()).length).toBe(0)
   })
 })
