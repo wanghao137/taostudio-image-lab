@@ -12,6 +12,8 @@
 .local-tools/**
 .playwright-cli
 .playwright-cli/**
+.playwright-mcp
+.playwright-mcp/**
 .quality-models
 .quality-models/**
 .upstream

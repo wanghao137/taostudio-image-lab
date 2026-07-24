@@ -29,19 +29,28 @@ jobs:
         id: check
         run: |
           git remote add upstream https://github.com/CookSleep/gpt_image_playground.git
-          git fetch upstream main
+          git fetch upstream '+refs/tags/v*:refs/tags/upstream/v*' --force
 
           CURRENT_COMMIT=$(jq -r '.lastAppliedCommit' docs/upstream-upgrade-state.json)
-          UPSTREAM_COMMIT=$(git rev-parse upstream/main)
+          UPSTREAM_REF=$(git for-each-ref --format='%(refname)' refs/tags/upstream/ \
+            | sed 's#refs/tags/upstream/##' \
+            | sort -V \
+            | tail -n 1)
+          if [ -z "$UPSTREAM_REF" ]; then
+            echo "No upstream release tag found" >&2
+            exit 1
+          fi
+          UPSTREAM_COMMIT=$(git rev-parse "refs/tags/upstream/$UPSTREAM_REF^{commit}")
 
           if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
             echo "has_update=false" >> "$GITHUB_OUTPUT"
             echo "No upstream updates found"
           else
             echo "has_update=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_ref=$UPSTREAM_REF" >> "$GITHUB_OUTPUT"
             echo "upstream_sha=$UPSTREAM_COMMIT" >> "$GITHUB_OUTPUT"
             echo "short_sha=$(echo $UPSTREAM_COMMIT | head -c 7)" >> "$GITHUB_OUTPUT"
-            echo "Found upstream update: $CURRENT_COMMIT -> $UPSTREAM_COMMIT"
+            echo "Found upstream release: $CURRENT_COMMIT -> $UPSTREAM_REF ($UPSTREAM_COMMIT)"
           fi
 
       - name: Install dependencies
@@ -50,7 +59,7 @@ jobs:
 
       - name: Run upgrade
         if: steps.check.outputs.has_update == 'true'
-        run: npm run upgrade:upstream -- --install --verify
+        run: npm run upgrade:upstream -- --ref "${{ steps.check.outputs.upstream_ref }}" --install --verify
 
       - name: Read upgrade report
         if: steps.check.outputs.has_update == 'true'
@@ -70,12 +79,13 @@ jobs:
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: 'chore: sync upstream ${{ steps.check.outputs.short_sha }}'
-          title: 'chore: sync upstream ${{ steps.check.outputs.short_sha }}'
+          commit-message: 'chore: sync upstream ${{ steps.check.outputs.upstream_ref }}'
+          title: 'chore: sync upstream ${{ steps.check.outputs.upstream_ref }}'
           body: |
             ## Upstream Sync
 
             - **Upstream repo**: `CookSleep/gpt_image_playground`
+            - **Release**: `${{ steps.check.outputs.upstream_ref }}`
             - **New commit**: `${{ steps.check.outputs.upstream_sha }}`
 
             ### Upgrade Report
@@ -88,6 +98,18 @@ jobs:
           delete-branch: true
 
       - name: Create Issue on failure
+        if: failure()
+        run: |
+          if [ ! -f docs/upstream-upgrade-report.md ]; then
+            cat > docs/upstream-upgrade-report.md <<'EOF'
+          # Upstream Sync Failure
+
+          The automated release-tag sync failed before the upgrader produced a report.
+          Inspect the failed workflow step and rerun after correcting the infrastructure or migration issue.
+          EOF
+          fi
+
+      - name: Publish failure issue
         if: failure()
         uses: peter-evans/create-issue-from-file@v5
         with:

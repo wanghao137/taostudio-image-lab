@@ -1,8 +1,11 @@
 import { lazy, Suspense, useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ImageUp, Maximize2, SlidersHorizontal } from 'lucide-react'
-import { ALL_FAVORITES_COLLECTION_ID, deleteFavoriteCollection, getTaskFavoriteCollectionIds, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks, getCachedImage, ensureImageCached, getActiveAgentRounds } from '../store'
+import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks } from '../store'
 import { type TaskRecord } from '../types'
+import { getActiveAgentRounds } from '../lib/agentConversationState'
+import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState } from '../lib/favoriteState'
+import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
 import {
@@ -23,6 +26,10 @@ import ViewportTooltip from './ViewportTooltip'
 import { CloseIcon } from './icons'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
+
+function getTaskFavoriteCollectionIds(task: TaskRecord) {
+  return getTaskFavoriteCollectionIdsForState(task, useStore.getState().defaultFavoriteCollectionId)
+}
 
 function getMentionTagTextLength(el: Element) {
   return el.textContent?.length ?? 0

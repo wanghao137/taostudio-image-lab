@@ -1,4 +1,4 @@
-import type { AppSettings, RefusalRecoveryRecord, TaskParams } from '../types'
+import type { AppSettings, RefusalRecoveryRecord, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
 
 export const MIME_MAP: Record<string, string> = {
@@ -49,6 +49,24 @@ export function isDataUrl(value: unknown): value is string {
 
 export function normalizeBase64Image(value: string, fallbackMime: string): string {
   return value.startsWith('data:') ? value : `data:${fallbackMime};base64,${value}`
+}
+
+export function getResponsesImageResultBase64(result: ResponsesOutputItem['result']): string | undefined {
+  const b64 = typeof result === 'string'
+    ? result
+    : result && typeof result === 'object'
+    ? typeof result.b64_json === 'string'
+      ? result.b64_json
+      : typeof result.base64 === 'string'
+      ? result.base64
+      : typeof result.image === 'string'
+      ? result.image
+      : typeof result.data === 'string'
+      ? result.data
+      : ''
+    : ''
+
+  return b64.trim() ? b64 : undefined
 }
 
 function formatMiB(bytes: number): string {

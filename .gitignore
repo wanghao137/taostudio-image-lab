@@ -14,6 +14,8 @@ dev-proxy.config.json
 .local-task-api*/
 .zcode/config.json
 .playwright-cli/
+.playwright-mcp/
+.zcode/
 .local-tools/
 .benchmark-env/
 .quality-models/
