@@ -5875,17 +5875,64 @@ export interface ClearOptions {
 export async function clearData(options: ClearOptions = { clearConfig: true, clearTasks: true }) {
   const { setTasks, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
 
+  // 先取消所有恢复轮询 / 超时监控，防止清空期间或清空后有数据被写回 IndexedDB
   if (options.clearTasks) {
-    await dbClearTasks()
-    await dbClearAgentConversations()
-    await clearImages()
+    for (const timer of falRecoveryTimers.values()) clearTimeout(timer)
+    falRecoveryTimers.clear()
+    for (const timer of customRecoveryTimers.values()) clearTimeout(timer)
+    customRecoveryTimers.clear()
+    for (const timer of openAIWatchdogTimers.values()) clearTimeout(timer)
+    openAIWatchdogTimers.clear()
+  }
+
+  let clearTasksFailed = false
+  let clearAgentConversationsFailed = false
+  let clearImagesFailed = false
+  let clearConfigFailed = false
+
+  if (options.clearTasks) {
+    try {
+      await dbClearTasks()
+      setTasks([])
+      const remaining = await getAllTasks()
+      if (remaining.length > 0) {
+        clearTasksFailed = true
+        console.error('clearData: tasks 存储未完全清空，剩余 %d 条', remaining.length)
+      }
+    } catch (err) {
+      clearTasksFailed = true
+      console.error('clearData: 清空 tasks 失败', err)
+    }
+
+    try {
+      await dbClearAgentConversations()
+      useStore.setState({ agentConversations: [], activeAgentConversationId: null })
+      const remaining = await getAllAgentConversations()
+      if (remaining.length > 0) {
+        clearAgentConversationsFailed = true
+        console.error('clearData: agentConversations 存储未完全清空，剩余 %d 条', remaining.length)
+      }
+    } catch (err) {
+      clearAgentConversationsFailed = true
+      console.error('clearData: 清空 agentConversations 失败', err)
+    }
+
+    try {
+      await clearImages()
+      const remaining = await getAllImageIds()
+      if (remaining.length > 0) {
+        clearImagesFailed = true
+        console.error('clearData: images 存储未完全清空，剩余 %d 条', remaining.length)
+      }
+    } catch (err) {
+      clearImagesFailed = true
+      console.error('clearData: 清空 images/thumbnails 失败', err)
+    }
+
     imageCache.clear()
     thumbnailCache.clear()
     thumbnailBackfillIds.clear()
-    setTasks([])
     useStore.setState({
-      agentConversations: [],
-      activeAgentConversationId: null,
       supportPromptOpen: false,
       supportPromptSkippedForImportedData: false,
     })
@@ -5894,13 +5941,22 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
   }
 
   if (options.clearConfig) {
-    useStore.setState({ dismissedCodexCliPrompts: [], supportPromptDismissed: false })
-    await clearLocalAutoSaveDirectoryHandle()
-    setSettings({ ...DEFAULT_SETTINGS })
-    setParams({ ...DEFAULT_PARAMS })
+    try {
+      useStore.setState({ dismissedCodexCliPrompts: [], supportPromptDismissed: false })
+      await clearLocalAutoSaveDirectoryHandle()
+      setSettings({ ...DEFAULT_SETTINGS })
+      setParams({ ...DEFAULT_PARAMS })
+    } catch (err) {
+      clearConfigFailed = true
+      console.error('clearData: 清空配置失败', err)
+    }
   }
 
-  showToast('所选数据已清空', 'success')
+  const failed = clearTasksFailed || clearAgentConversationsFailed || clearImagesFailed || clearConfigFailed
+  showToast(
+    failed ? '部分数据清空失败，请刷新页面后重试' : '所选数据已清空',
+    failed ? 'error' : 'success',
+  )
 }
 
 async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<ReturnType<typeof getCustomQueuedImageResult>>) {
