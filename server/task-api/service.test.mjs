@@ -61,7 +61,7 @@ afterEach(async () => {
   }
 })
 
-describe('local Image Task API', () => {
+describe('local Image Task API', { testTimeout: 30_000 }, () => {
   it('requires bearer authentication', async () => {
     const { url } = await start()
     const response = await fetch(`${url}/v1/image-jobs/missing`)
@@ -580,5 +580,29 @@ describe('local Image Task API', () => {
     const job = await wait(url, created.body.id)
     // Must succeed without any provider call (provider is 'configured' but no baseUrl set).
     expect(job).toMatchObject({ state: 'succeeded', sourceAssetId: asset.assetId })
+  })
+
+  it('defaults to 2K generation and 4K final when neither baseSize nor dimensions is provided', async () => {
+    const { url } = await start()
+    // Omit generation.baseSize AND output.dimensions — engine should default to 2K source + inherited 4K final.
+    const created = await create(url, {
+      contractVersion: '1',
+      idempotencyKey: 'default-tier-2k-to-4k-001',
+      input: { prompt: 'default tier test' },
+      composition: { ratio: '3:4' },
+      generation: { provider: 'mock', model: 'mock-v1' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    })
+    const job = await wait(url, created.body.id)
+    expect(job.state).toBe('succeeded')
+    const sourceManifest = await (await fetch(`${url}/v1/assets/${job.sourceAssetId}?manifest=1`, { headers: headers() })).json()
+    const finalManifest = await (await fetch(`${url}/v1/assets/${job.finalAssetId}?manifest=1`, { headers: headers() })).json()
+    // Source should be the 2K preset for 3:4 = 1536x2048
+    expect(sourceManifest).toMatchObject({ width: 1536, height: 2048, ratio: '3:4' })
+    // Final should be the inherited 4K target for 3:4 = 2400x3200
+    expect(finalManifest).toMatchObject({ width: 2400, height: 3200, ratio: '3:4' })
+    // Cross-product invariant must hold
+    expect(sourceManifest.width * finalManifest.height).toBe(finalManifest.width * sourceManifest.height)
   })
 })

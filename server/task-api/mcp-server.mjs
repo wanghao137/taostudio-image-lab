@@ -11,6 +11,11 @@ const baseUrl = process.env.IMAGE_TASK_API_URL || 'http://127.0.0.1:9789'
 const token = process.env.IMAGE_TASK_API_TOKEN
 if (!token) throw new Error('IMAGE_TASK_API_TOKEN is required')
 
+const PRESET_4K = {
+  '1:1': '2880x2880', '3:2': '3456x2304', '2:3': '2304x3456', '16:9': '3840x2160',
+  '9:16': '2160x3840', '4:3': '3200x2400', '3:4': '2400x3200', '21:9': '3840x1646',
+}
+
 async function api(path, init = {}) {
   const response = await fetch(new URL(path, baseUrl), {
     ...init,
@@ -59,7 +64,11 @@ server.registerTool('image_job_create', {
     idempotencyKey: z.string().min(8).max(200),
     prompt: z.string().min(1).optional(),
     ratio: z.enum(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
-    dimensions: z.string().regex(/^\d+x\d+$/),
+    dimensions: z.string().regex(/^\d+x\d+$/).optional().describe(
+      'Final output pixels. Optional — defaults to the 4K preset for the given ratio. '
+      + '4K presets: 1:1=2880x2880 3:2=3456x2304 2:3=2304x3456 16:9=3840x2160 '
+      + '9:16=2160x3840 4:3=3200x2400 3:4=2400x3200 21:9=3840x1646.'
+    ),
     provider: z.string().min(1).default('mock'),
     model: z.string().min(1).default('mock-v1'),
     apiMode: z.enum(['images', 'responses']).optional(),
@@ -70,6 +79,7 @@ server.registerTool('image_job_create', {
     testBehavior: z.enum(['fail', 'fail-once', 'timeout']).optional(),
   },
 }, async (input) => {
+  const dimensions = input.dimensions || PRESET_4K[input.ratio]
   const response = await api('/v1/image-jobs', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -79,7 +89,7 @@ server.registerTool('image_job_create', {
       input: { ...(input.prompt ? { prompt: input.prompt } : {}), ...(input.sourceAssetId ? { sourceAssetId: input.sourceAssetId } : {}) },
       composition: { ratio: input.ratio },
       generation: { provider: input.provider, model: input.model, ...(input.apiMode ? { apiMode: input.apiMode } : {}), ...(input.testBehavior ? { testBehavior: input.testBehavior } : {}) },
-      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: input.dimensions, enhancement: input.enhancement, contentClass: input.contentClass },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions, enhancement: input.enhancement, contentClass: input.contentClass },
       retry: { maxAttempts: input.maxAttempts },
     }),
   })

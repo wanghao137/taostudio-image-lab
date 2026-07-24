@@ -328,7 +328,7 @@ async function mockGenerate(request, signal, attempt) {
   }
   if (request.generation?.testBehavior === 'fail') throw Object.assign(new Error('mock provider failure'), { retryable: true })
   if (request.generation?.testBehavior === 'fail-once' && attempt === 1) throw Object.assign(new Error('mock provider transient failure'), { retryable: true })
-  const baseSize = request.generation?.baseSize || calculateImageSize('1K', request.composition.ratio)
+  const baseSize = request.generation?.baseSize || calculateImageSize('2K', request.composition.ratio)
   const dimensions = parseImageSize(baseSize)
   if (!dimensions) throw new Error('mock provider could not resolve base size')
   const svg = Buffer.from(`<svg width="${dimensions.width}" height="${dimensions.height}" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#f4f4f0"/><rect x="5%" y="5%" width="90%" height="90%" fill="#1778f2"/><circle cx="50%" cy="50%" r="20%" fill="#ffffff"/></svg>`)
@@ -346,7 +346,7 @@ async function compatibleGenerate(request, providerConfig, signal) {
     body: JSON.stringify({
       model: request.generation.model || providerConfig.model,
       prompt: providerPrompt(request),
-      size: request.generation.baseSize || calculateImageSize('1K', request.composition.ratio),
+      size: request.generation.baseSize || calculateImageSize('2K', request.composition.ratio),
       quality: 'high',
       output_format: 'png',
       n: 1,
@@ -413,7 +413,7 @@ async function compatibleEdit(request, providerConfig, sourceBuffer, signal) {
   const formData = new FormData()
   formData.append('model', request.generation.model || providerConfig.model)
   formData.append('prompt', request.input.prompt)
-  formData.append('size', request.generation.baseSize || calculateImageSize('1K', request.composition.ratio))
+  formData.append('size', request.generation.baseSize || calculateImageSize('2K', request.composition.ratio))
   formData.append('quality', 'high')
   formData.append('output_format', 'png')
   formData.append('n', '1')
@@ -541,7 +541,7 @@ async function responsesGenerate(request, providerConfig, signal, sourceBuffer) 
       tools: [{
         type: 'image_generation',
         action: isEdit ? 'edit' : 'generate',
-        size: request.generation.baseSize || calculateImageSize('1K', request.composition.ratio),
+        size: request.generation.baseSize || calculateImageSize('2K', request.composition.ratio),
         output_format: 'png',
         quality: 'high',
         moderation: 'low',
@@ -617,7 +617,7 @@ async function normalizeSourceCanvas(request, rawBuffer) {
   }
   const providerDimensions = { width: metadata.width, height: metadata.height }
   const requestedRatio = parseRatio(request.composition?.ratio)
-  const baseSize = request.generation?.baseSize || calculateImageSize('1K', request.composition?.ratio)
+  const baseSize = request.generation?.baseSize || calculateImageSize('2K', request.composition?.ratio)
   const target = parseImageSize(baseSize)
   const outputTarget = parseImageSize(request.output?.dimensions)
   const ratioTarget = outputTarget || target
