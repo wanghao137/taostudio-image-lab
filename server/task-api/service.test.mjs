@@ -467,4 +467,118 @@ describe('local Image Task API', () => {
     expect(created.response.status).toBe(400)
     expect(created.body.error.details).toEqual(expect.arrayContaining([expect.stringMatching(/apiMode/)]))
   })
+
+  it('routes an edit-mode job (sourceAssetId + prompt) through /images/edits', async () => {
+    const png = await sharp({ create: { width: 1024, height: 1024, channels: 4, background: '#3388cc' } }).png().toBuffer()
+    let editRequests = []
+    const provider = createServer((incoming, response) => {
+      let chunks = []
+      incoming.on('data', (chunk) => { chunks.push(chunk) })
+      incoming.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8')
+        editRequests.push({ url: incoming.url, contentType: incoming.headers['content-type'] || '', bodyStart: body.slice(0, 200) })
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
+      })
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'gpt-image-2' } })
+
+    // Upload a reference image
+    const refPng = await sharp({ create: { width: 1024, height: 1024, channels: 4, background: '#cc4422' } }).png().toBuffer()
+    const uploaded = await fetch(`${url}/v1/assets/uploads`, { method: 'POST', headers: headers({ 'content-type': 'image/png', 'x-file-name': 'ref.png' }), body: refPng })
+    expect(uploaded.status).toBe(201)
+    const asset = await uploaded.json()
+
+    // Edit mode: sourceAssetId + prompt together triggers image-to-image
+    const created = await create(url, request({
+      idempotencyKey: 'edit-mode-images-001',
+      input: { sourceAssetId: asset.assetId, prompt: 'make it look like a watercolor painting' },
+      composition: { ratio: '1:1' },
+      generation: { provider: 'configured', model: 'gpt-image-2', baseSize: '1024x1024', apiMode: 'images' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x2160', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ state: 'succeeded' })
+    // The request must have hit /images/edits (not /images/generations).
+    expect(editRequests).toHaveLength(1)
+    expect(editRequests[0].url).toBe('/v1/images/edits')
+    // The request must be multipart/form-data (not JSON).
+    expect(editRequests[0].contentType).toMatch(/multipart\/form-data/)
+    // Source and final must exist and be ratio-matched.
+    expect(job.sourceAssetId).toMatch(/^asset_/)
+    expect(job.finalAssetId).toMatch(/^asset_/)
+    const finalManifest = await (await fetch(`${url}/v1/assets/${job.finalAssetId}?manifest=1`, { headers: headers() })).json()
+    expect(finalManifest).toMatchObject({ width: 2160, height: 2160, ratio: '1:1' })
+  })
+
+  it('routes an edit-mode job through /responses with action edit and multimodal input', async () => {
+    const png = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#55aa55' } }).png().toBuffer()
+    let editRequests = []
+    const provider = createServer((incoming, response) => {
+      let body = ''
+      incoming.on('data', (chunk) => { body += chunk })
+      incoming.on('end', () => {
+        editRequests.push({ url: incoming.url, body })
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({
+          id: 'resp_edit',
+          status: 'completed',
+          output: [{ id: 'ig_edit', type: 'image_generation_call', status: 'completed', result: png.toString('base64') }],
+        }))
+      })
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'gpt-5.6-sol' } })
+
+    const refPng = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#9933cc' } }).png().toBuffer()
+    const uploaded = await fetch(`${url}/v1/assets/uploads`, { method: 'POST', headers: headers({ 'content-type': 'image/png', 'x-file-name': 'ref.png' }), body: refPng })
+    const asset = await uploaded.json()
+
+    const created = await create(url, request({
+      idempotencyKey: 'edit-mode-responses-001',
+      input: { sourceAssetId: asset.assetId, prompt: 'transform into a vintage poster' },
+      composition: { ratio: '9:16' },
+      generation: { provider: 'configured', model: 'gpt-5.6-sol', baseSize: '720x1280', apiMode: 'responses' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x3840', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    expect(job).toMatchObject({ state: 'succeeded' })
+    expect(editRequests).toHaveLength(1)
+    expect(editRequests[0].url).toBe('/v1/responses')
+    const parsed = JSON.parse(editRequests[0].body)
+    // The tool action must be 'edit' (not 'generate').
+    expect(parsed.tools[0]).toMatchObject({ type: 'image_generation', action: 'edit' })
+    // The input must be a multimodal array (not a plain string).
+    expect(Array.isArray(parsed.input)).toBe(true)
+    expect(parsed.input[0].content).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'input_text' }),
+      expect.objectContaining({ type: 'input_image' }),
+    ]))
+  })
+
+  it('still routes a source-only job (no prompt) through local normalization, not the provider', async () => {
+    const { url } = await start()
+    const refPng = await sharp({ create: { width: 1024, height: 768, channels: 4, background: '#2244aa' } }).png().toBuffer()
+    const uploaded = await fetch(`${url}/v1/assets/uploads`, { method: 'POST', headers: headers({ 'content-type': 'image/png', 'x-file-name': 'ref.png' }), body: refPng })
+    const asset = await uploaded.json()
+    // sourceAssetId WITHOUT prompt — backward-compatible local scaling path.
+    const created = await create(url, request({
+      idempotencyKey: 'source-only-compat-001',
+      input: { sourceAssetId: asset.assetId },
+      composition: { ratio: '4:3' },
+      generation: { provider: 'configured', model: 'unused-no-call' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '2160x1620', enhancement: 'lanczos3', contentClass: 'photo' },
+      retry: { maxAttempts: 3 },
+    }))
+    const job = await wait(url, created.body.id)
+    // Must succeed without any provider call (provider is 'configured' but no baseUrl set).
+    expect(job).toMatchObject({ state: 'succeeded', sourceAssetId: asset.assetId })
+  })
 })

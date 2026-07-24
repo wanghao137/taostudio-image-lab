@@ -401,6 +401,82 @@ async function compatibleGenerate(request, providerConfig, signal) {
   throw providerPayloadError(payload, true)
 }
 
+// Image edit (image-to-image): POST /images/edits with multipart FormData.
+// Sends the source image + prompt to the provider so it generates a NEW image
+// based on the reference. Used when input.sourceAssetId + input.prompt are both
+// present and apiMode === 'images'. Returns a raw image Buffer.
+async function compatibleEdit(request, providerConfig, sourceBuffer, signal) {
+  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
+  const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
+  const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/images/edits`)
+
+  const formData = new FormData()
+  formData.append('model', request.generation.model || providerConfig.model)
+  formData.append('prompt', request.input.prompt)
+  formData.append('size', request.generation.baseSize || calculateImageSize('1K', request.composition.ratio))
+  formData.append('quality', 'high')
+  formData.append('output_format', 'png')
+  formData.append('n', '1')
+  // Source image as PNG blob — the provider sees this as the reference to edit
+  const imageBlob = new Blob([sourceBuffer], { type: 'image/png' })
+  formData.append('image[]', imageBlob, 'source.png')
+
+  const response = await providerFetch(endpoint, {
+    method: 'POST',
+    signal,
+    headers: { authorization: `Bearer ${providerConfig.apiKey}` },
+    body: formData,
+  }, 'edit-request')
+
+  const contentType = response.headers.get('content-type') || ''
+  const responseText = await providerResponseText(response, signal)
+  const isJson = contentType.toLowerCase().includes('application/json')
+  if (!response.ok) {
+    let errorPayload = null
+    if (isJson) {
+      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
+    }
+    const error = errorPayload
+      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
+      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
+          code: 'PROVIDER_HTTP_ERROR',
+          retryable: response.status === 429 || response.status >= 500,
+          diagnostics: responseShape(responseText),
+        })
+    error.httpStatus = response.status
+    throw error
+  }
+  if (!isJson) {
+    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
+    })
+  }
+  let payload
+  try {
+    payload = JSON.parse(responseText)
+  } catch {
+    throw Object.assign(new Error('provider returned malformed JSON'), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType, ...responseShape(responseText) },
+    })
+  }
+  const entry = payload?.data?.[0]
+  if (entry?.b64_json) return Buffer.from(entry.b64_json, 'base64')
+  if (entry?.url) {
+    const imageResponse = await providerFetch(entry.url, { signal }, 'asset-download')
+    if (!imageResponse.ok) throw Object.assign(new Error(`provider asset returned HTTP ${imageResponse.status}`), { retryable: true })
+    try {
+      return Buffer.from(await imageResponse.arrayBuffer())
+    } catch (error) {
+      throw providerNetworkError(error, 'asset-body', signal)
+    }
+  }
+  throw providerPayloadError(payload, true)
+}
+
 // Extract base64 image bytes from a Responses API image_generation_call result.
 // The result may be a bare base64 string or an object exposing one of several
 // known keys, mirroring the frontend ResponsesOutputItem handling.
@@ -437,21 +513,34 @@ function responsesOutputTextMessages(output) {
 // tool. Used by text models that expose image output through the Responses
 // API (e.g. gpt-5.6-sol) when generation.apiMode === 'responses'. Returns a
 // raw image Buffer that feeds the same normalize/enhance/finalize pipeline
-// as images mode.
-async function responsesGenerate(request, providerConfig, signal) {
+// as images mode. When sourceBuffer is provided, switches to edit mode
+// (action:'edit' + multimodal input with the reference image).
+async function responsesGenerate(request, providerConfig, signal, sourceBuffer) {
   if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
   const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
   const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/responses`)
+  const isEdit = Buffer.isBuffer(sourceBuffer)
+  const promptText = providerPrompt(request)
+  // For edit mode, build multimodal input with the reference image as a data URL
+  const inputPayload = isEdit
+    ? [{
+        role: 'user',
+        content: [
+          { type: 'input_text', text: promptText },
+          { type: 'input_image', image_url: `data:image/png;base64,${sourceBuffer.toString('base64')}` },
+        ],
+      }]
+    : promptText
   const response = await providerFetch(endpoint, {
     method: 'POST',
     signal,
     headers: { authorization: `Bearer ${providerConfig.apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       model: request.generation.model || providerConfig.model,
-      input: providerPrompt(request),
+      input: inputPayload,
       tools: [{
         type: 'image_generation',
-        action: 'generate',
+        action: isEdit ? 'edit' : 'generate',
         size: request.generation.baseSize || calculateImageSize('1K', request.composition.ratio),
         output_format: 'png',
         quality: 'high',
@@ -459,7 +548,7 @@ async function responsesGenerate(request, providerConfig, signal) {
       }],
       tool_choice: 'required',
     }),
-  }, 'generation-request')
+  }, isEdit ? 'edit-request' : 'generation-request')
   const contentType = response.headers.get('content-type') || ''
   const responseText = await providerResponseText(response, signal)
   const isJson = contentType.toLowerCase().includes('application/json')
@@ -629,7 +718,37 @@ export class TaskWorkerPool {
       this.repository.transition(jobId, 'generating')
       stage = 'generating'
       let sourceManifest
-      if (request.input.sourceAssetId) {
+      const isEditMode = request.input.sourceAssetId && request.input.prompt
+      if (isEditMode) {
+        // Image-to-image (edit): read the uploaded reference image, send it to
+        // the provider's edit endpoint with the prompt, and use the returned
+        // NEW image as the source canvas.
+        const existing = this.repository.getAsset(request.input.sourceAssetId)
+        if (!existing) throw Object.assign(new Error('source asset not found'), { retryable: false })
+        const referenceBuffer = await readFile(existing.filePath)
+        const controller = new AbortController()
+        this.controllers.set(jobId, controller)
+        const timeout = setTimeout(() => controller.abort(new Error('provider timeout')), this.providerTimeoutMs)
+        let sourceBuffer
+        let sourceTransform = null
+        try {
+          const apiMode = request.generation.apiMode || 'images'
+          const providerBuffer = request.generation.provider === 'mock'
+            ? await mockGenerate(request, controller.signal, this.repository.getJob(jobId).attempts)
+            : apiMode === 'responses'
+              ? await responsesGenerate(request, this.providerConfig, controller.signal, referenceBuffer)
+              : await compatibleEdit(request, this.providerConfig, referenceBuffer, controller.signal)
+          const normalized = await normalizeSourceCanvas(request, providerBuffer)
+          sourceBuffer = normalized.buffer
+          sourceTransform = normalized.transform
+        } finally {
+          clearTimeout(timeout)
+          this.controllers.delete(jobId)
+        }
+        sourceManifest = await this.createStoredAsset(jobId, 'source', sourceBuffer, existing.manifest.assetId, sourceTransform)
+      } else if (request.input.sourceAssetId) {
+        // Source-only (no prompt): use the uploaded asset directly as the source
+        // canvas, normalizing ratio locally. No provider call. Backward compatible.
         const existing = this.repository.getAsset(request.input.sourceAssetId)
         if (!existing) throw Object.assign(new Error('source asset not found'), { retryable: false })
         const rawBuffer = await readFile(existing.filePath)

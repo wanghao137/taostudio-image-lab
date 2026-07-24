@@ -57,7 +57,7 @@ server.registerTool('image_job_create', {
   description: 'Create one idempotent image job. Reuse the same idempotencyKey for retries of the same intent.',
   inputSchema: {
     idempotencyKey: z.string().min(8).max(200),
-    prompt: z.string().min(1),
+    prompt: z.string().min(1).optional(),
     ratio: z.enum(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
     dimensions: z.string().regex(/^\d+x\d+$/),
     provider: z.string().min(1).default('mock'),
@@ -76,7 +76,7 @@ server.registerTool('image_job_create', {
     body: JSON.stringify({
       contractVersion: '1',
       idempotencyKey: input.idempotencyKey,
-      input: { prompt: input.prompt, ...(input.sourceAssetId ? { sourceAssetId: input.sourceAssetId } : {}) },
+      input: { ...(input.prompt ? { prompt: input.prompt } : {}), ...(input.sourceAssetId ? { sourceAssetId: input.sourceAssetId } : {}) },
       composition: { ratio: input.ratio },
       generation: { provider: input.provider, model: input.model, ...(input.apiMode ? { apiMode: input.apiMode } : {}), ...(input.testBehavior ? { testBehavior: input.testBehavior } : {}) },
       output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: input.dimensions, enhancement: input.enhancement, contentClass: input.contentClass },
