@@ -1,12 +1,21 @@
 openapi: 3.1.0
 info:
   title: TaoStudio Image Task API
-  version: 1.0.0
+  version: 1.1.0
 servers:
   - url: http://127.0.0.1:9789
 security:
   - bearerAuth: []
 paths:
+  /v1/capabilities:
+    get:
+      operationId: getImageTaskCapabilities
+      responses:
+        '200':
+          description: Engine contract and implemented capabilities
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageTaskCapabilities' }
   /v1/assets/uploads:
     post:
       operationId: uploadImageAsset
@@ -16,8 +25,35 @@ paths:
           image/png:
             schema: { type: string, contentEncoding: binary }
       responses:
-        '201': { description: Uploaded source asset }
+        '201':
+          description: Uploaded source asset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadedImageAsset' }
+        '200':
+          description: Existing immutable upload returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadedImageAsset' }
   /v1/image-jobs:
+    get:
+      operationId: listImageJobs
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: state
+          in: query
+          schema: { $ref: '#/components/schemas/ImageJobState' }
+      responses:
+        '200':
+          description: Newest-first cursor page of image jobs
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageJobList' }
     post:
       operationId: createImageJob
       requestBody:
@@ -27,8 +63,16 @@ paths:
             schema:
               $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
       responses:
-        '201': { description: Job created }
-        '200': { description: Existing idempotent job returned }
+        '201':
+          description: Job created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageJob' }
+        '200':
+          description: Existing idempotent job returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageJob' }
         '409': { description: Idempotency key conflict }
   /v1/image-jobs/{id}:
     get:
@@ -36,26 +80,154 @@ paths:
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        '200': { description: Job and transition events }
+        '200':
+          description: Job and transition events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageJob' }
+        '404': { description: Job not found }
   /v1/image-jobs/{id}/cancel:
     post:
       operationId: cancelImageJob
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
-        '200': { description: Cancellation state }
+        '200':
+          description: Cancellation state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageJob' }
+        '404': { description: Job not found }
   /v1/assets/{id}:
     get:
       operationId: getImageAsset
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
+        - name: manifest
+          in: query
+          description: Set to 1 to return the JSON manifest instead of PNG bytes.
+          schema: { type: string, enum: ['1'] }
       responses:
         '200':
-          description: PNG bytes
+          description: Immutable PNG bytes or its manifest
           content:
             image/png: { schema: { type: string, contentEncoding: binary } }
+            application/json:
+              schema:
+                $ref: ../../packages/image-job-core/schemas/image-asset-manifest-v1.schema.json
+        '404': { description: Asset not found }
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
+  schemas:
+    ImageJobState:
+      type: string
+      enum: [queued, validating, generating, source_ready, enhancing, finalizing, succeeded, failed, cancelled]
+    ImageJobEvent:
+      type: object
+      required: [state, detail, createdAt]
+      properties:
+        state: { $ref: '#/components/schemas/ImageJobState' }
+        detail: { type: [object, 'null'], additionalProperties: true }
+        createdAt: { type: string, format: date-time }
+    ImageJob:
+      type: object
+      required: [id, contractVersion, request, state, attempts, maxAttempts, cancelRequested, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        contractVersion: { const: '1' }
+        request:
+          $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
+        state: { $ref: '#/components/schemas/ImageJobState' }
+        attempts: { type: integer, minimum: 0 }
+        maxAttempts: { type: integer, minimum: 1, maximum: 5 }
+        cancelRequested: { type: boolean }
+        sourceAssetId: { type: [string, 'null'] }
+        finalAssetId: { type: [string, 'null'] }
+        error: { type: [object, 'null'], additionalProperties: true }
+        result: { type: [object, 'null'], additionalProperties: true }
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/ImageJobEvent' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ImageJobList:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ImageJob' }
+        nextCursor: { type: [string, 'null'] }
+    UploadedImageAsset:
+      type: object
+      required: [assetId, manifest]
+      properties:
+        assetId: { type: string }
+        manifest:
+          $ref: ../../packages/image-job-core/schemas/image-asset-manifest-v1.schema.json
+    ImageTaskCapabilities:
+      type: object
+      required: [service, apiVersion, contractVersion, manifestVersion, capabilities]
+      properties:
+        service: { const: taostudio-image-task-api }
+        apiVersion: { const: '1' }
+        contractVersion: { const: '1' }
+        manifestVersion: { const: '1' }
+        capabilities:
+          type: object
+          required: [inputModes, apiModes, ratios, generation, output, retry, upload, jobs, events]
+          properties:
+            inputModes:
+              type: array
+              items: { type: string, enum: [prompt, source, edit] }
+            apiModes:
+              type: array
+              items: { type: string, enum: [images, responses] }
+            ratios:
+              type: array
+              items: { type: string }
+            generation:
+              type: object
+              required: [defaultProvider, defaultModel]
+              properties:
+                defaultProvider: { const: configured }
+                defaultModel: { type: [string, 'null'] }
+            output:
+              type: object
+              required: [formats, qualities, acceptedEnhancements, implementedEnhancements, enhancementFallback, maxEdge, maxPixels]
+              properties:
+                formats: { type: array, items: { const: png } }
+                qualities: { type: array, items: { const: high } }
+                acceptedEnhancements:
+                  type: array
+                  items: { type: string, enum: [auto, none, lanczos3, real-esrgan, hat] }
+                implementedEnhancements: { type: array, items: { type: string } }
+                enhancementFallback: { type: string }
+                maxEdge: { type: integer }
+                maxPixels: { type: integer }
+            retry:
+              type: object
+              required: [maxAttempts]
+              properties:
+                maxAttempts: { type: integer, minimum: 1, maximum: 5 }
+            upload:
+              type: object
+              required: [mediaTypes, maxBytes]
+              properties:
+                mediaTypes: { type: array, items: { const: image/png } }
+                maxBytes: { type: integer }
+            jobs:
+              type: object
+              required: [states, defaultListLimit, maxListLimit]
+              properties:
+                states: { type: array, items: { $ref: '#/components/schemas/ImageJobState' } }
+                defaultListLimit: { type: integer }
+                maxListLimit: { type: integer }
+            events:
+              type: object
+              required: [transport]
+              properties:
+                transport: { const: polling }

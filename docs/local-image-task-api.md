@@ -39,6 +39,8 @@ IMAGE_TASK_API_PORT=9789
 IMAGE_TASK_API_CONCURRENCY=1
 IMAGE_TASK_API_PROVIDER_TIMEOUT_MS=300000
 IMAGE_TASK_API_PROVIDER_RETRY_BASE_MS=15000
+# 逗号分隔；仅在使用非 localhost 页面连接本机引擎时配置
+IMAGE_TASK_API_ALLOWED_ORIGINS=https://image.taostudioai.com
 IMAGE_TASK_PROVIDER_BASE_URL=https://provider.example/v1
 IMAGE_TASK_PROVIDER_API_KEY=provider-secret
 IMAGE_TASK_PROVIDER_MODEL=gpt-image-2
@@ -53,6 +55,8 @@ npm run task-api
 ```http
 Authorization: Bearer <IMAGE_TASK_API_TOKEN>
 ```
+
+浏览器工作台中的连接信息只保存在当前标签页会话的 `sessionStorage`，关闭标签页后清除，不应把本地 token 写入公开部署的 `VITE_IMAGE_TASK_API_TOKEN`。开发环境仍可使用 `VITE_IMAGE_TASK_API_URL` 和 `VITE_IMAGE_TASK_API_TOKEN` 作为回退配置。非 localhost 页面连接本机引擎时，必须用 `IMAGE_TASK_API_ALLOWED_ORIGINS` 显式列出页面 origin；服务不会接受通配来源。
 
 ## 创建任务
 
@@ -118,7 +122,9 @@ Responses mode 的失败处理与 images mode 有一个关键差异：Responses 
 
 ## 端点
 
+- `GET /v1/capabilities`：读取引擎真实支持的输入模式、API 模式、默认模型、比例、输出和分页限制。默认模型名用于客户端创建完整、可审计的任务请求，不包含 Provider 凭据。
 - `POST /v1/assets/uploads`：上传不可变 PNG；相同字节返回同一资产 ID。
+- `GET /v1/image-jobs?limit=30&cursor=...&state=...`：按新到旧读取可恢复的任务页。
 - `POST /v1/image-jobs`：创建或重放幂等任务。
 - `GET /v1/image-jobs/{id}`：读取状态、尝试次数、错误和事件。
 - `POST /v1/image-jobs/{id}/cancel`：取消排队任务或中断 Provider 请求。
@@ -126,6 +132,8 @@ Responses mode 的失败处理与 images mode 有一个关键差异：Responses 
 - `GET /v1/assets/{id}?manifest=1`：读取资产清单。
 
 状态顺序：`queued -> validating -> generating -> source_ready -> enhancing -> finalizing -> succeeded`。瞬时错误会先进入 `failed`，再按退避时间回到 `queued`。
+
+任务响应包含创建时的 Image Job Contract 请求。浏览器可以从任务列表恢复提示词、比例、Provider、模型和输出目标，不需要把本地 IndexedDB 当成服务端任务事实源。列表使用不透明 cursor；客户端不得解析或自行构造 cursor。
 
 ## 错误处理
 
@@ -161,3 +169,19 @@ Responses mode 的失败处理与 images mode 有一个关键差异：Responses 
 这个服务当前是本地参考实现。生产化需要独立 API 入口、持久数据库、R2/S3、耐久队列和长生命周期 Node worker。Vercel 前端部署不等于 Task API 已部署，长耗时 4K 任务也不应只依赖 Vercel Function。
 
 OpenAPI 定义位于 `server/task-api/openapi.yaml`。
+
+## 平台与开源仓库的事实源
+
+`server/task-api` 和 `packages/image-job-core` 是引擎与契约的平台事实源。独立开源仓库 `wanghao137/image-asset-pipeline` 是可发布镜像，不维护第二套服务实现。
+
+同步或检查独立仓库时同时执行：
+
+```powershell
+node scripts\sync-independent-skill-core.mjs <image-asset-pipeline-directory>
+node scripts\sync-skill-engine.mjs <image-asset-pipeline-directory>
+
+node scripts\sync-independent-skill-core.mjs <image-asset-pipeline-directory> --check
+node scripts\sync-skill-engine.mjs <image-asset-pipeline-directory> --check
+```
+
+引擎同步包含 `service.mjs`、CLI、MCP server、服务测试和 `openapi.yaml`。界面实现应先读取 `/v1/capabilities`，只展示 `implementedEnhancements` 中声明为真实实现的增强能力；`acceptedEnhancements` 还可能包含会回退到 Lanczos3 的兼容值。

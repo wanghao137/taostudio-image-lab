@@ -19,6 +19,7 @@ const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
 
 let customProviderConfigUrlImportStarted = false
 const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
+const EngineWorkspace = lazy(() => import('./components/EngineWorkspace'))
 const TaskGrid = lazy(() => import('./components/TaskGrid'))
 const DetailModal = lazy(() => import('./components/DetailModal'))
 const Lightbox = lazy(() => import('./components/Lightbox'))
@@ -189,7 +190,11 @@ export default function App() {
     <>
       {isMobile ? (
         <MobileShell onOpenCompose={() => setComposeOpen(true)}>
-          {appMode === 'agent' ? (
+          {appMode === 'engine' ? (
+            <Suspense fallback={<div className="min-h-[320px]" />}>
+              <EngineWorkspace />
+            </Suspense>
+          ) : appMode === 'agent' ? (
             <div className="safe-area-x">
               <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
                 智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
@@ -217,7 +222,11 @@ export default function App() {
       ) : (
         <>
           <Header />
-          {appMode === 'agent' ? (
+          {appMode === 'engine' ? (
+            <Suspense fallback={<div className="min-h-[320px]" />}>
+              <EngineWorkspace />
+            </Suspense>
+          ) : appMode === 'agent' ? (
             <Suspense fallback={null}>
               <AgentWorkspace />
             </Suspense>
@@ -238,7 +247,7 @@ export default function App() {
               </div>
             </main>
           )}
-          <InputBar />
+          {appMode !== 'engine' && <InputBar />}
         </>
       )}
 

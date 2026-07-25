@@ -21,6 +21,10 @@ const api = await createTaskApi({
   concurrency: Number(value('IMAGE_TASK_API_CONCURRENCY', '1')),
   providerTimeoutMs: Number(value('IMAGE_TASK_API_PROVIDER_TIMEOUT_MS', '300000')),
   providerRetryBaseMs: Number(value('IMAGE_TASK_API_PROVIDER_RETRY_BASE_MS', '15000')),
+  allowedOrigins: value('IMAGE_TASK_API_ALLOWED_ORIGINS')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
   providerConfig: {
     baseUrl: value('IMAGE_TASK_PROVIDER_BASE_URL') || value('IMAGE_API_BASE_URL'),
     apiKey: value('IMAGE_TASK_PROVIDER_API_KEY') || value('IMAGE_API_KEY'),

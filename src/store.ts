@@ -71,6 +71,7 @@ import { calculateImageSize, formatImageRatio, parseImageSize } from './lib/size
 import {
   executeImageTask,
   readLocalImageTaskApiConfig,
+  type ImageJobV1,
   uploadImageAsset,
 } from './lib/imageTaskApi'
 import {
@@ -524,12 +525,31 @@ export const useStore = create<AppState>()(
             selectedTaskIds: [],
             selectedFavoriteCollectionIds: [],
             agentEditingRoundId: null,
-            ...(state.appMode === 'agent' ? restoreGalleryInputDraftState(galleryInputDraft) : {}),
+            ...(state.appMode !== 'gallery' ? restoreGalleryInputDraftState(galleryInputDraft) : {}),
           }))
           return
         }
 
         const state = get()
+        if (appMode === 'engine') {
+          const agentInputDrafts = state.appMode === 'agent'
+            ? saveActiveAgentInputDrafts(state)
+            : state.agentInputDrafts
+          const galleryInputDraft = state.appMode === 'gallery'
+            ? saveGalleryInputDraft(state)
+            : state.galleryInputDraft
+          set({
+            appMode,
+            agentInputDrafts,
+            galleryInputDraft,
+            agentMobileHeaderVisible: true,
+            selectedTaskIds: [],
+            selectedFavoriteCollectionIds: [],
+            agentEditingRoundId: null,
+          })
+          return
+        }
+
         const settings = normalizeSettings(state.settings)
         const activeProfile = getActiveApiProfile(settings)
         const agentValidationError = getAgentProfileValidationError(settings)
@@ -2916,6 +2936,26 @@ async function executeAgentRound(
     }) => {
       const taskApiConfig = readLocalImageTaskApiConfig()
       if (taskApiConfig) {
+        const persistImageTaskLink = (job: ImageJobV1) => {
+          const next = {
+            jobId: job.id,
+            state: job.state,
+            attempts: job.attempts,
+            maxAttempts: job.maxAttempts,
+            sourceAssetId: job.sourceAssetId,
+            finalAssetId: job.finalAssetId,
+            updatedAt: job.updatedAt,
+          }
+          const current = useStore.getState().tasks.find((task) => task.id === opts.taskId)?.imageTask
+          if (
+            current?.jobId === next.jobId
+            && current.state === next.state
+            && current.attempts === next.attempts
+            && current.sourceAssetId === next.sourceAssetId
+            && current.finalAssetId === next.finalAssetId
+          ) return
+          updateTaskInStore(opts.taskId, { imageTask: next })
+        }
         const requestedSize = parseImageSize(opts.taskParams.size)
         if (!requestedSize) throw new Error('本地任务 API 需要明确的图像尺寸')
         const ratio = formatImageRatio(requestedSize.width, requestedSize.height).replace(/^≈/, '')
@@ -2937,6 +2977,7 @@ async function executeAgentRound(
             provider: imageProfile.provider,
             model: imageProfile.model,
             baseSize: calculateImageSize('1K', ratio) ?? opts.taskParams.size,
+            apiMode: imageProfile.apiMode,
           },
           output: {
             ratioMode: 'inherit',
@@ -2947,7 +2988,12 @@ async function executeAgentRound(
             contentClass: 'photo',
           },
         } as const
-        const completed = await executeImageTask(taskApiConfig, taskRequest, { timeoutMs: imageProfile.timeout * 1000, signal: opts.signal })
+        const completed = await executeImageTask(taskApiConfig, taskRequest, {
+          timeoutMs: imageProfile.timeout * 1000,
+          signal: opts.signal,
+          onJobCreated: persistImageTaskLink,
+          onJobUpdate: persistImageTaskLink,
+        })
         const dataUrl = await blobToDataUrl(completed.image, 'image/png')
         return {
           image: {

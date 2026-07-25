@@ -3196,6 +3196,60 @@ describe('agent draft lifecycle', () => {
     expect(state.inputImages).toEqual([imageB])
   })
 
+  it('keeps the gallery draft when opening the engine workspace and returning', () => {
+    const galleryPrompt = '等待提交的画廊草稿'
+    const existingAgentDraft = {
+      prompt: draftState.prompt,
+      inputImages: draftState.inputImages,
+      maskDraft: draftState.maskDraft,
+      maskEditorImageId: imageA.id,
+    }
+    useStore.setState({
+      appMode: 'gallery',
+      prompt: galleryPrompt,
+      inputImages: [imageB],
+      maskDraft: null,
+      maskEditorImageId: null,
+      galleryInputDraft: null,
+      agentInputDrafts: { 'conversation-a': existingAgentDraft },
+    })
+
+    useStore.getState().setAppMode('engine')
+    expect(useStore.getState()).toMatchObject({
+      appMode: 'engine',
+      galleryInputDraft: { prompt: galleryPrompt, inputImages: [imageB] },
+      agentInputDrafts: { 'conversation-a': existingAgentDraft },
+    })
+
+    useStore.getState().setAppMode('gallery')
+    expect(useStore.getState()).toMatchObject({
+      appMode: 'gallery',
+      prompt: galleryPrompt,
+      inputImages: [imageB],
+    })
+  })
+
+  it('keeps the active agent draft when opening the engine workspace', () => {
+    const existingGalleryDraft = {
+      prompt: '未发送的画廊草稿',
+      inputImages: [imageB],
+      maskDraft: null,
+      maskEditorImageId: null,
+    }
+    useStore.setState({ galleryInputDraft: existingGalleryDraft })
+
+    useStore.getState().setAppMode('engine')
+
+    const state = useStore.getState()
+    expect(state.appMode).toBe('engine')
+    expect(state.galleryInputDraft).toEqual(existingGalleryDraft)
+    expect(state.agentInputDrafts['conversation-a']).toMatchObject({
+      prompt: draftState.prompt,
+      inputImages: draftState.inputImages,
+      maskDraft: draftState.maskDraft,
+    })
+  })
+
   it('persists the gallery draft while agent mode is active', () => {
     const galleryPrompt = 'gallery draft'
     useStore.setState({

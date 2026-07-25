@@ -5,11 +5,18 @@ import { basename, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import sharp from 'sharp'
 import {
+  API_MODES,
   assertTransition,
   calculateImageSize,
+  COMMON_IMAGE_RATIOS,
+  CONTRACT_VERSION,
   createAssetManifest,
   deriveExactSourceTarget,
   deriveInheritedTarget,
+  JOB_STATES,
+  MANIFEST_VERSION,
+  MAX_EDGE,
+  MAX_PIXELS,
   parseImageSize,
   parseRatio,
   ratioMatchesExactly,
@@ -21,9 +28,86 @@ import {
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 const ACTIVE_STATES = ['validating', 'generating', 'source_ready', 'enhancing', 'finalizing']
+const UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+const DEFAULT_JOB_LIST_LIMIT = 30
+const MAX_JOB_LIST_LIMIT = 100
+const ACCEPTED_ENHANCEMENTS = ['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']
+const DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
+  /^https?:\/\/localhost(?::\d+)?$/,
+  /^https?:\/\/127\.0\.0\.1(?::\d+)?$/,
+]
 
 function now() { return new Date().toISOString() }
 function sha256(data) { return createHash('sha256').update(data).digest('hex') }
+function jobCursor(job) {
+  return Buffer.from(JSON.stringify({ createdAt: job.createdAt, id: job.id }), 'utf8').toString('base64url')
+}
+function parseJobCursor(value) {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (typeof parsed?.createdAt !== 'string' || typeof parsed?.id !== 'string') throw new Error('invalid cursor payload')
+    return parsed
+  } catch {
+    throw Object.assign(new Error('invalid job list cursor'), { statusCode: 400, code: 'INVALID_CURSOR' })
+  }
+}
+function parseJobListLimit(value) {
+  if (value === null) return DEFAULT_JOB_LIST_LIMIT
+  const limit = Number(value)
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_JOB_LIST_LIMIT) {
+    throw Object.assign(new Error(`limit must be an integer from 1 to ${MAX_JOB_LIST_LIMIT}`), { statusCode: 400, code: 'INVALID_LIMIT' })
+  }
+  return limit
+}
+function taskApiCapabilities(providerConfig = {}) {
+  return {
+    service: 'taostudio-image-task-api',
+    apiVersion: '1',
+    contractVersion: CONTRACT_VERSION,
+    manifestVersion: MANIFEST_VERSION,
+    capabilities: {
+      inputModes: ['prompt', 'source', 'edit'],
+      apiModes: API_MODES,
+      ratios: COMMON_IMAGE_RATIOS,
+      generation: {
+        defaultProvider: 'configured',
+        defaultModel: typeof providerConfig.model === 'string' && providerConfig.model.trim()
+          ? providerConfig.model.trim()
+          : null,
+      },
+      output: {
+        formats: ['png'],
+        qualities: ['high'],
+        acceptedEnhancements: ACCEPTED_ENHANCEMENTS,
+        implementedEnhancements: ['lanczos3'],
+        enhancementFallback: 'lanczos3',
+        maxEdge: MAX_EDGE,
+        maxPixels: MAX_PIXELS,
+      },
+      retry: { maxAttempts: 5 },
+      upload: { mediaTypes: ['image/png'], maxBytes: UPLOAD_MAX_BYTES },
+      jobs: { states: JOB_STATES, defaultListLimit: DEFAULT_JOB_LIST_LIMIT, maxListLimit: MAX_JOB_LIST_LIMIT },
+      events: { transport: 'polling' },
+    },
+  }
+}
+function createOriginMatcher(allowedOrigins = []) {
+  const exactOrigins = new Set(allowedOrigins.map((value) => {
+    const candidate = String(value).trim()
+    if (!candidate) return ''
+    try {
+      return new URL(candidate).origin
+    } catch {
+      return candidate
+    }
+  }).filter(Boolean))
+  return (origin) => {
+    if (!origin) return null
+    if (DEFAULT_ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin))) return origin
+    return exactOrigins.has(origin) ? origin : null
+  }
+}
 function safeProviderText(value) {
   if (typeof value !== 'string') return null
   return value
@@ -240,10 +324,14 @@ export class TaskRepository {
 
   getJob(id) {
     const row = this.db.prepare('SELECT * FROM jobs WHERE id=?').get(id)
-    if (!row) return null
+    return row ? this.jobFromRow(row) : null
+  }
+
+  jobFromRow(row) {
     return {
       id: row.id,
       contractVersion: '1',
+      request: JSON.parse(row.request_json),
       state: row.state,
       attempts: row.attempts,
       maxAttempts: row.max_attempts,
@@ -254,6 +342,31 @@ export class TaskRepository {
       result: row.result_json ? JSON.parse(row.result_json) : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+    }
+  }
+
+  listJobs(options = {}) {
+    const limit = options.limit ?? DEFAULT_JOB_LIST_LIMIT
+    const cursor = options.cursor ?? null
+    const state = options.state ?? null
+    const clauses = []
+    const parameters = []
+    if (state) {
+      clauses.push('state=?')
+      parameters.push(state)
+    }
+    if (cursor) {
+      clauses.push('(created_at < ? OR (created_at = ? AND id < ?))')
+      parameters.push(cursor.createdAt, cursor.createdAt, cursor.id)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const rows = this.db.prepare(`SELECT * FROM jobs ${where} ORDER BY created_at DESC,id DESC LIMIT ?`)
+      .all(...parameters, limit + 1)
+    const hasMore = rows.length > limit
+    const items = rows.slice(0, limit).map((row) => this.jobFromRow(row))
+    return {
+      items,
+      nextCursor: hasMore && items.length ? jobCursor(items[items.length - 1]) : null,
     }
   }
 
@@ -858,10 +971,11 @@ export async function createTaskApi(options = {}) {
     providerTimeoutMs: options.providerTimeoutMs,
     providerRetryBaseMs: options.providerRetryBaseMs,
   })
+  const matchAllowedOrigin = createOriginMatcher(options.allowedOrigins)
 
   const server = createServer(async (request, response) => {
     const origin = request.headers.origin
-    const cors = origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ? origin : null
+    const cors = matchAllowedOrigin(origin)
     if (cors) {
       response.setHeader('access-control-allow-origin', cors)
       response.setHeader('vary', 'Origin')
@@ -872,9 +986,24 @@ export async function createTaskApi(options = {}) {
     if (!safeEqual(request.headers.authorization, `Bearer ${token}`)) return void json(response, 401, { error: { code: 'UNAUTHORIZED', message: 'Bearer token required' } })
     const url = new URL(request.url || '/', 'http://localhost')
     try {
+      if (request.method === 'GET' && url.pathname === '/v1/capabilities') {
+        return void json(response, 200, taskApiCapabilities(options.providerConfig))
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/image-jobs') {
+        const state = url.searchParams.get('state')
+        if (state && !JOB_STATES.includes(state)) {
+          throw Object.assign(new Error(`state must be one of ${JOB_STATES.join(', ')}`), { statusCode: 400, code: 'INVALID_STATE' })
+        }
+        const result = repository.listJobs({
+          limit: parseJobListLimit(url.searchParams.get('limit')),
+          cursor: parseJobCursor(url.searchParams.get('cursor')),
+          state,
+        })
+        return void json(response, 200, result)
+      }
       if (request.method === 'POST' && url.pathname === '/v1/assets/uploads') {
         if (request.headers['content-type']?.split(';')[0] !== 'image/png') return void json(response, 415, { error: { code: 'PNG_REQUIRED', message: 'v1 uploads accept image/png' } })
-        const buffer = await readBody(request)
+        const buffer = await readBody(request, UPLOAD_MAX_BYTES)
         const metadata = await sharp(buffer).metadata()
         if (metadata.format !== 'png' || !metadata.width || !metadata.height) return void json(response, 400, { error: { code: 'INVALID_PNG', message: 'invalid PNG upload' } })
         const digest = sha256(buffer)
@@ -917,7 +1046,9 @@ export async function createTaskApi(options = {}) {
       }
       json(response, 404, { error: { code: 'NOT_FOUND' } })
     } catch (error) {
-      json(response, error?.statusCode || 500, { error: { code: error?.statusCode === 409 ? 'IDEMPOTENCY_CONFLICT' : 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) } })
+      const statusCode = error?.statusCode || (error instanceof SyntaxError ? 400 : 500)
+      const code = error?.code || (statusCode === 409 ? 'IDEMPOTENCY_CONFLICT' : statusCode === 400 ? 'INVALID_REQUEST' : 'INTERNAL_ERROR')
+      json(response, statusCode, { error: { code, message: error instanceof Error ? error.message : String(error) } })
     }
   })
 

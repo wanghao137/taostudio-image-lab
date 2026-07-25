@@ -9,6 +9,15 @@ import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { CodeIcon, TransparentBgIcon } from './icons'
 import ViewportTooltip from './ViewportTooltip'
 
+const ENGINE_STAGE_LABELS: Record<string, string> = {
+  queued: '排队中',
+  validating: '校验中',
+  generating: '生成底图',
+  source_ready: '底图就绪',
+  enhancing: '增强放大',
+  finalizing: '收尾中',
+}
+
 interface Props {
   task: TaskRecord
   onReuse: () => void
@@ -440,7 +449,18 @@ export default function TaskCard({
                   d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
                 />
               </svg>
-              <span className="text-xs text-gray-400 dark:text-gray-500">生成中...</span>
+              <span className="text-xs text-gray-400 dark:text-gray-500">
+                {task.imageTask ? (
+                  <>
+                    {ENGINE_STAGE_LABELS[task.imageTask.state] ?? task.imageTask.state}
+                    {task.imageTask.attempts > 1 && (
+                      <span className="text-yellow-500"> · 重试 {task.imageTask.attempts - 1}</span>
+                    )}
+                  </>
+                ) : (
+                  '生成中...'
+                )}
+              </span>
             </div>
           )}
           {task.status === 'error' && isFalReconnecting && (

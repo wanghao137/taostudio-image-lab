@@ -68,6 +68,81 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(response.status).toBe(401)
   })
 
+  it('allows only local or explicitly configured browser origins', async () => {
+    const { url } = await start({
+      concurrency: 0,
+      allowedOrigins: ['https://image.taostudioai.com/'],
+    })
+
+    const configured = await fetch(`${url}/v1/capabilities`, {
+      headers: headers({ origin: 'https://image.taostudioai.com' }),
+    })
+    expect(configured.headers.get('access-control-allow-origin')).toBe('https://image.taostudioai.com')
+
+    const local = await fetch(`${url}/v1/capabilities`, {
+      headers: headers({ origin: 'http://localhost:9527' }),
+    })
+    expect(local.headers.get('access-control-allow-origin')).toBe('http://localhost:9527')
+
+    const unknown = await fetch(`${url}/v1/capabilities`, {
+      headers: headers({ origin: 'https://untrusted.example' }),
+    })
+    expect(unknown.headers.get('access-control-allow-origin')).toBeNull()
+  })
+
+  it('reports implemented capabilities without advertising fallback enhancers as native', async () => {
+    const { url } = await start({ concurrency: 0, providerConfig: { model: 'configured-image-model' } })
+    const response = await fetch(`${url}/v1/capabilities`, { headers: headers() })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      service: 'taostudio-image-task-api',
+      apiVersion: '1',
+      contractVersion: '1',
+      capabilities: {
+        inputModes: ['prompt', 'source', 'edit'],
+        apiModes: ['images', 'responses'],
+        generation: {
+          defaultProvider: 'configured',
+          defaultModel: 'configured-image-model',
+        },
+        output: {
+          acceptedEnhancements: ['auto', 'none', 'lanczos3', 'real-esrgan', 'hat'],
+          implementedEnhancements: ['lanczos3'],
+          enhancementFallback: 'lanczos3',
+        },
+        jobs: { defaultListLimit: 30, maxListLimit: 100 },
+      },
+    })
+  })
+
+  it('lists jobs with request context, state filtering, and an opaque cursor', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await Promise.all([
+      create(url, request({ idempotencyKey: 'list-jobs-001', input: { prompt: 'first list prompt' } })),
+      create(url, request({ idempotencyKey: 'list-jobs-002', input: { prompt: 'second list prompt' } })),
+      create(url, request({ idempotencyKey: 'list-jobs-003', input: { prompt: 'third list prompt' } })),
+    ])
+    const expectedIds = new Set(created.map((result) => result.body.id))
+
+    const firstPageResponse = await fetch(`${url}/v1/image-jobs?state=queued&limit=2`, { headers: headers() })
+    const firstPage = await firstPageResponse.json()
+    expect(firstPageResponse.status).toBe(200)
+    expect(firstPage.items).toHaveLength(2)
+    expect(firstPage.items[0].request.input.prompt).toMatch(/list prompt$/)
+    expect(firstPage.nextCursor).toEqual(expect.any(String))
+
+    const secondPageResponse = await fetch(`${url}/v1/image-jobs?state=queued&limit=2&cursor=${encodeURIComponent(firstPage.nextCursor)}`, { headers: headers() })
+    const secondPage = await secondPageResponse.json()
+    expect(secondPageResponse.status).toBe(200)
+    expect(secondPage.items).toHaveLength(1)
+    expect(secondPage.nextCursor).toBeNull()
+    expect(new Set([...firstPage.items, ...secondPage.items].map((job) => job.id))).toEqual(expectedIds)
+
+    const invalidCursor = await fetch(`${url}/v1/image-jobs?cursor=not-a-cursor`, { headers: headers() })
+    expect(invalidCursor.status).toBe(400)
+    expect((await invalidCursor.json()).error.code).toBe('INVALID_CURSOR')
+  })
+
   it('runs a mock job and stores traceable source/final PNG assets', async () => {
     const { url } = await start()
     const created = await create(url, request({ idempotencyKey: 'mock-success-001' }))

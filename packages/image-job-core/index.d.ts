@@ -1,11 +1,13 @@
 export type ImageDimensions = { width: number; height: number }
 export type ImageTier = '1K' | '2K' | '4K'
+export type ApiMode = 'images' | 'responses'
 export type JobState = 'queued' | 'validating' | 'generating' | 'source_ready' | 'enhancing' | 'finalizing' | 'succeeded' | 'failed' | 'cancelled'
 export const CONTRACT_VERSION: '1'
 export const MANIFEST_VERSION: '1'
 export const MAX_EDGE: number
 export const MAX_PIXELS: number
 export const COMMON_IMAGE_RATIOS: readonly string[]
+export const API_MODES: readonly ApiMode[]
 export const COMMON_SIZE_PRESETS: Readonly<Record<ImageTier, Readonly<Record<string, string>>>>
 export const JOB_STATES: readonly JobState[]
 export const TERMINAL_JOB_STATES: readonly JobState[]

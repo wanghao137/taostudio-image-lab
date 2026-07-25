@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react'
-import { Image as ImageIcon, Star, Sparkles, User, Moon, Sun, BookOpen, Bot } from 'lucide-react'
+import { Image as ImageIcon, Star, Sparkles, User, Moon, Sun, BookOpen, Bot, Cpu } from 'lucide-react'
 import { useStore } from '../store'
 
 interface MobileShellProps {
@@ -27,7 +27,7 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
   }
 
   // 当前激活 tab（用于高亮）
-  const tab = appMode === 'agent' ? 'agent' : filterFavorite ? 'favorites' : 'gallery'
+  const tab = appMode === 'agent' ? 'agent' : appMode === 'engine' ? 'engine' : filterFavorite ? 'favorites' : 'gallery'
 
   return (
     <div className="max-sm:flex max-sm:min-h-screen max-sm:flex-col sm:hidden">
@@ -46,6 +46,7 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
           <TabButton icon={ImageIcon} label="画廊" active={tab === 'gallery'} onClick={goGallery} />
           <TabButton icon={Star} label="收藏" active={tab === 'favorites'} onClick={goFavorites} />
           <div className="w-16 shrink-0" aria-hidden /> {/* FAB 占位，加宽避免遮挡两侧 */}
+          <TabButton icon={Cpu} label="引擎" active={tab === 'engine'} onClick={() => setAppMode('engine')} />
           <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} />
         </div>
         {/* FAB */}
