@@ -67,8 +67,9 @@ import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { appendTargetAspectPromptHint, createTargetAspectPromptHint } from './lib/targetAspectPrompt'
-import { calculateImageSize, formatImageRatio, parseImageSize } from './lib/size'
+import { formatImageRatio, parseImageSize } from './lib/size'
 import {
+  createImageTaskGeneration,
   executeImageTask,
   readLocalImageTaskApiConfig,
   type ImageJobV1,
@@ -2973,12 +2974,11 @@ async function executeAgentRound(
           idempotencyKey: `web-agent:${opts.taskId}`,
           input: sourceAssetId ? { prompt: opts.prompt, sourceAssetId } : { prompt: opts.prompt },
           composition: { ratio },
-          generation: {
+          generation: createImageTaskGeneration({
             provider: imageProfile.provider,
             model: imageProfile.model,
-            baseSize: calculateImageSize('1K', ratio) ?? opts.taskParams.size,
             apiMode: imageProfile.apiMode,
-          },
+          }),
           output: {
             ratioMode: 'inherit',
             format: 'png',

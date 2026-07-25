@@ -17,6 +17,7 @@ import { calculateImageSize } from '../lib/size'
 import {
   cancelImageJob,
   clearLocalImageTaskApiConfig,
+  createImageTaskGeneration,
   createImageJob,
   getImageAssetBlob,
   getImageJob,
@@ -221,12 +222,11 @@ export default function EngineWorkspace() {
         idempotencyKey: `engine-ui:${crypto.randomUUID()}`,
         input: { prompt: draft.prompt.trim() },
         composition: { ratio: draft.ratio },
-        generation: {
+        generation: createImageTaskGeneration({
           provider: 'configured',
           model: draft.model.trim(),
           apiMode: draft.apiMode,
-          baseSize: calculateImageSize('1K', draft.ratio) || undefined,
-        },
+        }),
         output: {
           ratioMode: 'inherit',
           format: 'png',
@@ -549,7 +549,7 @@ function NewJobForm({
         />
       </label>
       <div className="mt-4 border-y border-stone-300 py-3 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
-        <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('1K', draft.ratio)}</span></div>
+        <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('2K', draft.ratio)}</span></div>
         <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG</span></div>
         <div className="mt-2 flex justify-between"><span>增强器</span><span className="font-mono">lanczos3</span></div>
       </div>

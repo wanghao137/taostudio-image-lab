@@ -26,6 +26,18 @@ export interface ImageJobRequestV1 {
   retry?: { maxAttempts?: number }
 }
 
+export function createImageTaskGeneration(options: {
+  provider: string
+  model: string
+  apiMode?: ApiMode
+}): ImageJobRequestV1['generation'] {
+  return {
+    provider: options.provider,
+    model: options.model,
+    ...(options.apiMode ? { apiMode: options.apiMode } : {}),
+  }
+}
+
 export interface ImageJobEventV1 {
   state: ImageJobStateV1
   detail: Record<string, unknown> | null

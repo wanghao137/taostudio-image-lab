@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   clearLocalImageTaskApiConfig,
+  createImageTaskGeneration,
   readLocalImageTaskApiConfig,
   saveLocalImageTaskApiConfig,
 } from './imageTaskApi'
@@ -41,5 +42,22 @@ describe('Image Task API session configuration', () => {
       baseUrl: 'file:///tmp/task-api',
       token: 'session-token',
     })).toThrow('must use HTTP or HTTPS')
+  })
+})
+
+describe('Image Task API generation defaults', () => {
+  it('leaves baseSize unset so the engine applies its 2K default', () => {
+    const generation = createImageTaskGeneration({
+      provider: 'configured',
+      model: 'gpt-image-2',
+      apiMode: 'images',
+    })
+
+    expect(generation).toEqual({
+      provider: 'configured',
+      model: 'gpt-image-2',
+      apiMode: 'images',
+    })
+    expect(generation).not.toHaveProperty('baseSize')
   })
 })
