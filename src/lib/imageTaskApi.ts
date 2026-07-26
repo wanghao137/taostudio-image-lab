@@ -14,7 +14,13 @@ export interface ImageJobRequestV1 {
   idempotencyKey: string
   input: { prompt?: string; sourceAssetId?: string }
   composition: { ratio: string }
-  generation: { provider: string; model: string; baseSize?: string; apiMode?: ApiMode }
+  generation: {
+    provider: string
+    model: string
+    baseSize?: string
+    apiMode?: ApiMode
+    fallback?: { provider: string; model: string; apiMode?: ApiMode }
+  }
   output: {
     ratioMode: 'inherit'
     format: 'png'
@@ -30,11 +36,13 @@ export function createImageTaskGeneration(options: {
   provider: string
   model: string
   apiMode?: ApiMode
+  fallback?: { provider: string; model: string; apiMode?: ApiMode }
 }): ImageJobRequestV1['generation'] {
   return {
     provider: options.provider,
     model: options.model,
     ...(options.apiMode ? { apiMode: options.apiMode } : {}),
+    ...(options.fallback ? { fallback: options.fallback } : {}),
   }
 }
 
@@ -44,18 +52,42 @@ export interface ImageJobEventV1 {
   createdAt: string
 }
 
+export interface ImageProviderCallV1 {
+  id: number
+  attempt: number
+  routeIndex: number
+  route: { provider: string; model: string; apiMode: ApiMode }
+  state: 'started' | 'succeeded' | 'failed' | 'interrupted'
+  startedAt: string
+  completedAt?: string | null
+  usage?: Record<string, unknown> | null
+  error?: Record<string, unknown> | null
+  httpStatus?: number | null
+}
+
 export interface ImageJobV1 {
   id: string
   contractVersion: '1'
   request: ImageJobRequestV1
   state: ImageJobStateV1
   attempts: number
+  routeIndex: number
+  routeAttempts: number
   maxAttempts: number
+  actualRoute: { provider: string; model: string; apiMode: ApiMode }
   cancelRequested: boolean
   sourceAssetId?: string | null
   finalAssetId?: string | null
   error?: { code?: string; message?: string; retryable?: boolean; stage?: string; providerCode?: string; httpStatus?: number } | null
-  result?: { sourceAssetId?: string; finalAssetId?: string; manifestVersion?: string } | null
+  result?: {
+    sourceAssetId?: string
+    finalAssetId?: string
+    manifestVersion?: string
+    actualRoute?: { provider: string; model: string; apiMode: ApiMode }
+  } | null
+  accounting?: {
+    calls: ImageProviderCallV1[]
+  } | null
   events?: ImageJobEventV1[]
   createdAt: string
   updatedAt: string
@@ -110,6 +142,32 @@ export interface ImageTaskCapabilitiesV1 {
 export interface ImageJobListV1 {
   items: ImageJobV1[]
   nextCursor: string | null
+}
+
+export interface ImageBatchV1 {
+  id: string
+  name?: string | null
+  state: 'running' | 'paused' | 'completed'
+  controlState: 'running' | 'paused'
+  stats: {
+    total: number
+    terminal: number
+    active: number
+    queued: number
+    succeeded: number
+    failed: number
+    cancelled: number
+  }
+  items: Array<{ itemKey: string; position: number; job: ImageJobV1 }>
+  events: Array<{ event: string; detail: Record<string, unknown> | null; createdAt: string }>
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ImageBatchCreateRequestV1 {
+  idempotencyKey: string
+  name?: string
+  items: Array<{ itemKey: string; request: ImageJobRequestV1 }>
 }
 
 export class ImageTaskApiError extends Error {
@@ -206,6 +264,30 @@ export async function listImageJobs(
   return (await taskFetch(config, `/v1/image-jobs${query}`)).json()
 }
 
+export async function createImageBatch(config: ImageTaskApiConfig, request: ImageBatchCreateRequestV1): Promise<ImageBatchV1> {
+  return (await taskFetch(config, '/v1/image-batches', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(request),
+})).json()
+}
+
+export async function listImageBatches(config: ImageTaskApiConfig, limit = 30): Promise<{ items: ImageBatchV1[] }> {
+  return (await taskFetch(config, `/v1/image-batches?limit=${encodeURIComponent(String(limit))}`)).json()
+}
+
+export async function getImageBatch(config: ImageTaskApiConfig, id: string): Promise<ImageBatchV1> {
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}`)).json()
+}
+
+export async function controlImageBatch(
+  config: ImageTaskApiConfig,
+  id: string,
+  action: 'pause' | 'resume' | 'retry-failed',
+): Promise<ImageBatchV1> {
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/${action}`, { method: 'POST' })).json()
+}
+
 export async function waitForImageJob(
   config: ImageTaskApiConfig,
   id: string,
@@ -241,6 +323,10 @@ export async function uploadImageAsset(config: ImageTaskApiConfig, png: Blob, fi
 
 export async function cancelImageJob(config: ImageTaskApiConfig, id: string): Promise<ImageJobV1> {
   return (await taskFetch(config, `/v1/image-jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })).json()
+}
+
+export async function retryImageJob(config: ImageTaskApiConfig, id: string): Promise<ImageJobV1> {
+  return (await taskFetch(config, `/v1/image-jobs/${encodeURIComponent(id)}/retry`, { method: 'POST' })).json()
 }
 
 export async function executeImageTask(

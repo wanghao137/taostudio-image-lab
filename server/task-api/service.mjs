@@ -31,6 +31,7 @@ const ACTIVE_STATES = ['validating', 'generating', 'source_ready', 'enhancing', 
 const UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 const DEFAULT_JOB_LIST_LIMIT = 30
 const MAX_JOB_LIST_LIMIT = 100
+const MAX_BATCH_ITEMS = 500
 const ACCEPTED_ENHANCEMENTS = ['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']
 const DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
   /^https?:\/\/localhost(?::\d+)?$/,
@@ -60,6 +61,39 @@ function parseJobListLimit(value) {
   }
   return limit
 }
+function validateBatchRequest(value) {
+  const errors = []
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['batch must be an object'] }
+  if (typeof value.idempotencyKey !== 'string' || value.idempotencyKey.length < 8 || value.idempotencyKey.length > 200) {
+    errors.push('idempotencyKey must contain 8 to 200 characters')
+  }
+  if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200)) {
+    errors.push('name must be a non-empty string up to 200 characters')
+  }
+  if (!Array.isArray(value.items) || value.items.length < 1 || value.items.length > MAX_BATCH_ITEMS) {
+    errors.push(`items must contain 1 to ${MAX_BATCH_ITEMS} entries`)
+  } else {
+    const keys = new Set()
+    value.items.forEach((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        errors.push(`items[${index}] must be an object`)
+        return
+      }
+      if (typeof item.itemKey !== 'string' || !item.itemKey.trim() || item.itemKey.length > 200) {
+        errors.push(`items[${index}].itemKey must be a non-empty string up to 200 characters`)
+      } else if (keys.has(item.itemKey)) {
+        errors.push(`items[${index}].itemKey must be unique within the batch`)
+      } else {
+        keys.add(item.itemKey)
+      }
+      const validation = validateImageJobRequest(item.request)
+      if (!validation.valid) {
+        errors.push(...validation.errors.map((error) => `items[${index}].request: ${error}`))
+      }
+    })
+  }
+  return { valid: errors.length === 0, errors }
+}
 function taskApiCapabilities(providerConfig = {}) {
   return {
     service: 'taostudio-image-task-api',
@@ -88,6 +122,7 @@ function taskApiCapabilities(providerConfig = {}) {
       retry: { maxAttempts: 5 },
       upload: { mediaTypes: ['image/png'], maxBytes: UPLOAD_MAX_BYTES },
       jobs: { states: JOB_STATES, defaultListLimit: DEFAULT_JOB_LIST_LIMIT, maxListLimit: MAX_JOB_LIST_LIMIT },
+      batches: { maxItems: MAX_BATCH_ITEMS, states: ['running', 'paused', 'completed'] },
       events: { transport: 'polling' },
     },
   }
@@ -124,7 +159,8 @@ function providerPayloadError(payload, fallbackRetryable = true) {
   const providerCode = safeProviderText(nested?.code ?? nested?.type ?? body.code ?? body.type)
   const providerMessage = safeProviderText(nested?.message ?? body.message)
   const classification = `${providerCode || ''} ${providerMessage || ''}`.toLowerCase()
-  const permanent = /(content[_ -]?policy|moderation|safety|invalid[_ -]?request|authentication|authorization|permission|billing|quota|not[_ -]?found)/.test(classification)
+  const quota = /(billing|quota|insufficient[_ -]?credits?|credit[_ -]?balance)/.test(classification)
+  const permanent = /(content[_ -]?policy|moderation|safety|invalid[_ -]?request|authentication|authorization|permission|not[_ -]?found)/.test(classification) || quota
   const transient = /(rate[_ -]?limit|timeout|temporar|overload|capacity|server|internal|upstream|gateway|unavailable|generation[_ -]?failed)/.test(classification)
   const error = Object.assign(new Error(
     providerCode ? `provider reported ${providerCode}${providerMessage ? `: ${providerMessage}` : ''}` : 'provider response did not contain an image',
@@ -132,9 +168,40 @@ function providerPayloadError(payload, fallbackRetryable = true) {
     code: 'PROVIDER_RESPONSE_ERROR',
     providerCode,
     retryable: permanent ? false : transient ? true : fallbackRetryable,
+    fallbackEligible: quota || transient || (!permanent && fallbackRetryable),
     diagnostics: { responseKeys: Object.keys(body).sort().slice(0, 20) },
   })
   return error
+}
+
+function routeFromRequest(request, routeIndex = 0) {
+  const route = routeIndex === 1 ? request.generation?.fallback : request.generation
+  return {
+    provider: route?.provider,
+    model: route?.model,
+    apiMode: route?.apiMode || 'images',
+  }
+}
+
+function requestForRoute(request, routeIndex) {
+  const route = routeFromRequest(request, routeIndex)
+  return {
+    ...request,
+    generation: {
+      ...request.generation,
+      provider: route.provider,
+      model: route.model,
+      apiMode: route.apiMode,
+    },
+  }
+}
+
+function fallbackEligible(error, stage) {
+  if (stage !== 'generating') return false
+  if (typeof error?.fallbackEligible === 'boolean') return error.fallbackEligible
+  if (error?.name === 'AbortError') return true
+  if (error?.httpStatus === 429 || error?.httpStatus === 408 || error?.httpStatus >= 500) return true
+  return ['PROVIDER_TIMEOUT', 'PROVIDER_NETWORK_ERROR', 'PROVIDER_IMAGE_INVALID'].includes(error?.code)
 }
 
 function providerPrompt(request) {
@@ -265,6 +332,8 @@ export class TaskRepository {
         request_json TEXT NOT NULL,
         state TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
+        route_index INTEGER NOT NULL DEFAULT 0,
+        route_attempts INTEGER NOT NULL DEFAULT 0,
         max_attempts INTEGER NOT NULL DEFAULT 3,
         cancel_requested INTEGER NOT NULL DEFAULT 0,
         source_asset_id TEXT,
@@ -290,10 +359,59 @@ export class TaskRepository {
         detail_json TEXT,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS batches (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL,
+        name TEXT,
+        control_state TEXT NOT NULL DEFAULT 'running',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS batch_items (
+        batch_id TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        job_id TEXT NOT NULL UNIQUE,
+        PRIMARY KEY (batch_id,item_key),
+        UNIQUE (batch_id,position),
+        FOREIGN KEY (batch_id) REFERENCES batches(id),
+        FOREIGN KEY (job_id) REFERENCES jobs(id)
+      );
+      CREATE TABLE IF NOT EXISTS batch_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        detail_json TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (batch_id) REFERENCES batches(id)
+      );
+      CREATE TABLE IF NOT EXISTS provider_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        route_index INTEGER NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        api_mode TEXT NOT NULL,
+        state TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        usage_json TEXT,
+        error_json TEXT,
+        http_status INTEGER,
+        UNIQUE (job_id, attempt),
+        FOREIGN KEY (job_id) REFERENCES jobs(id)
+      );
     `)
+    const jobColumns = new Set(this.db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name))
+    if (!jobColumns.has('route_index')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_index INTEGER NOT NULL DEFAULT 0')
+    if (!jobColumns.has('route_attempts')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_attempts INTEGER NOT NULL DEFAULT 0')
   }
 
   recoverInterruptedJobs() {
+    this.db.prepare("UPDATE provider_calls SET state='interrupted', completed_at=?, error_json=? WHERE state='started'")
+      .run(now(), JSON.stringify({ code: 'WORKER_RESTARTED', message: 'provider call was interrupted by worker restart' }))
     const placeholders = ACTIVE_STATES.map(() => '?').join(',')
     const interrupted = this.db.prepare(`SELECT id,state FROM jobs WHERE state IN (${placeholders})`).all(...ACTIVE_STATES)
     for (const job of interrupted) {
@@ -309,9 +427,6 @@ export class TaskRepository {
     const existing = this.db.prepare('SELECT * FROM jobs WHERE idempotency_key=?').get(request.idempotencyKey)
     if (existing) {
       if (existing.request_hash !== requestHash) throw Object.assign(new Error('idempotency key was already used with a different request'), { statusCode: 409 })
-      if (existing.state === 'failed' && existing.attempts < existing.max_attempts) {
-        this.transition(existing.id, 'queued', { error: null, availableAt: 0 })
-      }
       return { job: this.getJob(existing.id), created: false }
     }
     const id = `job_${randomUUID()}`
@@ -322,27 +437,76 @@ export class TaskRepository {
     return { job: this.getJob(id), created: true }
   }
 
-  getJob(id) {
+  getJob(id, options = {}) {
     const row = this.db.prepare('SELECT * FROM jobs WHERE id=?').get(id)
-    return row ? this.jobFromRow(row) : null
+    return row ? this.jobFromRow(row, options) : null
   }
 
-  jobFromRow(row) {
+  jobFromRow(row, options = {}) {
+    const request = JSON.parse(row.request_json)
+    const routeIndex = row.route_index ?? 0
+    const accounting = options.includeAccounting ? this.providerCallAccounting(row.id) : null
     return {
       id: row.id,
       contractVersion: '1',
-      request: JSON.parse(row.request_json),
+      request,
       state: row.state,
       attempts: row.attempts,
+      routeIndex,
+      routeAttempts: row.route_attempts ?? row.attempts,
       maxAttempts: row.max_attempts,
+      actualRoute: routeFromRequest(request, routeIndex),
       cancelRequested: Boolean(row.cancel_requested),
       sourceAssetId: row.source_asset_id,
       finalAssetId: row.final_asset_id,
       error: row.error_json ? JSON.parse(row.error_json) : null,
       result: row.result_json ? JSON.parse(row.result_json) : null,
+      ...(accounting ? { accounting } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
+  }
+
+  providerCallAccounting(jobId) {
+    const rows = this.db.prepare('SELECT * FROM provider_calls WHERE job_id=? ORDER BY attempt').all(jobId)
+    return {
+      calls: rows.map((row) => ({
+        id: row.id,
+        attempt: row.attempt,
+        routeIndex: row.route_index,
+        route: { provider: row.provider, model: row.model, apiMode: row.api_mode },
+        state: row.state,
+        startedAt: row.started_at,
+        completedAt: row.completed_at,
+        usage: row.usage_json ? JSON.parse(row.usage_json) : null,
+        error: row.error_json ? JSON.parse(row.error_json) : null,
+        httpStatus: row.http_status,
+      })),
+    }
+  }
+
+  startProviderCall(job) {
+    const route = job.actualRoute
+    const result = this.db.prepare(`
+      INSERT INTO provider_calls (job_id,attempt,route_index,provider,model,api_mode,state,started_at)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).run(job.id, job.attempts, job.routeIndex, route.provider, route.model, route.apiMode, 'started', now())
+    return Number(result.lastInsertRowid)
+  }
+
+  finishProviderCall(id, options = {}) {
+    this.db.prepare(`
+      UPDATE provider_calls
+      SET state=?, completed_at=?, usage_json=?, error_json=?, http_status=?
+      WHERE id=?
+    `).run(
+      options.state,
+      now(),
+      options.usage ? JSON.stringify(options.usage) : null,
+      options.error ? JSON.stringify(options.error) : null,
+      options.httpStatus ?? null,
+      id,
+    )
   }
 
   listJobs(options = {}) {
@@ -370,27 +534,166 @@ export class TaskRepository {
     }
   }
 
+  createOrGetBatch(request) {
+    const requestJson = stableJson(request)
+    const requestHash = sha256(requestJson)
+    const existing = this.db.prepare('SELECT * FROM batches WHERE idempotency_key=?').get(request.idempotencyKey)
+    if (existing) {
+      if (existing.request_hash !== requestHash) {
+        throw Object.assign(new Error('batch idempotency key was already used with different input'), {
+          statusCode: 409,
+          code: 'BATCH_IDEMPOTENCY_CONFLICT',
+        })
+      }
+      return { batch: this.getBatch(existing.id), created: false }
+    }
+
+    const id = `batch_${randomUUID()}`
+    const timestamp = now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('INSERT INTO batches (id,idempotency_key,request_hash,name,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)')
+        .run(id, request.idempotencyKey, requestHash, request.name?.trim() || null, 'running', timestamp, timestamp)
+      request.items.forEach((item, position) => {
+        const result = this.createOrGetJob(item.request)
+        try {
+          this.db.prepare('INSERT INTO batch_items (batch_id,item_key,position,job_id) VALUES (?,?,?,?)')
+            .run(id, item.itemKey, position, result.job.id)
+        } catch (error) {
+          if (String(error?.message || '').includes('UNIQUE constraint failed: batch_items.job_id')) {
+            throw Object.assign(new Error(`job ${result.job.id} already belongs to another batch`), {
+              statusCode: 409,
+              code: 'JOB_ALREADY_BATCHED',
+            })
+          }
+          throw error
+        }
+      })
+      this.recordBatchEvent(id, 'created', { itemCount: request.items.length })
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { batch: this.getBatch(id), created: true }
+  }
+
+  listBatches(limit = DEFAULT_JOB_LIST_LIMIT) {
+    const rows = this.db.prepare('SELECT * FROM batches ORDER BY created_at DESC,id DESC LIMIT ?').all(limit)
+    return rows.map((row) => this.getBatch(row.id))
+  }
+
+  getBatch(id) {
+    const row = this.db.prepare('SELECT * FROM batches WHERE id=?').get(id)
+    if (!row) return null
+    const itemRows = this.db.prepare(`
+      SELECT bi.item_key,bi.position,j.*
+      FROM batch_items bi
+      JOIN jobs j ON j.id=bi.job_id
+      WHERE bi.batch_id=?
+      ORDER BY bi.position
+    `).all(id)
+    const items = itemRows.map((item) => ({
+      itemKey: item.item_key,
+      position: item.position,
+      job: this.jobFromRow(item),
+    }))
+    const counts = Object.fromEntries(JOB_STATES.map((state) => [state, 0]))
+    items.forEach((item) => { counts[item.job.state] += 1 })
+    const terminal = counts.succeeded + counts.failed + counts.cancelled
+    const state = terminal === items.length
+      ? 'completed'
+      : row.control_state === 'paused'
+        ? 'paused'
+        : 'running'
+    const updatedAt = items.reduce(
+      (latest, item) => item.job.updatedAt > latest ? item.job.updatedAt : latest,
+      row.updated_at,
+    )
+    return {
+      id: row.id,
+      name: row.name,
+      state,
+      controlState: row.control_state,
+      stats: {
+        total: items.length,
+        terminal,
+        active: items.length - terminal - counts.queued,
+        queued: counts.queued,
+        succeeded: counts.succeeded,
+        failed: counts.failed,
+        cancelled: counts.cancelled,
+      },
+      items,
+      events: this.batchEvents(id),
+      createdAt: row.created_at,
+      updatedAt,
+    }
+  }
+
+  setBatchControlState(id, controlState) {
+    const batch = this.getBatch(id)
+    if (!batch) return null
+    if (batch.state === 'completed') {
+      throw Object.assign(new Error('completed batch cannot change control state'), {
+        statusCode: 409,
+        code: 'BATCH_COMPLETED',
+      })
+    }
+    if (batch.controlState !== controlState) {
+      this.db.prepare('UPDATE batches SET control_state=?,updated_at=? WHERE id=?').run(controlState, now(), id)
+      this.recordBatchEvent(id, controlState, null)
+    }
+    return this.getBatch(id)
+  }
+
+  retryFailedBatchJobs(id) {
+    const batch = this.getBatch(id)
+    if (!batch) return null
+    let retried = 0
+    for (const item of batch.items) {
+      if (item.job.state !== 'failed') continue
+      this.retryJob(item.job.id)
+      retried += 1
+    }
+    if (retried) {
+      this.db.prepare("UPDATE batches SET control_state='running',updated_at=? WHERE id=?").run(now(), id)
+      this.recordBatchEvent(id, 'retry_failed', { retried })
+    }
+    return this.getBatch(id)
+  }
+
   getRequest(id) {
     const row = this.db.prepare('SELECT request_json FROM jobs WHERE id=?').get(id)
     return row ? JSON.parse(row.request_json) : null
   }
 
   claimNextJob() {
-    const row = this.db.prepare("SELECT id FROM jobs WHERE state='queued' AND available_at<=? ORDER BY created_at LIMIT 1").get(Date.now())
+    const row = this.db.prepare(`
+      SELECT j.id
+      FROM jobs j
+      LEFT JOIN batch_items bi ON bi.job_id=j.id
+      LEFT JOIN batches b ON b.id=bi.batch_id
+      WHERE j.state='queued'
+        AND j.available_at<=?
+        AND (bi.job_id IS NULL OR b.control_state='running')
+      ORDER BY j.created_at
+      LIMIT 1
+    `).get(Date.now())
     if (!row) return null
-    const changed = this.db.prepare("UPDATE jobs SET state='validating', attempts=attempts+1, updated_at=? WHERE id=? AND state='queued'").run(now(), row.id)
+    const changed = this.db.prepare("UPDATE jobs SET state='validating', attempts=attempts+1, route_attempts=route_attempts+1, updated_at=? WHERE id=? AND state='queued'").run(now(), row.id)
     if (!changed.changes) return null
     this.recordEvent(row.id, 'validating', { reason: 'worker_claimed' })
     return this.getJob(row.id)
   }
 
-  transition(id, nextState, options = {}) {
+  transition(id, nextState, options = {}, mutation = {}) {
     const current = this.getJob(id)
     if (!current) throw new Error('job not found')
     assertTransition(current.state, nextState)
     const timestamp = now()
-    this.db.prepare(`UPDATE jobs SET state=?, source_asset_id=COALESCE(?,source_asset_id), final_asset_id=COALESCE(?,final_asset_id), error_json=?, result_json=COALESCE(?,result_json), available_at=?, updated_at=? WHERE id=?`)
-      .run(nextState, options.sourceAssetId ?? null, options.finalAssetId ?? null, options.error ? JSON.stringify(options.error) : null, options.result ? JSON.stringify(options.result) : null, options.availableAt ?? 0, timestamp, id)
+    this.db.prepare(`UPDATE jobs SET state=?, attempts=CASE WHEN ? THEN 0 ELSE attempts END, route_index=COALESCE(?,route_index), route_attempts=CASE WHEN ? THEN 0 ELSE route_attempts END, cancel_requested=CASE WHEN ? THEN 0 ELSE cancel_requested END, source_asset_id=COALESCE(?,source_asset_id), final_asset_id=COALESCE(?,final_asset_id), error_json=?, result_json=COALESCE(?,result_json), available_at=?, updated_at=? WHERE id=?`)
+      .run(nextState, mutation.resetAttempts === true ? 1 : 0, mutation.routeIndex ?? null, mutation.resetRouteAttempts === true ? 1 : 0, mutation.clearCancel === true ? 1 : 0, options.sourceAssetId ?? null, options.finalAssetId ?? null, options.error ? JSON.stringify(options.error) : null, options.result ? JSON.stringify(options.result) : null, options.availableAt ?? 0, timestamp, id)
     this.recordEvent(id, nextState, options.detail ?? null)
     return this.getJob(id)
   }
@@ -402,6 +705,26 @@ export class TaskRepository {
     this.db.prepare('UPDATE jobs SET cancel_requested=1, updated_at=? WHERE id=?').run(now(), id)
     if (job.state === 'queued') return this.transition(id, 'cancelled', { detail: { reason: 'cancelled_before_start' } })
     return this.getJob(id)
+  }
+
+  retryJob(id) {
+    const job = this.getJob(id)
+    if (!job) return null
+    if (job.state !== 'failed') {
+      throw Object.assign(new Error(`job in ${job.state} state cannot be retried`), {
+        statusCode: 409,
+        code: 'JOB_NOT_RETRYABLE',
+      })
+    }
+    return this.transition(id, 'queued', {
+      error: null,
+      detail: {
+        reason: 'manual_retry',
+        previousAttempts: job.attempts,
+        previousError: job.error,
+      },
+      availableAt: 0,
+    }, { resetAttempts: true, routeIndex: 0, resetRouteAttempts: true, clearCancel: true })
   }
 
   shouldCancel(id) { return Boolean(this.getJob(id)?.cancelRequested) }
@@ -426,6 +749,16 @@ export class TaskRepository {
       .map((row) => ({ state: row.state, detail: row.detail_json ? JSON.parse(row.detail_json) : null, createdAt: row.created_at }))
   }
 
+  recordBatchEvent(batchId, event, detail) {
+    this.db.prepare('INSERT INTO batch_events (batch_id,event,detail_json,created_at) VALUES (?,?,?,?)')
+      .run(batchId, event, detail ? JSON.stringify(detail) : null, now())
+  }
+
+  batchEvents(batchId) {
+    return this.db.prepare('SELECT event,detail_json,created_at FROM batch_events WHERE batch_id=? ORDER BY id').all(batchId)
+      .map((row) => ({ event: row.event, detail: row.detail_json ? JSON.parse(row.detail_json) : null, createdAt: row.created_at }))
+  }
+
   close() { this.db.close() }
 }
 
@@ -445,11 +778,15 @@ async function mockGenerate(request, signal, attempt) {
   const dimensions = parseImageSize(baseSize)
   if (!dimensions) throw new Error('mock provider could not resolve base size')
   const svg = Buffer.from(`<svg width="${dimensions.width}" height="${dimensions.height}" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#f4f4f0"/><rect x="5%" y="5%" width="90%" height="90%" fill="#1778f2"/><circle cx="50%" cy="50%" r="20%" fill="#ffffff"/></svg>`)
-  return sharp(svg).png().toBuffer()
+  return { buffer: await sharp(svg).png().toBuffer(), usage: { source: 'mock', images: 1 } }
 }
 
 async function compatibleGenerate(request, providerConfig, signal) {
-  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
+  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), {
+    code: 'PROVIDER_UNAVAILABLE',
+    retryable: false,
+    fallbackEligible: true,
+  })
   const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
   const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/images/generations`)
   const response = await providerFetch(endpoint, {
@@ -501,12 +838,12 @@ async function compatibleGenerate(request, providerConfig, signal) {
     })
   }
   const entry = payload?.data?.[0]
-  if (entry?.b64_json) return Buffer.from(entry.b64_json, 'base64')
+  if (entry?.b64_json) return { buffer: Buffer.from(entry.b64_json, 'base64'), usage: payload.usage ?? null }
   if (entry?.url) {
     const imageResponse = await providerFetch(entry.url, { signal }, 'asset-download')
     if (!imageResponse.ok) throw Object.assign(new Error(`provider asset returned HTTP ${imageResponse.status}`), { retryable: true })
     try {
-      return Buffer.from(await imageResponse.arrayBuffer())
+      return { buffer: Buffer.from(await imageResponse.arrayBuffer()), usage: payload.usage ?? null }
     } catch (error) {
       throw providerNetworkError(error, 'asset-body', signal)
     }
@@ -519,7 +856,11 @@ async function compatibleGenerate(request, providerConfig, signal) {
 // based on the reference. Used when input.sourceAssetId + input.prompt are both
 // present and apiMode === 'images'. Returns a raw image Buffer.
 async function compatibleEdit(request, providerConfig, sourceBuffer, signal) {
-  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
+  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), {
+    code: 'PROVIDER_UNAVAILABLE',
+    retryable: false,
+    fallbackEligible: true,
+  })
   const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
   const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/images/edits`)
 
@@ -577,12 +918,12 @@ async function compatibleEdit(request, providerConfig, sourceBuffer, signal) {
     })
   }
   const entry = payload?.data?.[0]
-  if (entry?.b64_json) return Buffer.from(entry.b64_json, 'base64')
+  if (entry?.b64_json) return { buffer: Buffer.from(entry.b64_json, 'base64'), usage: payload.usage ?? null }
   if (entry?.url) {
     const imageResponse = await providerFetch(entry.url, { signal }, 'asset-download')
     if (!imageResponse.ok) throw Object.assign(new Error(`provider asset returned HTTP ${imageResponse.status}`), { retryable: true })
     try {
-      return Buffer.from(await imageResponse.arrayBuffer())
+      return { buffer: Buffer.from(await imageResponse.arrayBuffer()), usage: payload.usage ?? null }
     } catch (error) {
       throw providerNetworkError(error, 'asset-body', signal)
     }
@@ -629,7 +970,11 @@ function responsesOutputTextMessages(output) {
 // as images mode. When sourceBuffer is provided, switches to edit mode
 // (action:'edit' + multimodal input with the reference image).
 async function responsesGenerate(request, providerConfig, signal, sourceBuffer) {
-  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), { retryable: false })
+  if (!providerConfig.baseUrl || !providerConfig.apiKey) throw Object.assign(new Error('real provider configuration is unavailable'), {
+    code: 'PROVIDER_UNAVAILABLE',
+    retryable: false,
+    fallbackEligible: true,
+  })
   const normalizedBaseUrl = providerConfig.baseUrl.replace(/\/+$/, '')
   const endpoint = new URL(`${normalizedBaseUrl.endsWith('/v1') ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`}/responses`)
   const isEdit = Buffer.isBuffer(sourceBuffer)
@@ -703,7 +1048,7 @@ async function responsesGenerate(request, providerConfig, signal, sourceBuffer) 
     if (item?.type !== 'image_generation_call') continue
     if (item.status === 'failed') continue
     const b64 = responsesImageResultBase64(item.result)
-    if (b64) return Buffer.from(b64, 'base64')
+    if (b64) return { buffer: Buffer.from(b64, 'base64'), usage: payload.usage ?? null }
   }
   // No usable image. Surface the most informative failure: prefer a safety
   // refusal in output text, then the first failed image_generation_call's
@@ -822,21 +1167,25 @@ export class TaskWorkerPool {
 
   async process(jobId) {
     let stage = 'validating'
+    let providerCallId = null
+    let providerCallFinished = false
     try {
       const request = this.repository.getRequest(jobId)
       const validation = validateImageJobRequest(request)
       if (!validation.valid) throw Object.assign(new Error(validation.errors.join('; ')), { retryable: false })
       if (this.repository.shouldCancel(jobId)) return void this.repository.transition(jobId, 'cancelled')
+      const claimedJob = this.repository.getJob(jobId)
+      const effectiveRequest = requestForRoute(request, claimedJob.routeIndex)
+      const isEditMode = effectiveRequest.input.sourceAssetId && effectiveRequest.input.prompt
 
       this.repository.transition(jobId, 'generating')
       stage = 'generating'
       let sourceManifest
-      const isEditMode = request.input.sourceAssetId && request.input.prompt
       if (isEditMode) {
         // Image-to-image (edit): read the uploaded reference image, send it to
         // the provider's edit endpoint with the prompt, and use the returned
         // NEW image as the source canvas.
-        const existing = this.repository.getAsset(request.input.sourceAssetId)
+        const existing = this.repository.getAsset(effectiveRequest.input.sourceAssetId)
         if (!existing) throw Object.assign(new Error('source asset not found'), { retryable: false })
         const referenceBuffer = await readFile(existing.filePath)
         const controller = new AbortController()
@@ -845,13 +1194,16 @@ export class TaskWorkerPool {
         let sourceBuffer
         let sourceTransform = null
         try {
-          const apiMode = request.generation.apiMode || 'images'
-          const providerBuffer = request.generation.provider === 'mock'
-            ? await mockGenerate(request, controller.signal, this.repository.getJob(jobId).attempts)
+          const apiMode = effectiveRequest.generation.apiMode || 'images'
+          providerCallId = this.repository.startProviderCall(claimedJob)
+          const providerResult = effectiveRequest.generation.provider === 'mock'
+            ? await mockGenerate(effectiveRequest, controller.signal, this.repository.getJob(jobId).routeAttempts)
             : apiMode === 'responses'
-              ? await responsesGenerate(request, this.providerConfig, controller.signal, referenceBuffer)
-              : await compatibleEdit(request, this.providerConfig, referenceBuffer, controller.signal)
-          const normalized = await normalizeSourceCanvas(request, providerBuffer)
+              ? await responsesGenerate(effectiveRequest, this.providerConfig, controller.signal, referenceBuffer)
+              : await compatibleEdit(effectiveRequest, this.providerConfig, referenceBuffer, controller.signal)
+          this.repository.finishProviderCall(providerCallId, { state: 'succeeded', usage: providerResult.usage })
+          providerCallFinished = true
+          const normalized = await normalizeSourceCanvas(effectiveRequest, providerResult.buffer)
           sourceBuffer = normalized.buffer
           sourceTransform = normalized.transform
         } finally {
@@ -859,13 +1211,13 @@ export class TaskWorkerPool {
           this.controllers.delete(jobId)
         }
         sourceManifest = await this.createStoredAsset(jobId, 'source', sourceBuffer, existing.manifest.assetId, sourceTransform)
-      } else if (request.input.sourceAssetId) {
+      } else if (effectiveRequest.input.sourceAssetId) {
         // Source-only (no prompt): use the uploaded asset directly as the source
         // canvas, normalizing ratio locally. No provider call. Backward compatible.
-        const existing = this.repository.getAsset(request.input.sourceAssetId)
+        const existing = this.repository.getAsset(effectiveRequest.input.sourceAssetId)
         if (!existing) throw Object.assign(new Error('source asset not found'), { retryable: false })
         const rawBuffer = await readFile(existing.filePath)
-        const normalized = await normalizeSourceCanvas(request, rawBuffer)
+        const normalized = await normalizeSourceCanvas(effectiveRequest, rawBuffer)
         sourceManifest = normalized.transform
           ? await this.createStoredAsset(jobId, 'source', normalized.buffer, existing.manifest.assetId, normalized.transform)
           : existing.manifest
@@ -876,13 +1228,16 @@ export class TaskWorkerPool {
         let sourceBuffer
         let sourceTransform = null
         try {
-          const apiMode = request.generation.apiMode || 'images'
-          const providerBuffer = request.generation.provider === 'mock'
-            ? await mockGenerate(request, controller.signal, this.repository.getJob(jobId).attempts)
+          const apiMode = effectiveRequest.generation.apiMode || 'images'
+          providerCallId = this.repository.startProviderCall(claimedJob)
+          const providerResult = effectiveRequest.generation.provider === 'mock'
+            ? await mockGenerate(effectiveRequest, controller.signal, this.repository.getJob(jobId).routeAttempts)
             : apiMode === 'responses'
-              ? await responsesGenerate(request, this.providerConfig, controller.signal)
-              : await compatibleGenerate(request, this.providerConfig, controller.signal)
-          const normalized = await normalizeSourceCanvas(request, providerBuffer)
+              ? await responsesGenerate(effectiveRequest, this.providerConfig, controller.signal)
+              : await compatibleGenerate(effectiveRequest, this.providerConfig, controller.signal)
+          this.repository.finishProviderCall(providerCallId, { state: 'succeeded', usage: providerResult.usage })
+          providerCallFinished = true
+          const normalized = await normalizeSourceCanvas(effectiveRequest, providerResult.buffer)
           sourceBuffer = normalized.buffer
           sourceTransform = normalized.transform
         } finally {
@@ -922,27 +1277,61 @@ export class TaskWorkerPool {
       if (this.repository.shouldCancel(jobId)) return void this.repository.transition(jobId, 'cancelled')
       this.repository.transition(jobId, 'succeeded', {
         finalAssetId: finalManifest.assetId,
-        result: { sourceAssetId: sourceManifest.assetId, finalAssetId: finalManifest.assetId, manifestVersion: '1' },
+        result: {
+          sourceAssetId: sourceManifest.assetId,
+          finalAssetId: finalManifest.assetId,
+          manifestVersion: '1',
+          actualRoute: this.repository.getJob(jobId).actualRoute,
+        },
       })
     } catch (error) {
       const current = this.repository.getJob(jobId)
       if (!current || ['cancelled', 'succeeded'].includes(current.state)) return
       if (!ACTIVE_STATES.includes(current.state)) return
       if (current.cancelRequested) return void this.repository.transition(jobId, 'cancelled')
-      const retryable = error?.retryable !== false && current.attempts < current.maxAttempts
+      const retryable = error?.retryable !== false && current.routeAttempts < current.maxAttempts
+      const canFallback = current.routeIndex === 0
+        && Boolean(current.request.generation?.fallback)
+        && fallbackEligible(error, stage)
       const detail = {
         code: error?.name === 'AbortError' ? 'PROVIDER_TIMEOUT' : error?.code || 'JOB_FAILED',
         message: error instanceof Error ? error.message : String(error),
         stage,
         retryable,
+        fallbackEligible: canFallback,
+        route: current.actualRoute,
+        routeAttempt: current.routeAttempts,
+        totalAttempt: current.attempts,
       }
       if (error?.providerCode) detail.providerCode = error.providerCode
       if (error?.httpStatus) detail.httpStatus = error.httpStatus
       if (error?.diagnostics) detail.diagnostics = error.diagnostics
+      if (providerCallId && !providerCallFinished) {
+        this.repository.finishProviderCall(providerCallId, {
+          state: 'failed',
+          error: detail,
+          httpStatus: error?.httpStatus,
+        })
+        providerCallFinished = true
+      }
       this.repository.transition(jobId, 'failed', { error: detail, detail })
       if (retryable) {
-        const delay = Math.min(this.providerRetryBaseMs * (2 ** (current.attempts - 1)), this.providerRetryBaseMs * 4)
-        this.repository.transition(jobId, 'queued', { availableAt: Date.now() + delay, detail: { reason: 'automatic_retry', delay } })
+        const delay = Math.min(this.providerRetryBaseMs * (2 ** (current.routeAttempts - 1)), this.providerRetryBaseMs * 4)
+        this.repository.transition(jobId, 'queued', {
+          availableAt: Date.now() + delay,
+          detail: { reason: 'automatic_retry', delay, route: current.actualRoute },
+        })
+      } else if (canFallback) {
+        const fallbackRoute = routeFromRequest(current.request, 1)
+        this.repository.transition(jobId, 'queued', {
+          availableAt: 0,
+          detail: {
+            reason: 'route_fallback',
+            from: current.actualRoute,
+            to: fallbackRoute,
+            previousError: detail,
+          },
+        }, { routeIndex: 1, resetRouteAttempts: true })
       }
     }
   }
@@ -1024,9 +1413,35 @@ export async function createTaskApi(options = {}) {
         const result = repository.createOrGetJob(body)
         return void json(response, result.created ? 201 : 200, result.job, { 'idempotency-replayed': result.created ? 'false' : 'true' })
       }
+      if (request.method === 'POST' && url.pathname === '/v1/image-batches') {
+        const body = JSON.parse((await readBody(request, 5 * 1024 * 1024)).toString('utf8'))
+        const validation = validateBatchRequest(body)
+        if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_BATCH', details: validation.errors } })
+        const result = repository.createOrGetBatch(body)
+        return void json(response, result.created ? 201 : 200, result.batch, { 'idempotency-replayed': result.created ? 'false' : 'true' })
+      }
+      if (request.method === 'GET' && url.pathname === '/v1/image-batches') {
+        const limit = parseJobListLimit(url.searchParams.get('limit'))
+        return void json(response, 200, { items: repository.listBatches(limit) })
+      }
+      const batchMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)$/)
+      if (request.method === 'GET' && batchMatch) {
+        const batch = repository.getBatch(batchMatch[1])
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchControlMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/(pause|resume)$/)
+      if (request.method === 'POST' && batchControlMatch) {
+        const batch = repository.setBatchControlState(batchControlMatch[1], batchControlMatch[2] === 'pause' ? 'paused' : 'running')
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchRetryMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/retry-failed$/)
+      if (request.method === 'POST' && batchRetryMatch) {
+        const batch = repository.retryFailedBatchJobs(batchRetryMatch[1])
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
       const jobMatch = url.pathname.match(/^\/v1\/image-jobs\/([^/]+)$/)
       if (request.method === 'GET' && jobMatch) {
-        const job = repository.getJob(jobMatch[1])
+        const job = repository.getJob(jobMatch[1], { includeAccounting: true })
         return void (job ? json(response, 200, { ...job, events: repository.events(job.id) }) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
       }
       const cancelMatch = url.pathname.match(/^\/v1\/image-jobs\/([^/]+)\/cancel$/)
@@ -1034,6 +1449,11 @@ export async function createTaskApi(options = {}) {
         const job = repository.requestCancel(cancelMatch[1])
         if (job) workerPool.cancel(job.id)
         return void (job ? json(response, 200, job) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const retryMatch = url.pathname.match(/^\/v1\/image-jobs\/([^/]+)\/retry$/)
+      if (request.method === 'POST' && retryMatch) {
+        const job = repository.retryJob(retryMatch[1])
+        return void (job ? json(response, 200, { ...job, events: repository.events(job.id) }) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
       }
       const assetMatch = url.pathname.match(/^\/v1\/assets\/([^/]+)$/)
       if (request.method === 'GET' && assetMatch) {

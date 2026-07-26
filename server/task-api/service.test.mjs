@@ -3,9 +3,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import sharp from 'sharp'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createTaskApi } from './service.mjs'
+import { createTaskApi, TaskRepository } from './service.mjs'
 
 const running = []
 const providerServers = []
@@ -62,6 +63,53 @@ afterEach(async () => {
 })
 
 describe('local Image Task API', { testTimeout: 30_000 }, () => {
+  it('migrates legacy jobs with route tracking defaults', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-migration-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const legacy = new DatabaseSync(databasePath)
+    legacy.exec(`
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        request_hash TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        source_asset_id TEXT,
+        final_asset_id TEXT,
+        error_json TEXT,
+        result_json TEXT,
+        available_at INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+    const payload = request({ idempotencyKey: 'legacy-route-migration-001' })
+    legacy.prepare('INSERT INTO jobs (id,idempotency_key,request_hash,request_json,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)')
+      .run('job_legacy', payload.idempotencyKey, 'legacy-hash', JSON.stringify(payload), 'queued', new Date().toISOString(), new Date().toISOString())
+    legacy.close()
+
+    const repository = new TaskRepository(databasePath)
+    expect(repository.getJob('job_legacy')).toMatchObject({
+      attempts: 0,
+      routeIndex: 0,
+      routeAttempts: 0,
+      actualRoute: { provider: 'mock', model: 'mock-v1', apiMode: 'images' },
+    })
+    repository.db.prepare(`
+      INSERT INTO provider_calls (job_id,attempt,route_index,provider,model,api_mode,state,started_at)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).run('job_legacy', 1, 0, 'mock', 'mock-v1', 'images', 'started', new Date().toISOString())
+    repository.recoverInterruptedJobs()
+    expect(repository.db.prepare('SELECT state,error_json FROM provider_calls WHERE job_id=?').get('job_legacy')).toMatchObject({
+      state: 'interrupted',
+    })
+    repository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
   it('requires bearer authentication', async () => {
     const { url } = await start()
     const response = await fetch(`${url}/v1/image-jobs/missing`)
@@ -143,6 +191,127 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect((await invalidCursor.json()).error.code).toBe('INVALID_CURSOR')
   })
 
+  it('creates an idempotent batch with ordered durable jobs and derived progress', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const payload = {
+      idempotencyKey: 'batch-create-001',
+      name: 'Contract batch',
+      items: [
+        { itemKey: 'first', request: request({ idempotencyKey: 'batch-create-job-001', input: { prompt: 'first batch prompt' } }) },
+        { itemKey: 'second', request: request({ idempotencyKey: 'batch-create-job-002', input: { prompt: 'second batch prompt' } }) },
+      ],
+    }
+    const first = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(payload),
+    })
+    const created = await first.json()
+    expect(first.status).toBe(201)
+    expect(created).toMatchObject({
+      name: 'Contract batch',
+      state: 'running',
+      stats: { total: 2, queued: 2, terminal: 0 },
+      items: [
+        { itemKey: 'first', position: 0, job: { request: { input: { prompt: 'first batch prompt' } } } },
+        { itemKey: 'second', position: 1, job: { request: { input: { prompt: 'second batch prompt' } } } },
+      ],
+    })
+    expect(new Set(created.items.map((item) => item.job.id)).size).toBe(2)
+
+    const replay = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(payload),
+    })
+    expect(replay.status).toBe(200)
+    expect(replay.headers.get('idempotency-replayed')).toBe('true')
+    expect((await replay.json()).id).toBe(created.id)
+
+    const conflict = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ ...payload, name: 'Different batch input' }),
+    })
+    expect(conflict.status).toBe(409)
+    expect((await conflict.json()).error.code).toBe('BATCH_IDEMPOTENCY_CONFLICT')
+  })
+
+  it('pauses queued batch jobs without interrupting work and resumes claiming', async () => {
+    const { url, api } = await start({ concurrency: 0 })
+    const payload = {
+      idempotencyKey: 'batch-pause-001',
+      items: [
+        { itemKey: 'only', request: request({ idempotencyKey: 'batch-pause-job-001' }) },
+      ],
+    }
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(payload),
+    }).then((response) => response.json())
+
+    const paused = await fetch(`${url}/v1/image-batches/${created.id}/pause`, {
+      method: 'POST',
+      headers: headers(),
+    }).then((response) => response.json())
+    expect(paused).toMatchObject({ state: 'paused', controlState: 'paused', stats: { queued: 1 } })
+    expect(api.repository.claimNextJob()).toBeNull()
+
+    const resumed = await fetch(`${url}/v1/image-batches/${created.id}/resume`, {
+      method: 'POST',
+      headers: headers(),
+    }).then((response) => response.json())
+    expect(resumed).toMatchObject({ state: 'running', controlState: 'running' })
+    const claimed = api.repository.claimNextJob()
+    expect(claimed).toMatchObject({ state: 'validating' })
+
+    await fetch(`${url}/v1/image-batches/${created.id}/pause`, { method: 'POST', headers: headers() })
+    api.repository.transition(claimed.id, 'generating')
+    api.repository.transition(claimed.id, 'source_ready')
+    api.repository.transition(claimed.id, 'enhancing')
+    api.repository.transition(claimed.id, 'finalizing')
+    api.repository.transition(claimed.id, 'succeeded')
+    expect(api.repository.getBatch(created.id)).toMatchObject({
+      state: 'completed',
+      controlState: 'paused',
+      stats: { succeeded: 1, terminal: 1 },
+    })
+  })
+
+  it('retries all failed batch jobs with fresh attempt budgets and resumes the batch', async () => {
+    const { url, api } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-retry-001',
+        items: [
+          {
+            itemKey: 'failed-item',
+            request: request({ idempotencyKey: 'batch-retry-job-001', retry: { maxAttempts: 1 } }),
+          },
+        ],
+      }),
+    }).then((response) => response.json())
+    const claimed = api.repository.claimNextJob()
+    api.repository.transition(claimed.id, 'failed', {
+      error: { code: 'PROVIDER_NETWORK_ERROR', message: 'test failure', retryable: false },
+    })
+
+    const retried = await fetch(`${url}/v1/image-batches/${created.id}/retry-failed`, {
+      method: 'POST',
+      headers: headers(),
+    }).then((response) => response.json())
+    expect(retried).toMatchObject({
+      state: 'running',
+      stats: { queued: 1, failed: 0 },
+      items: [{ itemKey: 'failed-item', job: { id: claimed.id, state: 'queued', attempts: 0 } }],
+    })
+    expect(retried.events.at(-1)).toMatchObject({ event: 'retry_failed', detail: { retried: 1 } })
+    expect(api.repository.events(claimed.id).some((event) => event.detail?.reason === 'manual_retry')).toBe(true)
+  })
+
   it('runs a mock job and stores traceable source/final PNG assets', async () => {
     const { url } = await start()
     const created = await create(url, request({ idempotencyKey: 'mock-success-001' }))
@@ -196,6 +365,46 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(replay.response.headers.get('idempotency-replayed')).toBe('true')
   })
 
+  it('manually retries a failed job with a fresh attempt budget and preserved history', async () => {
+    const { url } = await start({ providerTimeoutMs: 30 })
+    const created = await create(url, request({
+      idempotencyKey: 'manual-retry-001',
+      generation: { provider: 'mock', model: 'mock-v1', testBehavior: 'fail' },
+      retry: { maxAttempts: 2 },
+    }))
+    const firstFailure = await wait(url, created.body.id)
+    expect(firstFailure).toMatchObject({ state: 'failed', attempts: 2 })
+
+    const retryResponse = await fetch(`${url}/v1/image-jobs/${created.body.id}/retry`, {
+      method: 'POST',
+      headers: headers(),
+    })
+    expect(retryResponse.status).toBe(200)
+    expect((await retryResponse.json()).id).toBe(created.body.id)
+
+    const secondFailure = await wait(url, created.body.id)
+    expect(secondFailure).toMatchObject({ state: 'failed', attempts: 2 })
+    const manualRetryEvent = secondFailure.events.find((event) => event.detail?.reason === 'manual_retry')
+    expect(manualRetryEvent).toMatchObject({
+      state: 'queued',
+      detail: {
+        previousAttempts: 2,
+        previousError: expect.objectContaining({ code: 'JOB_FAILED' }),
+      },
+    })
+  })
+
+  it('rejects manual retry for a non-failed job', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await create(url, request({ idempotencyKey: 'manual-retry-conflict-001' }))
+    const response = await fetch(`${url}/v1/image-jobs/${created.body.id}/retry`, {
+      method: 'POST',
+      headers: headers(),
+    })
+    expect(response.status).toBe(409)
+    expect((await response.json()).error.code).toBe('JOB_NOT_RETRYABLE')
+  })
+
   it('recovers from a transient provider failure on the same job', async () => {
     const { url } = await start()
     const payload = request({
@@ -207,6 +416,106 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     const job = await wait(url, created.body.id)
     expect(job).toMatchObject({ id: created.body.id, state: 'succeeded', attempts: 2 })
     expect(job.events.filter((event) => event.state === 'queued')).toHaveLength(2)
+  })
+
+  it('falls back to a second route on the same job after the primary route exhausts its budget', async () => {
+    const png = await sharp({ create: { width: 720, height: 1280, channels: 4, background: '#4c7899' } }).png().toBuffer()
+    const calls = []
+    const provider = createServer((incoming, response) => {
+      calls.push(incoming.url)
+      response.setHeader('content-type', 'application/json')
+      if (incoming.url === '/v1/images/generations') {
+        response.statusCode = 503
+        return void response.end(JSON.stringify({ error: { code: 'upstream_unavailable', message: 'temporary gateway outage' } }))
+      }
+      response.end(JSON.stringify({
+        output: [{ type: 'image_generation_call', status: 'completed', result: png.toString('base64') }],
+        usage: { total_tokens: 7 },
+      }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key' } })
+    const payload = request({
+      idempotencyKey: 'route-fallback-success-001',
+      generation: {
+        provider: 'configured',
+        model: 'primary-image-model',
+        apiMode: 'images',
+        baseSize: '720x1280',
+        fallback: { provider: 'configured', model: 'fallback-response-model', apiMode: 'responses' },
+      },
+      retry: { maxAttempts: 2 },
+    })
+    const created = await create(url, payload)
+    const job = await wait(url, created.body.id)
+
+    expect(job).toMatchObject({
+      id: created.body.id,
+      state: 'succeeded',
+      attempts: 3,
+      routeIndex: 1,
+      routeAttempts: 1,
+      actualRoute: { provider: 'configured', model: 'fallback-response-model', apiMode: 'responses' },
+      result: {
+        actualRoute: { provider: 'configured', model: 'fallback-response-model', apiMode: 'responses' },
+      },
+      accounting: {
+        calls: [
+          { attempt: 1, routeIndex: 0, state: 'failed', httpStatus: 503 },
+          { attempt: 2, routeIndex: 0, state: 'failed', httpStatus: 503 },
+          { attempt: 3, routeIndex: 1, state: 'succeeded' },
+        ],
+      },
+    })
+    expect(job.accounting.calls[2].usage).toEqual({ total_tokens: 7 })
+    expect(calls).toEqual(['/v1/images/generations', '/v1/images/generations', '/v1/responses'])
+    expect(job.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        state: 'queued',
+        detail: expect.objectContaining({
+          reason: 'route_fallback',
+          from: expect.objectContaining({ model: 'primary-image-model', apiMode: 'images' }),
+          to: expect.objectContaining({ model: 'fallback-response-model', apiMode: 'responses' }),
+        }),
+      }),
+    ]))
+
+    const replay = await create(url, payload)
+    expect(replay.body.id).toBe(job.id)
+    expect(replay.response.headers.get('idempotency-replayed')).toBe('true')
+    expect(calls).toHaveLength(3)
+  })
+
+  it('terminates after the fallback route also exhausts its own budget', async () => {
+    let providerCalls = 0
+    const provider = createServer((incoming, response) => {
+      providerCalls += 1
+      response.statusCode = 503
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ error: { code: 'upstream_unavailable', message: 'still unavailable' } }))
+    })
+    await new Promise((resolvePromise) => provider.listen(0, '127.0.0.1', resolvePromise))
+    providerServers.push(provider)
+    const providerUrl = `http://127.0.0.1:${provider.address().port}`
+    const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key' } })
+    const created = await create(url, request({
+      idempotencyKey: 'route-fallback-failure-001',
+      generation: {
+        provider: 'configured',
+        model: 'primary-image-model',
+        apiMode: 'images',
+        baseSize: '720x1280',
+        fallback: { provider: 'configured', model: 'fallback-response-model', apiMode: 'responses' },
+      },
+      retry: { maxAttempts: 1 },
+    }))
+    const job = await wait(url, created.body.id)
+
+    expect(job).toMatchObject({ state: 'failed', attempts: 2, routeIndex: 1, routeAttempts: 1 })
+    expect(job.events.filter((event) => event.detail?.reason === 'route_fallback')).toHaveLength(1)
+    expect(providerCalls).toBe(2)
   })
 
   it('retries a malformed JSON gateway response on the same job', async () => {
@@ -302,7 +611,12 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
     const created = await create(url, request({
       idempotencyKey: 'content-policy-no-retry-001',
-      generation: { provider: 'configured', model: 'test-model', baseSize: '720x1280' },
+      generation: {
+        provider: 'configured',
+        model: 'test-model',
+        baseSize: '720x1280',
+        fallback: { provider: 'configured', model: 'fallback-model', apiMode: 'responses' },
+      },
     }))
     const job = await wait(url, created.body.id)
     expect(job).toMatchObject({
@@ -310,6 +624,17 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       attempts: 1,
       error: { code: 'PROVIDER_RESPONSE_ERROR', providerCode: 'content_policy_violation', retryable: false },
     })
+    expect(job.events.some((event) => event.detail?.reason === 'route_fallback')).toBe(false)
+    const replay = await create(url, request({
+      idempotencyKey: 'content-policy-no-retry-001',
+      generation: {
+        provider: 'configured',
+        model: 'test-model',
+        baseSize: '720x1280',
+        fallback: { provider: 'configured', model: 'fallback-model', apiMode: 'responses' },
+      },
+    }))
+    expect(replay.body.id).toBe(job.id)
     expect(providerCalls).toBe(1)
   })
 
@@ -654,7 +979,22 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     }))
     const job = await wait(url, created.body.id)
     // Must succeed without any provider call (provider is 'configured' but no baseUrl set).
-    expect(job).toMatchObject({ state: 'succeeded', sourceAssetId: asset.assetId })
+    expect(job).toMatchObject({ state: 'succeeded', sourceAssetId: asset.assetId, accounting: { calls: [] } })
+  })
+
+  it('does not account an edit that fails before contacting the provider', async () => {
+    const { url } = await start()
+    const created = await create(url, request({
+      idempotencyKey: 'edit-missing-source-001',
+      input: { prompt: 'edit this image', sourceAssetId: 'asset_missing' },
+    }))
+    const job = await wait(url, created.body.id)
+
+    expect(job).toMatchObject({
+      state: 'failed',
+      error: { message: 'source asset not found' },
+      accounting: { calls: [] },
+    })
   })
 
   it('defaults to 2K generation and 4K final when neither baseSize nor dimensions is provided', async () => {

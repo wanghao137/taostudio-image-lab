@@ -89,6 +89,38 @@ describe('Image Job Contract v1 core', () => {
     })).toEqual({ valid: true, errors: [] })
   })
 
+  it('validates a provider-neutral fallback route', () => {
+    const base = {
+      contractVersion: '1',
+      idempotencyKey: 'agent-fallback-001',
+      input: { prompt: 'studio portrait' },
+      composition: { ratio: '1:1' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', enhancement: 'auto' },
+    }
+    expect(validateImageJobRequest({
+      ...base,
+      generation: {
+        provider: 'configured',
+        model: 'primary-model',
+        fallback: { provider: 'configured', model: 'fallback-model', apiMode: 'responses' },
+      },
+    })).toEqual({ valid: true, errors: [] })
+    expect(validateImageJobRequest({
+      ...base,
+      generation: {
+        provider: 'configured',
+        model: 'primary-model',
+        fallback: { provider: 'configured', model: '', apiMode: 'invalid' },
+      },
+    })).toMatchObject({
+      valid: false,
+      errors: expect.arrayContaining([
+        'generation.fallback.model is required',
+        'generation.fallback.apiMode must be one of images, responses',
+      ]),
+    })
+  })
+
   it('preserves arbitrary source ratios within one output pixel', () => {
     let seed = 0x5f3759df
     const random = () => {

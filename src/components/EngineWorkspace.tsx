@@ -7,7 +7,10 @@ import {
   CircleAlert,
   Cpu,
   LoaderCircle,
+  Layers,
+  Pause,
   Plus,
+  Play,
   RefreshCw,
   Server,
   Unplug,
@@ -19,14 +22,20 @@ import {
   clearLocalImageTaskApiConfig,
   createImageTaskGeneration,
   createImageJob,
+  createImageBatch,
+  controlImageBatch,
+  getImageBatch,
   getImageAssetBlob,
   getImageJob,
   getImageTaskCapabilities,
+  listImageBatches,
   listImageJobs,
   readLocalImageTaskApiConfig,
+  retryImageJob,
   saveLocalImageTaskApiConfig,
   type ImageJobStateV1,
   type ImageJobV1,
+  type ImageBatchV1,
   type ImageTaskApiConfig,
   type ImageTaskCapabilitiesV1,
 } from '../lib/imageTaskApi'
@@ -93,6 +102,9 @@ interface NewJobDraft {
   ratio: string
   model: string
   apiMode: 'images' | 'responses'
+  fallbackEnabled: boolean
+  fallbackModel: string
+  fallbackApiMode: 'images' | 'responses'
 }
 
 const DEFAULT_DRAFT: NewJobDraft = {
@@ -100,6 +112,9 @@ const DEFAULT_DRAFT: NewJobDraft = {
   ratio: '1:1',
   model: '',
   apiMode: 'images',
+  fallbackEnabled: true,
+  fallbackModel: 'gpt-5.6-sol',
+  fallbackApiMode: 'responses',
 }
 
 export default function EngineWorkspace() {
@@ -111,16 +126,20 @@ export default function EngineWorkspace() {
   })
   const [capabilities, setCapabilities] = useState<ImageTaskCapabilitiesV1 | null>(null)
   const [jobs, setJobs] = useState<ImageJobV1[]>([])
+  const [batches, setBatches] = useState<ImageBatchV1[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [filter, setFilter] = useState<ImageJobStateV1 | 'all'>('all')
   const [selectedJob, setSelectedJob] = useState<ImageJobV1 | null>(null)
+  const [selectedBatch, setSelectedBatch] = useState<ImageBatchV1 | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [showNewJob, setShowNewJob] = useState(false)
+  const [showNewBatch, setShowNewBatch] = useState(false)
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
+  const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
   const selectedJobId = selectedJob?.id
 
   const refresh = useCallback(async (targetConfig = config, cursor?: string | null) => {
@@ -160,6 +179,7 @@ export default function EngineWorkspace() {
       const result = await listImageJobs(normalized, { limit: 30 })
       setJobs(result.items)
       setNextCursor(result.nextCursor)
+      setBatches((await listImageBatches(normalized)).items)
     } catch (error) {
       setCapabilities(null)
       setConnectionError(errorMessage(error))
@@ -172,14 +192,32 @@ export default function EngineWorkspace() {
     if (initialConfig) void connect(initialConfig, false)
   }, [connect, initialConfig])
 
+  const refreshBatches = useCallback(async (targetConfig = config) => {
+    if (!targetConfig) return
+    try {
+      const result = await listImageBatches(targetConfig)
+      let next = result.items
+      if (selectedBatch?.id) {
+        const detail = await getImageBatch(targetConfig, selectedBatch.id)
+        next = next.map((batch) => batch.id === detail.id ? detail : batch)
+        if (!next.some((batch) => batch.id === detail.id)) next = [detail, ...next]
+        setSelectedBatch(detail)
+      }
+      setBatches(next)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    }
+  }, [config, selectedBatch?.id])
+
   useEffect(() => {
     if (!config || !capabilities) return
     void refresh(config, null)
     const interval = window.setInterval(() => {
       void refresh(config, null)
+      void refreshBatches(config)
     }, 3000)
     return () => window.clearInterval(interval)
-  }, [capabilities, config, refresh])
+  }, [capabilities, config, refresh, refreshBatches])
 
   useEffect(() => {
     let objectUrl: string | null = null
@@ -226,6 +264,13 @@ export default function EngineWorkspace() {
           provider: 'configured',
           model: draft.model.trim(),
           apiMode: draft.apiMode,
+          ...(draft.fallbackEnabled && draft.fallbackModel.trim() ? {
+            fallback: {
+              provider: 'configured',
+              model: draft.fallbackModel.trim(),
+              apiMode: draft.fallbackApiMode,
+            },
+          } : {}),
         }),
         output: {
           ratioMode: 'inherit',
@@ -262,12 +307,97 @@ export default function EngineWorkspace() {
     }
   }
 
+  const handleCreateBatch = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!config || !capabilities || !draft.model.trim()) return
+    const prompts = batchDraft.prompts.split(/\r?\n/).map((prompt) => prompt.trim()).filter(Boolean)
+    if (!prompts.length) return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      const batch = await createImageBatch(config, {
+        idempotencyKey: `engine-ui-batch:${crypto.randomUUID()}`,
+        ...(batchDraft.name.trim() ? { name: batchDraft.name.trim() } : {}),
+        items: prompts.map((prompt, index) => ({
+          itemKey: `prompt-${index + 1}`,
+          request: {
+            contractVersion: '1',
+            idempotencyKey: `engine-ui-batch-item:${crypto.randomUUID()}:${index}`,
+            input: { prompt },
+            composition: { ratio: draft.ratio },
+            generation: createImageTaskGeneration({
+              provider: 'configured',
+              model: draft.model.trim(),
+              apiMode: draft.apiMode,
+              ...(draft.fallbackEnabled && draft.fallbackModel.trim() ? {
+                fallback: {
+                  provider: 'configured',
+                  model: draft.fallbackModel.trim(),
+                  apiMode: draft.fallbackApiMode,
+                },
+              } : {}),
+            }),
+            output: {
+              ratioMode: 'inherit',
+              format: 'png',
+              quality: 'high',
+              dimensions: calculateImageSize('4K', draft.ratio) || undefined,
+              enhancement: 'lanczos3',
+              contentClass: 'photo',
+            },
+            retry: { maxAttempts: capabilities.capabilities.retry.maxAttempts },
+          },
+        })),
+      })
+      setBatchDraft({ name: '', prompts: '' })
+      setShowNewBatch(false)
+      setShowNewJob(false)
+      setSelectedJob(null)
+      setSelectedBatch(batch)
+      await refreshBatches(config)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleBatchControl = async (action: 'pause' | 'resume' | 'retry-failed') => {
+    if (!config || !selectedBatch) return
+    setBusy(true)
+    try {
+      const next = await controlImageBatch(config, selectedBatch.id, action)
+      setSelectedBatch(next)
+      setBatches((current) => current.map((batch) => batch.id === next.id ? next : batch))
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleRetry = async () => {
+    if (!config || !selectedJob) return
+    setBusy(true)
+    try {
+      const retried = await retryImageJob(config, selectedJob.id)
+      setSelectedJob(retried)
+      await refresh(config, null)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const disconnect = () => {
     clearLocalImageTaskApiConfig()
     setConfig(null)
     setCapabilities(null)
     setJobs([])
+    setBatches([])
     setSelectedJob(null)
+    setSelectedBatch(null)
     setConnectionDraft((current) => ({ ...current, token: '' }))
   }
 
@@ -359,12 +489,27 @@ export default function EngineWorkspace() {
               type="button"
               onClick={() => {
                 setSelectedJob(null)
+                setSelectedBatch(null)
                 setShowNewJob(true)
+                setShowNewBatch(false)
               }}
               className="inline-flex h-9 items-center gap-2 rounded-md bg-[#df7b57] px-3 text-sm font-medium text-white hover:bg-[#c96643]"
             >
               <Plus className="h-4 w-4" />
               新建任务
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedJob(null)
+                setSelectedBatch(null)
+                setShowNewJob(false)
+                setShowNewBatch(true)
+              }}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-[#356c82]/35 px-3 text-sm font-medium text-[#356c82] hover:bg-[#356c82]/10 dark:text-[#8ec5d7]"
+            >
+              <Layers className="h-4 w-4" />
+              新建批次
             </button>
           </div>
         </header>
@@ -391,7 +536,35 @@ export default function EngineWorkspace() {
         )}
 
         <div className="grid min-h-[620px] lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
-          <section className="border-b border-stone-300 py-4 dark:border-white/10 lg:border-b-0 lg:border-r lg:pr-5">
+          <section className="order-2 border-b border-stone-300 py-4 dark:border-white/10 lg:order-1 lg:border-b-0 lg:border-r lg:pr-5">
+            <div className="mb-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="text-sm font-semibold">批次队列</h2>
+                <span className="text-[10px] font-medium uppercase text-stone-400">{batches.length} 个批次</span>
+              </div>
+              <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
+                {batches.map((batch) => (
+                  <button
+                    type="button"
+                    key={batch.id}
+                    onClick={() => {
+                      setSelectedJob(null)
+                      setShowNewJob(false)
+                      setShowNewBatch(false)
+                      if (config) void getImageBatch(config, batch.id).then(setSelectedBatch).catch((error) => setWorkspaceError(errorMessage(error)))
+                    }}
+                    className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] ${selectedBatch?.id === batch.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{batch.name || batch.id}</div>
+                      <div className="mt-1 text-[10px] text-stone-400">{batch.stats.succeeded}/{batch.stats.total} 完成 · {batch.stats.failed} 失败</div>
+                    </div>
+                    <span className="self-center text-[11px] font-medium text-stone-500">{batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}</span>
+                  </button>
+                ))}
+                {!batches.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有批次</div>}
+              </div>
+            </div>
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-sm font-semibold">任务队列</h2>
               <select
@@ -450,8 +623,19 @@ export default function EngineWorkspace() {
             )}
           </section>
 
-          <aside className="py-4 lg:pl-5">
-            {showNewJob ? (
+          <aside className="order-1 border-b border-stone-300 py-4 pb-24 dark:border-white/10 lg:order-2 lg:border-b-0 lg:pb-4 lg:pl-5">
+            {showNewBatch ? (
+              <NewBatchForm
+                capabilities={capabilities}
+                draft={draft}
+                batchDraft={batchDraft}
+                busy={busy}
+                onChange={setBatchDraft}
+                onRatioChange={(ratio) => setDraft((current) => ({ ...current, ratio }))}
+                onClose={() => setShowNewBatch(false)}
+                onSubmit={handleCreateBatch}
+              />
+            ) : showNewJob ? (
               <NewJobForm
                 capabilities={capabilities}
                 draft={draft}
@@ -460,12 +644,15 @@ export default function EngineWorkspace() {
                 onClose={() => setShowNewJob(false)}
                 onSubmit={handleCreate}
               />
+            ) : selectedBatch ? (
+              <BatchInspector batch={selectedBatch} busy={busy} onControl={handleBatchControl} />
             ) : selectedJob ? (
               <JobInspector
                 job={selectedJob}
                 previewUrl={previewUrl}
                 busy={busy}
                 onCancel={handleCancel}
+                onRetry={handleRetry}
               />
             ) : (
               <div className="flex min-h-[360px] flex-col items-center justify-center border-y border-stone-300 text-center dark:border-white/10">
@@ -497,7 +684,7 @@ function NewJobForm({
   onSubmit: (event: FormEvent) => void
 }) {
   return (
-    <form onSubmit={onSubmit}>
+    <form data-engine-editor onSubmit={onSubmit}>
       <div className="flex items-center justify-between">
         <div>
           <div className="text-[10px] font-medium uppercase text-[#df7b57]">Submit</div>
@@ -548,6 +735,39 @@ function NewJobForm({
           placeholder="留空则使用引擎默认模型"
         />
       </label>
+      <div className="mt-4 border-t border-stone-300 pt-4 dark:border-white/10">
+        <label className="flex items-center justify-between gap-3 text-xs font-medium text-stone-500 dark:text-stone-400">
+          <span>主路由失败后自动切换备用路由</span>
+          <input
+            type="checkbox"
+            checked={draft.fallbackEnabled}
+            onChange={(event) => onChange({ ...draft, fallbackEnabled: event.target.checked })}
+            className="h-4 w-4 accent-[#356c82]"
+          />
+        </label>
+        {draft.fallbackEnabled && (
+          <div className="mt-3 grid grid-cols-[minmax(0,1fr)_120px] gap-3">
+            <label className="text-xs font-medium text-stone-500 dark:text-stone-400">
+              备用模型
+              <input
+                value={draft.fallbackModel}
+                onChange={(event) => onChange({ ...draft, fallbackModel: event.target.value })}
+                className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-3 font-mono text-sm outline-none focus:border-[#356c82] dark:border-white/10 dark:bg-white/[0.04]"
+              />
+            </label>
+            <label className="text-xs font-medium text-stone-500 dark:text-stone-400">
+              API 模式
+              <select
+                value={draft.fallbackApiMode}
+                onChange={(event) => onChange({ ...draft, fallbackApiMode: event.target.value as NewJobDraft['fallbackApiMode'] })}
+                className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-2 text-sm dark:border-white/10 dark:bg-[#191714]"
+              >
+                {capabilities.capabilities.apiModes.map((mode) => <option key={mode}>{mode}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
+      </div>
       <div className="mt-4 border-y border-stone-300 py-3 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
         <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('2K', draft.ratio)}</span></div>
         <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG</span></div>
@@ -555,7 +775,7 @@ function NewJobForm({
       </div>
       <button
         type="submit"
-        disabled={busy || !draft.prompt.trim() || !draft.model.trim()}
+        disabled={busy || !draft.prompt.trim() || !draft.model.trim() || (draft.fallbackEnabled && !draft.fallbackModel.trim())}
         className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-[#df7b57] px-4 text-sm font-medium text-white hover:bg-[#c96643] disabled:opacity-40"
       >
         {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
@@ -565,16 +785,171 @@ function NewJobForm({
   )
 }
 
+function NewBatchForm({
+  capabilities,
+  draft,
+  batchDraft,
+  busy,
+  onChange,
+  onRatioChange,
+  onClose,
+  onSubmit,
+}: {
+  capabilities: ImageTaskCapabilitiesV1
+  draft: NewJobDraft
+  batchDraft: { name: string; prompts: string }
+  busy: boolean
+  onChange: (draft: { name: string; prompts: string }) => void
+  onRatioChange: (ratio: string) => void
+  onClose: () => void
+  onSubmit: (event: FormEvent) => void
+}) {
+  const promptCount = batchDraft.prompts.split(/\r?\n/).map((prompt) => prompt.trim()).filter(Boolean).length
+  return (
+    <form data-engine-editor onSubmit={onSubmit}>
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[10px] font-medium uppercase text-[#356c82]">Batch</div>
+          <h2 className="mt-1 text-lg font-semibold">新建批次</h2>
+        </div>
+        <button type="button" onClick={onClose} className="p-2 text-stone-400 hover:text-stone-800 dark:hover:text-white" aria-label="关闭">
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <label className="mt-5 block text-xs font-medium text-stone-500 dark:text-stone-400">
+        批次名称
+        <input
+          value={batchDraft.name}
+          onChange={(event) => onChange({ ...batchDraft, name: event.target.value })}
+          className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-3 text-sm outline-none focus:border-[#356c82] dark:border-white/10 dark:bg-white/[0.04]"
+          placeholder="可选"
+        />
+      </label>
+      <label className="mt-4 block text-xs font-medium text-stone-500 dark:text-stone-400">
+        提示词
+        <textarea
+          value={batchDraft.prompts}
+          onChange={(event) => onChange({ ...batchDraft, prompts: event.target.value })}
+          rows={12}
+          className="mt-2 w-full resize-y rounded-md border border-stone-300 bg-white px-3 py-2.5 text-sm leading-6 outline-none focus:border-[#356c82] dark:border-white/10 dark:bg-white/[0.04]"
+          placeholder="每行一个提示词"
+          autoFocus
+        />
+      </label>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <label className="text-xs font-medium text-stone-500 dark:text-stone-400">
+          比例
+          <select
+            value={draft.ratio}
+            onChange={(event) => onRatioChange(event.target.value)}
+            className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-2 text-sm dark:border-white/10 dark:bg-[#191714]"
+          >
+            {capabilities.capabilities.ratios.map((ratio) => <option key={ratio}>{ratio}</option>)}
+          </select>
+        </label>
+        <div className="text-xs font-medium text-stone-500 dark:text-stone-400">
+          <div>条目数</div>
+          <div className="mt-2 h-10 rounded-md border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300">{promptCount}</div>
+        </div>
+      </div>
+      <div className="mt-4 border-y border-stone-300 py-3 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
+        <div className="flex justify-between gap-3"><span>主路由</span><span className="truncate font-mono">{draft.model} / {draft.apiMode}</span></div>
+        <div className="mt-2 flex justify-between gap-3"><span>备用路由</span><span className="truncate font-mono">{draft.fallbackEnabled ? `${draft.fallbackModel} / ${draft.fallbackApiMode}` : '关闭'}</span></div>
+        <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('2K', draft.ratio)}</span></div>
+        <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG</span></div>
+      </div>
+      <button
+        type="submit"
+        disabled={busy || promptCount === 0 || !draft.model.trim() || (draft.fallbackEnabled && !draft.fallbackModel.trim())}
+        className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-[#356c82] px-4 text-sm font-medium text-white hover:bg-[#2b596b] disabled:opacity-40"
+      >
+        {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Layers className="h-4 w-4" />}
+        提交批次
+      </button>
+    </form>
+  )
+}
+
+function BatchInspector({
+  batch,
+  busy,
+  onControl,
+}: {
+  batch: ImageBatchV1
+  busy: boolean
+  onControl: (action: 'pause' | 'resume' | 'retry-failed') => void
+}) {
+  const percentage = batch.stats.total ? Math.round((batch.stats.terminal / batch.stats.total) * 100) : 0
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] font-medium uppercase text-stone-400">Batch detail</div>
+          <h2 className="mt-1 break-all font-mono text-sm font-semibold">{batch.name || batch.id}</h2>
+        </div>
+        <span className="shrink-0 rounded-md border border-stone-300 px-2 py-1 text-[11px] font-medium text-stone-600 dark:border-white/10 dark:text-stone-300">
+          {batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}
+        </span>
+      </div>
+      <div className="mt-5">
+        <div className="flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
+          <span>批次进度</span>
+          <span className="font-mono">{batch.stats.terminal}/{batch.stats.total} · {percentage}%</span>
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
+          <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${percentage}%` }} />
+        </div>
+      </div>
+      <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
+        <div><dt className="text-stone-400">成功</dt><dd className="mt-1 font-mono text-emerald-600">{batch.stats.succeeded}</dd></div>
+        <div><dt className="text-stone-400">失败</dt><dd className="mt-1 font-mono text-red-500">{batch.stats.failed}</dd></div>
+        <div><dt className="text-stone-400">执行中</dt><dd className="mt-1 font-mono">{batch.stats.active}</dd></div>
+        <div><dt className="text-stone-400">排队</dt><dd className="mt-1 font-mono">{batch.stats.queued}</dd></div>
+      </dl>
+      <div className="mt-5 flex flex-wrap gap-2">
+        {batch.state === 'running' && (
+          <button type="button" onClick={() => onControl('pause')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300 px-3 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-40 dark:border-amber-400/30 dark:text-amber-300">
+            <Pause className="h-4 w-4" />暂停批次
+          </button>
+        )}
+        {batch.state === 'paused' && (
+          <button type="button" onClick={() => onControl('resume')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-emerald-300 px-3 text-xs font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 dark:border-emerald-400/30 dark:text-emerald-300">
+            <Play className="h-4 w-4" />恢复批次
+          </button>
+        )}
+        {batch.stats.failed > 0 && (
+          <button type="button" onClick={() => onControl('retry-failed')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-[#356c82]/35 px-3 text-xs font-medium text-[#356c82] hover:bg-[#356c82]/10 disabled:opacity-40 dark:border-[#8ec5d7]/30 dark:text-[#8ec5d7]">
+            {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}重试失败项
+          </button>
+        )}
+      </div>
+      <div className="mt-6">
+        <h3 className="text-xs font-semibold uppercase text-stone-400">条目</h3>
+        <ol className="mt-3 max-h-[360px] overflow-auto divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
+          {batch.items.map((item) => (
+            <li key={item.itemKey} className="flex items-center justify-between gap-3 py-2 text-xs">
+              <span className="min-w-0 truncate">{item.itemKey}</span>
+              <StatusBadge state={item.job.state} />
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  )
+}
+
 function JobInspector({
   job,
   previewUrl,
   busy,
   onCancel,
+  onRetry,
 }: {
   job: ImageJobV1
   previewUrl: string | null
   busy: boolean
   onCancel: () => void
+  onRetry: () => void
 }) {
   return (
     <div>
@@ -596,8 +971,11 @@ function JobInspector({
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
         <div><dt className="text-stone-400">比例</dt><dd className="mt-1 font-mono">{job.request.composition.ratio}</dd></div>
         <div><dt className="text-stone-400">最终尺寸</dt><dd className="mt-1 font-mono">{job.request.output.dimensions || '继承'}</dd></div>
-        <div><dt className="text-stone-400">模型</dt><dd className="mt-1 truncate font-mono">{job.request.generation.model || '引擎默认'}</dd></div>
-        <div><dt className="text-stone-400">执行次数</dt><dd className="mt-1 font-mono">{job.attempts} / {job.maxAttempts}</dd></div>
+        <div><dt className="text-stone-400">实际路由</dt><dd className="mt-1 truncate font-mono">{job.actualRoute?.model || job.request.generation.model} / {job.actualRoute?.apiMode || job.request.generation.apiMode || 'images'}</dd></div>
+        <div><dt className="text-stone-400">当前路由尝试</dt><dd className="mt-1 font-mono">{job.routeAttempts ?? job.attempts} / {job.maxAttempts}</dd></div>
+        <div><dt className="text-stone-400">总尝试次数</dt><dd className="mt-1 font-mono">{job.attempts}</dd></div>
+        <div><dt className="text-stone-400">路由</dt><dd className="mt-1 font-mono">{(job.routeIndex ?? 0) === 0 ? '主路由' : '备用路由'}</dd></div>
+        <div><dt className="text-stone-400">Provider 调用</dt><dd className="mt-1 font-mono">{job.accounting ? `${job.accounting.calls.length} 次` : '旧服务未提供'}</dd></div>
       </dl>
 
       {job.error && (
@@ -616,7 +994,14 @@ function JobInspector({
               <span className={`relative mt-0.5 flex h-4 w-4 items-center justify-center rounded-full ${event.state === 'failed' ? 'bg-red-500 text-white' : event.state === 'succeeded' ? 'bg-emerald-500 text-white' : 'bg-stone-300 text-stone-700 dark:bg-stone-700 dark:text-stone-200'}`}>
                 {event.state === 'failed' ? <CircleAlert className="h-2.5 w-2.5" /> : event.state === 'succeeded' ? <Check className="h-2.5 w-2.5" /> : null}
               </span>
-              <span className="font-medium">{STATE_LABELS[event.state]}</span>
+              <span className="min-w-0 font-medium">
+                {event.detail?.reason === 'route_fallback' ? '切换备用路由' : STATE_LABELS[event.state]}
+                {event.detail?.reason === 'route_fallback' && (
+                  <span className="mt-1 block truncate font-mono text-[10px] font-normal text-stone-400">
+                    {String((event.detail.to as { model?: string } | undefined)?.model || '')}
+                  </span>
+                )}
+              </span>
               <time className="font-mono text-[10px] text-stone-400">{formatTime(event.createdAt)}</time>
             </li>
           ))}
@@ -632,6 +1017,17 @@ function JobInspector({
         >
           {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
           取消任务
+        </button>
+      )}
+      {job.state === 'failed' && (
+        <button
+          type="button"
+          onClick={onRetry}
+          disabled={busy}
+          className="mt-6 inline-flex h-9 items-center gap-2 rounded-md border border-[#356c82]/35 px-3 text-xs font-medium text-[#356c82] hover:bg-[#356c82]/10 disabled:opacity-40 dark:border-[#8ec5d7]/30 dark:text-[#8ec5d7]"
+        >
+          {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          重新执行
         </button>
       )}
     </div>

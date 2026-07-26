@@ -256,6 +256,15 @@ export function validateImageJobRequest(request) {
   if (!request.input?.prompt && !request.input?.sourceAssetId) errors.push('input.prompt or input.sourceAssetId is required')
   if (request.composition?.ratio && !parseRatio(request.composition.ratio)) errors.push('composition.ratio is invalid')
   if (request.generation?.apiMode !== undefined && !API_MODES.includes(request.generation.apiMode)) errors.push(`generation.apiMode must be one of ${API_MODES.join(', ')}`)
+  if (request.generation?.fallback !== undefined) {
+    const fallback = request.generation.fallback
+    if (!fallback || typeof fallback !== 'object') errors.push('generation.fallback must be an object')
+    else {
+      if (!fallback.provider || typeof fallback.provider !== 'string') errors.push('generation.fallback.provider is required')
+      if (!fallback.model || typeof fallback.model !== 'string') errors.push('generation.fallback.model is required')
+      if (fallback.apiMode !== undefined && !API_MODES.includes(fallback.apiMode)) errors.push(`generation.fallback.apiMode must be one of ${API_MODES.join(', ')}`)
+    }
+  }
   if (request.output?.ratioMode !== 'inherit') errors.push('output.ratioMode must be inherit')
   if (request.output?.format !== 'png') errors.push('output.format must be png in contract v1')
   if (request.output?.quality !== 'high') errors.push('output.quality must be high in contract v1')

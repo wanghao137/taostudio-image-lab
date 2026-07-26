@@ -98,6 +98,108 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ImageJob' }
         '404': { description: Job not found }
+  /v1/image-jobs/{id}/retry:
+    post:
+      operationId: retryImageJob
+      description: Requeue a failed job with a fresh attempt budget while preserving its event history.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Requeued failed job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageJob' }
+        '409': { description: Job is not in the failed state }
+        '404': { description: Job not found }
+  /v1/image-batches:
+    get:
+      operationId: listImageBatches
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+      responses:
+        '200':
+          description: Newest-first image batches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ImageBatch' }
+    post:
+      operationId: createImageBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImageBatchCreate' }
+      responses:
+        '201':
+          description: Batch created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '200':
+          description: Existing idempotent batch returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Batch idempotency conflict or a job already belongs to another batch }
+  /v1/image-batches/{id}:
+    get:
+      operationId: getImageBatch
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Batch state, aggregate statistics, items, and events
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { description: Batch not found }
+  /v1/image-batches/{id}/pause:
+    post:
+      operationId: pauseImageBatch
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Batch paused; active jobs continue and queued jobs stop being claimed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Completed batch cannot be paused }
+        '404': { description: Batch not found }
+  /v1/image-batches/{id}/resume:
+    post:
+      operationId: resumeImageBatch
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Batch resumed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Completed batch cannot be resumed }
+        '404': { description: Batch not found }
+  /v1/image-batches/{id}/retry-failed:
+    post:
+      operationId: retryFailedImageBatchJobs
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Failed jobs requeued with fresh attempt budgets and the batch resumed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { description: Batch not found }
   /v1/assets/{id}:
     get:
       operationId: getImageAsset
@@ -132,9 +234,37 @@ components:
         state: { $ref: '#/components/schemas/ImageJobState' }
         detail: { type: [object, 'null'], additionalProperties: true }
         createdAt: { type: string, format: date-time }
+    ImageGenerationRoute:
+      type: object
+      required: [provider, model, apiMode]
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        apiMode: { type: string, enum: [images, responses] }
+    ImageProviderCall:
+      type: object
+      required: [id, attempt, routeIndex, route, state, startedAt]
+      properties:
+        id: { type: integer }
+        attempt: { type: integer, minimum: 1 }
+        routeIndex: { type: integer, minimum: 0, maximum: 1 }
+        route: { $ref: '#/components/schemas/ImageGenerationRoute' }
+        state: { type: string, enum: [started, succeeded, failed, interrupted] }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        usage: { type: [object, 'null'], additionalProperties: true }
+        error: { type: [object, 'null'], additionalProperties: true }
+        httpStatus: { type: [integer, 'null'] }
+    ImageJobAccounting:
+      type: object
+      required: [calls]
+      properties:
+        calls:
+          type: array
+          items: { $ref: '#/components/schemas/ImageProviderCall' }
     ImageJob:
       type: object
-      required: [id, contractVersion, request, state, attempts, maxAttempts, cancelRequested, createdAt, updatedAt]
+      required: [id, contractVersion, request, state, attempts, routeIndex, routeAttempts, maxAttempts, actualRoute, cancelRequested, createdAt, updatedAt]
       properties:
         id: { type: string }
         contractVersion: { const: '1' }
@@ -142,12 +272,16 @@ components:
           $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
         state: { $ref: '#/components/schemas/ImageJobState' }
         attempts: { type: integer, minimum: 0 }
+        routeIndex: { type: integer, minimum: 0, maximum: 1 }
+        routeAttempts: { type: integer, minimum: 0 }
         maxAttempts: { type: integer, minimum: 1, maximum: 5 }
+        actualRoute: { $ref: '#/components/schemas/ImageGenerationRoute' }
         cancelRequested: { type: boolean }
         sourceAssetId: { type: [string, 'null'] }
         finalAssetId: { type: [string, 'null'] }
         error: { type: [object, 'null'], additionalProperties: true }
         result: { type: [object, 'null'], additionalProperties: true }
+        accounting: { $ref: '#/components/schemas/ImageJobAccounting' }
         events:
           type: array
           items: { $ref: '#/components/schemas/ImageJobEvent' }
@@ -161,6 +295,62 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ImageJob' }
         nextCursor: { type: [string, 'null'] }
+    ImageBatchCreate:
+      type: object
+      required: [idempotencyKey, items]
+      properties:
+        idempotencyKey: { type: string, minLength: 8, maxLength: 200 }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [itemKey, request]
+            properties:
+              itemKey: { type: string, minLength: 1, maxLength: 200 }
+              request:
+                $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
+    ImageBatch:
+      type: object
+      required: [id, state, controlState, stats, items, events, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: [string, 'null'] }
+        state: { type: string, enum: [running, paused, completed] }
+        controlState: { type: string, enum: [running, paused] }
+        stats:
+          type: object
+          required: [total, terminal, active, queued, succeeded, failed, cancelled]
+          properties:
+            total: { type: integer }
+            terminal: { type: integer }
+            active: { type: integer }
+            queued: { type: integer }
+            succeeded: { type: integer }
+            failed: { type: integer }
+            cancelled: { type: integer }
+        items:
+          type: array
+          items:
+            type: object
+            required: [itemKey, position, job]
+            properties:
+              itemKey: { type: string }
+              position: { type: integer }
+              job: { $ref: '#/components/schemas/ImageJob' }
+        events:
+          type: array
+          items:
+            type: object
+            required: [event, detail, createdAt]
+            properties:
+              event: { type: string }
+              detail: { type: [object, 'null'], additionalProperties: true }
+              createdAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     UploadedImageAsset:
       type: object
       required: [assetId, manifest]

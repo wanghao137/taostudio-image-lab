@@ -41,7 +41,7 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
       <main className="flex-1 overflow-y-auto pb-24">{children}</main>
 
       {/* 右下角 FAB + 底部 Tab */}
-      <div className="safe-area-bottom fixed inset-x-0 bottom-0 z-40 border-t border-stone-200/70 bg-white/95 backdrop-blur dark:border-white/[0.08] dark:bg-[#13100d]/95">
+      <div data-mobile-navigation className="safe-area-bottom fixed inset-x-0 bottom-0 z-40 border-t border-stone-200/70 bg-white/95 backdrop-blur dark:border-white/[0.08] dark:bg-[#13100d]/95">
         <div className="relative flex items-center justify-between px-4 py-1.5">
           <TabButton icon={ImageIcon} label="画廊" active={tab === 'gallery'} onClick={goGallery} />
           <TabButton icon={Star} label="收藏" active={tab === 'favorites'} onClick={goFavorites} />

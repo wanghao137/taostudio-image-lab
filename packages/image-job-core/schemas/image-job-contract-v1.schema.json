@@ -31,7 +31,17 @@
         "provider": { "type": "string", "minLength": 1 },
         "model": { "type": "string", "minLength": 1 },
         "baseSize": { "type": "string" },
-        "apiMode": { "enum": ["images", "responses"] }
+        "apiMode": { "enum": ["images", "responses"] },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["provider", "model"],
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "apiMode": { "enum": ["images", "responses"] }
+          }
+        }
       }
     },
     "output": {

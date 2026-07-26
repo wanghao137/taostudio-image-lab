@@ -419,6 +419,12 @@ input[type="number"] {
   padding-bottom: var(--safe-area-bottom);
 }
 
+@media (max-width: 639px) {
+  body:has([data-engine-editor]) [data-mobile-navigation] {
+    display: none;
+  }
+}
+
 @media (max-width: 640px) {
   html.agent-no-pull-refresh,
   html.agent-no-pull-refresh body {

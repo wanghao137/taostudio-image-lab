@@ -1,4 +1,5 @@
 import { createWriteStream } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -14,6 +15,29 @@ if (!token) throw new Error('IMAGE_TASK_API_TOKEN is required')
 const PRESET_4K = {
   '1:1': '2880x2880', '3:2': '3456x2304', '2:3': '2304x3456', '16:9': '3840x2160',
   '9:16': '2160x3840', '4:3': '3200x2400', '3:4': '2400x3200', '21:9': '3840x1646',
+}
+const fallbackSchema = z.object({
+  provider: z.string().min(1).default('configured'),
+  model: z.string().min(1),
+  apiMode: z.enum(['images', 'responses']).default('responses'),
+})
+const batchItemSchema = z.object({
+  itemKey: z.string().min(1).max(200),
+  prompt: z.string().min(1).optional(),
+  sourceAssetId: z.string().optional(),
+  ratio: z.enum(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
+  dimensions: z.string().regex(/^\d+x\d+$/).optional(),
+  provider: z.string().min(1).default('configured'),
+  model: z.string().min(1),
+  apiMode: z.enum(['images', 'responses']).optional(),
+  fallback: fallbackSchema.optional(),
+  enhancement: z.enum(['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']).default('auto'),
+  contentClass: z.enum(['photo', 'illustration', 'text', 'logo', 'ui']).default('photo'),
+  maxAttempts: z.number().int().min(1).max(5).default(3),
+})
+
+function batchJobIdempotencyKey(batchKey, itemKey) {
+  return `batch-job-${createHash('sha256').update(`${batchKey}\0${itemKey}`).digest('hex').slice(0, 48)}`
 }
 
 async function api(path, init = {}) {
@@ -72,6 +96,9 @@ server.registerTool('image_job_create', {
     provider: z.string().min(1).default('mock'),
     model: z.string().min(1).default('mock-v1'),
     apiMode: z.enum(['images', 'responses']).optional(),
+    fallback: fallbackSchema.optional().describe(
+      'Optional second route used only for eligible provider failures after the primary route budget is exhausted.',
+    ),
     enhancement: z.enum(['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']).default('auto'),
     contentClass: z.enum(['photo', 'illustration', 'text', 'logo', 'ui']).default('photo'),
     maxAttempts: z.number().int().min(1).max(5).default(3),
@@ -88,7 +115,13 @@ server.registerTool('image_job_create', {
       idempotencyKey: input.idempotencyKey,
       input: { ...(input.prompt ? { prompt: input.prompt } : {}), ...(input.sourceAssetId ? { sourceAssetId: input.sourceAssetId } : {}) },
       composition: { ratio: input.ratio },
-      generation: { provider: input.provider, model: input.model, ...(input.apiMode ? { apiMode: input.apiMode } : {}), ...(input.testBehavior ? { testBehavior: input.testBehavior } : {}) },
+      generation: {
+        provider: input.provider,
+        model: input.model,
+        ...(input.apiMode ? { apiMode: input.apiMode } : {}),
+        ...(input.fallback ? { fallback: input.fallback } : {}),
+        ...(input.testBehavior ? { testBehavior: input.testBehavior } : {}),
+      },
       output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions, enhancement: input.enhancement, contentClass: input.contentClass },
       retry: { maxAttempts: input.maxAttempts },
     }),
@@ -97,7 +130,7 @@ server.registerTool('image_job_create', {
 })
 
 server.registerTool('image_job_get', {
-  description: 'Get an image job and its state transition events.',
+  description: 'Get an image job, state transition events, and the provider-call accounting ledger.',
   inputSchema: { jobId: z.string().min(1) },
 }, async ({ jobId }) => textResult(await (await api(`/v1/image-jobs/${encodeURIComponent(jobId)}`)).json()))
 
@@ -110,6 +143,80 @@ server.registerTool('image_job_cancel', {
   description: 'Request cancellation of a queued or active image job.',
   inputSchema: { jobId: z.string().min(1) },
 }, async ({ jobId }) => textResult(await (await api(`/v1/image-jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })).json()))
+
+server.registerTool('image_job_retry', {
+  description: 'Requeue a failed image job with a fresh attempt budget while preserving its event history.',
+  inputSchema: { jobId: z.string().min(1) },
+}, async ({ jobId }) => textResult(await (await api(`/v1/image-jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' })).json()))
+
+server.registerTool('image_batch_create', {
+  description: 'Create an idempotent server-side image batch. Every item becomes a durable job with a stable derived idempotency key.',
+  inputSchema: {
+    idempotencyKey: z.string().min(8).max(200),
+    name: z.string().min(1).max(200).optional(),
+    items: z.array(batchItemSchema).min(1).max(500),
+  },
+}, async ({ idempotencyKey, name, items }) => {
+  const response = await api('/v1/image-batches', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      idempotencyKey,
+      ...(name ? { name } : {}),
+      items: items.map((item) => ({
+        itemKey: item.itemKey,
+        request: {
+          contractVersion: '1',
+          idempotencyKey: batchJobIdempotencyKey(idempotencyKey, item.itemKey),
+          input: {
+            ...(item.prompt ? { prompt: item.prompt } : {}),
+            ...(item.sourceAssetId ? { sourceAssetId: item.sourceAssetId } : {}),
+          },
+          composition: { ratio: item.ratio },
+          generation: {
+            provider: item.provider,
+            model: item.model,
+            ...(item.apiMode ? { apiMode: item.apiMode } : {}),
+            ...(item.fallback ? { fallback: item.fallback } : {}),
+          },
+          output: {
+            ratioMode: 'inherit',
+            format: 'png',
+            quality: 'high',
+            dimensions: item.dimensions || PRESET_4K[item.ratio],
+            enhancement: item.enhancement,
+            contentClass: item.contentClass,
+          },
+          retry: { maxAttempts: item.maxAttempts },
+        },
+      })),
+    }),
+  })
+  return textResult({
+    replayed: response.headers.get('idempotency-replayed') === 'true',
+    batch: await response.json(),
+  })
+})
+
+server.registerTool('image_batch_get', {
+  description: 'Get a batch with aggregate progress, ordered items, jobs, and batch events.',
+  inputSchema: { batchId: z.string().min(1) },
+}, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}`)).json()))
+
+server.registerTool('image_batch_pause', {
+  description: 'Pause a batch. Active jobs continue; queued jobs stop being claimed.',
+  inputSchema: { batchId: z.string().min(1) },
+}, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/pause`, { method: 'POST' })).json()))
+
+server.registerTool('image_batch_resume', {
+  description: 'Resume a paused batch.',
+  inputSchema: { batchId: z.string().min(1) },
+}, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/resume`, { method: 'POST' })).json()))
+
+server.registerTool('image_batch_retry_failed', {
+  description: 'Requeue every failed job in a batch with fresh attempt budgets and resume the batch.',
+  inputSchema: { batchId: z.string().min(1) },
+}, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' })).json()))
 
 server.registerTool('image_asset_download', {
   description: 'Download a completed source or final asset to a local PNG path.',
