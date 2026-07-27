@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
 import {
   Activity,
   Ban,
@@ -154,6 +154,65 @@ export default function EngineWorkspace() {
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
   const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
   const selectedJobId = selectedJob?.id
+  const inspectorSelectionRef = useRef<{
+    version: number
+    kind: 'none' | 'job' | 'batch'
+    id: string | null
+  }>({ version: 0, kind: 'none', id: null })
+
+  const beginInspectorSelection = useCallback((kind: 'none' | 'job' | 'batch', id: string | null) => {
+    const next = {
+      version: inspectorSelectionRef.current.version + 1,
+      kind,
+      id,
+    }
+    inspectorSelectionRef.current = next
+    return next.version
+  }, [])
+
+  const clearInspectorSelection = useCallback(() => {
+    beginInspectorSelection('none', null)
+    setSelectedJob(null)
+    setSelectedBatch(null)
+  }, [beginInspectorSelection])
+
+  const handleSelectJob = useCallback((job: ImageJobV1) => {
+    const selectionVersion = beginInspectorSelection('job', job.id)
+    setShowNewJob(false)
+    setShowNewBatch(false)
+    setSelectedBatch(null)
+    setSelectedJob(job)
+    if (!config) return
+    void getImageJob(config, job.id)
+      .then((detail) => {
+        const selection = inspectorSelectionRef.current
+        if (
+          selection.version === selectionVersion
+          && selection.kind === 'job'
+          && selection.id === job.id
+        ) setSelectedJob(detail)
+      })
+      .catch((error) => setWorkspaceError(errorMessage(error)))
+  }, [beginInspectorSelection, config])
+
+  const handleSelectBatch = useCallback((batch: ImageBatchV1) => {
+    const selectionVersion = beginInspectorSelection('batch', batch.id)
+    setShowNewJob(false)
+    setShowNewBatch(false)
+    setSelectedJob(null)
+    setSelectedBatch(batch)
+    if (!config) return
+    void getImageBatch(config, batch.id)
+      .then((detail) => {
+        const selection = inspectorSelectionRef.current
+        if (
+          selection.version === selectionVersion
+          && selection.kind === 'batch'
+          && selection.id === batch.id
+        ) setSelectedBatch(detail)
+      })
+      .catch((error) => setWorkspaceError(errorMessage(error)))
+  }, [beginInspectorSelection, config])
 
   const refresh = useCallback(async (targetConfig = config, cursor?: string | null) => {
     if (!targetConfig) return
@@ -180,8 +239,14 @@ export default function EngineWorkspace() {
       setNextCursor(loadedCount >= result.stats.matching ? null : result.nextCursor)
       setWorkspaceError(null)
       if (selectedJobId) {
+        const selectionVersion = inspectorSelectionRef.current.version
         const detail = await getImageJob(targetConfig, selectedJobId)
-        setSelectedJob(detail)
+        const selection = inspectorSelectionRef.current
+        if (
+          selection.version === selectionVersion
+          && selection.kind === 'job'
+          && selection.id === selectedJobId
+        ) setSelectedJob(detail)
       }
     } catch (error) {
       setWorkspaceError(errorMessage(error))
@@ -224,10 +289,16 @@ export default function EngineWorkspace() {
       const result = await listImageBatches(targetConfig)
       let next = result.items
       if (selectedBatch?.id) {
+        const selectionVersion = inspectorSelectionRef.current.version
         const detail = await getImageBatch(targetConfig, selectedBatch.id)
         next = next.map((batch) => batch.id === detail.id ? detail : batch)
         if (!next.some((batch) => batch.id === detail.id)) next = [detail, ...next]
-        setSelectedBatch(detail)
+        const selection = inspectorSelectionRef.current
+        if (
+          selection.version === selectionVersion
+          && selection.kind === 'batch'
+          && selection.id === detail.id
+        ) setSelectedBatch(detail)
       }
       setBatches(next)
     } catch (error) {
@@ -354,7 +425,10 @@ export default function EngineWorkspace() {
       })
       setDraft((current) => ({ ...current, prompt: '' }))
       setShowNewJob(false)
-      setSelectedJob(await getImageJob(config, created.id))
+      const detail = await getImageJob(config, created.id)
+      beginInspectorSelection('job', detail.id)
+      setSelectedBatch(null)
+      setSelectedJob(detail)
       await refresh(config, null)
     } catch (error) {
       setWorkspaceError(errorMessage(error))
@@ -394,6 +468,7 @@ export default function EngineWorkspace() {
       setBatchDraft({ name: '', prompts: '' })
       setShowNewBatch(false)
       setShowNewJob(false)
+      beginInspectorSelection('batch', batch.id)
       setSelectedJob(null)
       setSelectedBatch(batch)
       await refreshBatches(config)
@@ -439,8 +514,7 @@ export default function EngineWorkspace() {
     setJobs([])
     setJobStats(null)
     setBatches([])
-    setSelectedJob(null)
-    setSelectedBatch(null)
+    clearInspectorSelection()
     setConnectionDraft((current) => ({ ...current, token: '' }))
   }
 
@@ -531,8 +605,7 @@ export default function EngineWorkspace() {
             <button
               type="button"
               onClick={() => {
-                setSelectedJob(null)
-                setSelectedBatch(null)
+                clearInspectorSelection()
                 setShowNewJob(true)
                 setShowNewBatch(false)
               }}
@@ -544,8 +617,7 @@ export default function EngineWorkspace() {
             <button
               type="button"
               onClick={() => {
-                setSelectedJob(null)
-                setSelectedBatch(null)
+                clearInspectorSelection()
                 setShowNewJob(false)
                 setShowNewBatch(true)
               }}
@@ -590,12 +662,7 @@ export default function EngineWorkspace() {
                   <button
                     type="button"
                     key={batch.id}
-                    onClick={() => {
-                      setSelectedJob(null)
-                      setShowNewJob(false)
-                      setShowNewBatch(false)
-                      if (config) void getImageBatch(config, batch.id).then(setSelectedBatch).catch((error) => setWorkspaceError(errorMessage(error)))
-                    }}
+                    onClick={() => handleSelectBatch(batch)}
                     className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] ${selectedBatch?.id === batch.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
                   >
                     <div className="min-w-0">
@@ -648,10 +715,7 @@ export default function EngineWorkspace() {
                 <button
                   type="button"
                   key={job.id}
-                  onClick={() => {
-                    setShowNewJob(false)
-                    if (config) void getImageJob(config, job.id).then(setSelectedJob).catch((error) => setWorkspaceError(errorMessage(error)))
-                  }}
+                  onClick={() => handleSelectJob(job)}
                   className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === job.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
                 >
                   <div className="min-w-0">
