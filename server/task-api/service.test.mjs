@@ -159,6 +159,10 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
           enhancementFallback: 'lanczos3',
         },
         jobs: { defaultListLimit: 30, maxListLimit: 100 },
+        batches: {
+          qaStatuses: ['not_run', 'passed', 'failed', 'needs_review'],
+          acceptanceStatuses: ['pending', 'accepted', 'needs_review', 'rejected'],
+        },
       },
     })
   })
@@ -178,6 +182,12 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(firstPage.items).toHaveLength(2)
     expect(firstPage.items[0].request.input.prompt).toMatch(/list prompt$/)
     expect(firstPage.nextCursor).toEqual(expect.any(String))
+    expect(firstPage.stats).toMatchObject({
+      total: 3,
+      queued: 3,
+      matching: 3,
+      byState: { queued: 3 },
+    })
 
     const secondPageResponse = await fetch(`${url}/v1/image-jobs?state=queued&limit=2&cursor=${encodeURIComponent(firstPage.nextCursor)}`, { headers: headers() })
     const secondPage = await secondPageResponse.json()
@@ -310,6 +320,91 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
     expect(retried.events.at(-1)).toMatchObject({ event: 'retry_failed', detail: { retried: 1 } })
     expect(api.repository.events(claimed.id).some((event) => event.detail?.reason === 'manual_retry')).toBe(true)
+  })
+
+  it('tracks batch QA, acceptance, and replacement job history independently from generation state', async () => {
+    const { url, api } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-acceptance-001',
+        items: [
+          {
+            itemKey: 'reviewed-item',
+            request: request({ idempotencyKey: 'batch-acceptance-job-001' }),
+          },
+        ],
+      }),
+    }).then((response) => response.json())
+    const firstJob = api.repository.claimNextJob()
+    api.repository.transition(firstJob.id, 'generating')
+    api.repository.transition(firstJob.id, 'source_ready')
+    api.repository.transition(firstJob.id, 'enhancing')
+    api.repository.transition(firstJob.id, 'finalizing')
+    api.repository.transition(firstJob.id, 'succeeded')
+
+    const invalidReview = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ qaStatus: 'failed', acceptanceStatus: 'accepted' }),
+    })
+    expect(invalidReview.status).toBe(409)
+    expect((await invalidReview.json()).error.code).toBe('BATCH_ITEM_NOT_ACCEPTABLE')
+
+    const reviewed = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        qaStatus: 'passed',
+        acceptanceStatus: 'accepted',
+        detail: { visualQa: 'passed', assetInvariant: 'passed' },
+      }),
+    }).then((response) => response.json())
+    expect(reviewed).toMatchObject({
+      state: 'completed',
+      acceptanceState: 'accepted',
+      stats: { succeeded: 1, accepted: 1, qaPassed: 1, acceptancePending: 0 },
+      items: [{
+        itemKey: 'reviewed-item',
+        revision: 0,
+        generationStatus: 'succeeded',
+        qaStatus: 'passed',
+        acceptanceStatus: 'accepted',
+        jobHistory: [{ revision: 0, reason: 'initial', job: { id: firstJob.id } }],
+      }],
+    })
+
+    const replacementRequest = request({
+      idempotencyKey: 'batch-acceptance-job-002',
+      input: { prompt: 'revised after QA feedback' },
+    })
+    const replaced = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/job`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ reason: 'qa_revision', request: replacementRequest }),
+    }).then((response) => response.json())
+    expect(replaced).toMatchObject({
+      state: 'running',
+      acceptanceState: 'pending',
+      stats: { queued: 1, accepted: 0, acceptancePending: 1, qaNotRun: 1 },
+      items: [{
+        itemKey: 'reviewed-item',
+        revision: 1,
+        qaStatus: 'not_run',
+        acceptanceStatus: 'pending',
+        job: { request: { input: { prompt: 'revised after QA feedback' } } },
+        jobHistory: [
+          { revision: 0, job: { id: firstJob.id } },
+          { revision: 1, reason: 'qa_revision' },
+        ],
+      }],
+    })
+    expect(replaced.items[0].job.id).not.toBe(firstJob.id)
+    expect(replaced.events.at(-1)).toMatchObject({
+      event: 'item_job_replaced',
+      detail: { itemKey: 'reviewed-item', revision: 1, previousJobId: firstJob.id },
+    })
   })
 
   it('runs a mock job and stores traceable source/final PNG assets', async () => {
@@ -622,7 +717,13 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(job).toMatchObject({
       state: 'failed',
       attempts: 1,
-      error: { code: 'PROVIDER_RESPONSE_ERROR', providerCode: 'content_policy_violation', retryable: false },
+      error: {
+        code: 'PROVIDER_RESPONSE_ERROR',
+        providerCode: 'content_policy_violation',
+        retryable: false,
+        failureClass: 'content_policy',
+        recoveryAction: 'safe_rewrite',
+      },
     })
     expect(job.events.some((event) => event.detail?.reason === 'route_fallback')).toBe(false)
     const replay = await create(url, request({

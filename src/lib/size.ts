@@ -11,6 +11,7 @@ const MAX_PIXELS = 8_294_400
 export type SizeTier = '1K' | '2K' | '4K'
 export const COMMON_IMAGE_RATIOS = [
   { label: '1:1', value: '1:1' },
+  { label: '2:1', value: '2:1' },
   { label: '3:2', value: '3:2' },
   { label: '2:3', value: '2:3' },
   { label: '16:9', value: '16:9' },
@@ -130,6 +131,7 @@ export function formatImageRatio(width: number, height: number) {
   const simplified = `${simplifiedWidth}:${simplifiedHeight}`
   const commonRatios = [
     [1, 1],
+    [2, 1],
     [4, 3],
     [3, 4],
     [3, 2],

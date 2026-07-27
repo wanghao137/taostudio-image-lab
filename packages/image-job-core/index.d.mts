@@ -6,7 +6,7 @@ export const CONTRACT_VERSION: '1'
 export const MANIFEST_VERSION: '1'
 export const MAX_EDGE: number
 export const MAX_PIXELS: number
-export const COMMON_IMAGE_RATIOS: readonly ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']
+export const COMMON_IMAGE_RATIOS: readonly ['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']
 export const API_MODES: readonly ApiMode[]
 export const COMMON_SIZE_PRESETS: Readonly<Record<ImageTier, Readonly<Record<string, string>>>>
 export const JOB_STATES: readonly JobState[]

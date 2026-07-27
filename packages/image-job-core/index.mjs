@@ -5,7 +5,7 @@ export const CONTRACT_VERSION = '1'
 export const MANIFEST_VERSION = '1'
 export const MAX_EDGE = 3840
 export const MAX_PIXELS = 8_294_400
-export const COMMON_IMAGE_RATIOS = Object.freeze(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9'])
+export const COMMON_IMAGE_RATIOS = Object.freeze(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9'])
 
 // generation.apiMode selects the provider endpoint for a job.
 // 'images' (default) -> POST /images/generations for image models (gpt-image-2).
@@ -15,17 +15,17 @@ export const API_MODES = Object.freeze(['images', 'responses'])
 
 export const COMMON_SIZE_PRESETS = Object.freeze({
   '1K': Object.freeze({
-    '1:1': '1024x1024', '3:2': '1536x1024', '2:3': '1024x1536',
+    '1:1': '1024x1024', '2:1': '1536x768', '3:2': '1536x1024', '2:3': '1024x1536',
     '16:9': '1280x720', '9:16': '720x1280', '4:3': '1024x768',
     '3:4': '768x1024', '21:9': '1280x549',
   }),
   '2K': Object.freeze({
-    '1:1': '2048x2048', '3:2': '2160x1440', '2:3': '1440x2160',
+    '1:1': '2048x2048', '2:1': '2880x1440', '3:2': '2160x1440', '2:3': '1440x2160',
     '16:9': '2560x1440', '9:16': '1440x2560', '4:3': '2048x1536',
     '3:4': '1536x2048', '21:9': '2560x1097',
   }),
   '4K': Object.freeze({
-    '1:1': '2880x2880', '3:2': '3456x2304', '2:3': '2304x3456',
+    '1:1': '2880x2880', '2:1': '3840x1920', '3:2': '3456x2304', '2:3': '2304x3456',
     '16:9': '3840x2160', '9:16': '2160x3840', '4:3': '3200x2400',
     '3:4': '2400x3200', '21:9': '3840x1646',
   }),

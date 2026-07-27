@@ -200,6 +200,52 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ImageBatch' }
         '404': { description: Batch not found }
+  /v1/image-batches/{id}/items/{itemKey}/review:
+    post:
+      operationId: reviewImageBatchItem
+      description: Record visual QA and final acceptance for one batch item.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemKey, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImageBatchItemReview' }
+      responses:
+        '200':
+          description: Updated batch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { description: Batch item not found }
+        '409': { description: Accepted items require a succeeded job and passed QA }
+  /v1/image-batches/{id}/items/{itemKey}/job:
+    post:
+      operationId: replaceImageBatchItemJob
+      description: Attach a new revision job to a terminal batch item while preserving job history.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemKey, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request]
+              properties:
+                request:
+                  $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
+                reason: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        '200':
+          description: Updated batch with the replacement job active
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { description: Batch item not found }
+        '409': { description: Current batch item job is not terminal }
   /v1/assets/{id}:
     get:
       operationId: getImageAsset
@@ -289,12 +335,29 @@ components:
         updatedAt: { type: string, format: date-time }
     ImageJobList:
       type: object
-      required: [items, nextCursor]
+      required: [items, nextCursor, stats]
       properties:
         items:
           type: array
           items: { $ref: '#/components/schemas/ImageJob' }
         nextCursor: { type: [string, 'null'] }
+        stats:
+          $ref: '#/components/schemas/ImageJobStats'
+    ImageJobStats:
+      type: object
+      required: [total, terminal, active, queued, succeeded, failed, cancelled, byState, matching]
+      properties:
+        total: { type: integer }
+        terminal: { type: integer }
+        active: { type: integer }
+        queued: { type: integer }
+        succeeded: { type: integer }
+        failed: { type: integer }
+        cancelled: { type: integer }
+        matching: { type: integer }
+        byState:
+          type: object
+          additionalProperties: { type: integer }
     ImageBatchCreate:
       type: object
       required: [idempotencyKey, items]
@@ -314,15 +377,16 @@ components:
                 $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
     ImageBatch:
       type: object
-      required: [id, state, controlState, stats, items, events, createdAt, updatedAt]
+      required: [id, state, controlState, acceptanceState, stats, items, events, createdAt, updatedAt]
       properties:
         id: { type: string }
         name: { type: [string, 'null'] }
         state: { type: string, enum: [running, paused, completed] }
         controlState: { type: string, enum: [running, paused] }
+        acceptanceState: { type: string, enum: [pending, accepted, needs_review, rejected] }
         stats:
           type: object
-          required: [total, terminal, active, queued, succeeded, failed, cancelled]
+          required: [total, terminal, active, queued, succeeded, failed, cancelled, accepted, needsReview, rejected, acceptancePending, qaPassed, qaFailed, qaNeedsReview, qaNotRun]
           properties:
             total: { type: integer }
             terminal: { type: integer }
@@ -331,15 +395,40 @@ components:
             succeeded: { type: integer }
             failed: { type: integer }
             cancelled: { type: integer }
+            accepted: { type: integer }
+            needsReview: { type: integer }
+            rejected: { type: integer }
+            acceptancePending: { type: integer }
+            qaPassed: { type: integer }
+            qaFailed: { type: integer }
+            qaNeedsReview: { type: integer }
+            qaNotRun: { type: integer }
         items:
           type: array
           items:
             type: object
-            required: [itemKey, position, job]
+            required: [itemKey, position, revision, generationStatus, qaStatus, acceptanceStatus, job, jobHistory]
             properties:
               itemKey: { type: string }
               position: { type: integer }
+              revision: { type: integer }
+              generationStatus: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
+              qaStatus: { type: string, enum: [not_run, passed, failed, needs_review] }
+              acceptanceStatus: { type: string, enum: [pending, accepted, needs_review, rejected] }
+              failureClass: { type: [string, 'null'] }
+              recoveryAction: { type: [string, 'null'] }
+              review: { type: [object, 'null'], additionalProperties: true }
               job: { $ref: '#/components/schemas/ImageJob' }
+              jobHistory:
+                type: array
+                items:
+                  type: object
+                  required: [revision, reason, createdAt, job]
+                  properties:
+                    revision: { type: integer }
+                    reason: { type: string }
+                    createdAt: { type: string, format: date-time }
+                    job: { $ref: '#/components/schemas/ImageJob' }
         events:
           type: array
           items:
@@ -351,6 +440,15 @@ components:
               createdAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    ImageBatchItemReview:
+      type: object
+      required: [qaStatus, acceptanceStatus]
+      properties:
+        qaStatus: { type: string, enum: [not_run, passed, failed, needs_review] }
+        acceptanceStatus: { type: string, enum: [pending, accepted, needs_review, rejected] }
+        failureClass: { type: string, minLength: 1, maxLength: 100 }
+        recoveryAction: { type: string, minLength: 1, maxLength: 100 }
+        detail: { type: object, additionalProperties: true }
     UploadedImageAsset:
       type: object
       required: [assetId, manifest]

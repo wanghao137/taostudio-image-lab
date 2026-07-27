@@ -15,6 +15,7 @@ describe('asset 4K ratio presets', () => {
   it('covers the common uploaded-image ratios', () => {
     expect(ASSET_4K_RATIO_PRESETS.map((item) => item.value)).toEqual([
       '1:1',
+      '2:1',
       '3:2',
       '2:3',
       '16:9',
@@ -28,6 +29,7 @@ describe('asset 4K ratio presets', () => {
   it('maps each common ratio to a high-resolution exact PNG size', () => {
     expect(Object.fromEntries(ASSET_4K_RATIO_PRESETS.map((item) => [item.value, getAsset4KRatioSize(item.value)]))).toEqual({
       '1:1': '2880x2880',
+      '2:1': '3840x1920',
       '3:2': '3456x2304',
       '2:3': '2304x3456',
       '16:9': '3840x2160',

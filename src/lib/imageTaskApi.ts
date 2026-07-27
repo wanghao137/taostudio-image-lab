@@ -78,7 +78,16 @@ export interface ImageJobV1 {
   cancelRequested: boolean
   sourceAssetId?: string | null
   finalAssetId?: string | null
-  error?: { code?: string; message?: string; retryable?: boolean; stage?: string; providerCode?: string; httpStatus?: number } | null
+  error?: {
+    code?: string
+    message?: string
+    retryable?: boolean
+    stage?: string
+    providerCode?: string
+    httpStatus?: number
+    failureClass?: string
+    recoveryAction?: string
+  } | null
   result?: {
     sourceAssetId?: string
     finalAssetId?: string
@@ -135,6 +144,12 @@ export interface ImageTaskCapabilitiesV1 {
     retry: { maxAttempts: number }
     upload: { mediaTypes: ['image/png']; maxBytes: number }
     jobs: { states: ImageJobStateV1[]; defaultListLimit: number; maxListLimit: number }
+    batches: {
+      maxItems: number
+      states: Array<'running' | 'paused' | 'completed'>
+      qaStatuses: ImageBatchQaStatusV1[]
+      acceptanceStatuses: ImageBatchAcceptanceStatusV1[]
+    }
     events: { transport: 'polling' }
   }
 }
@@ -142,13 +157,6 @@ export interface ImageTaskCapabilitiesV1 {
 export interface ImageJobListV1 {
   items: ImageJobV1[]
   nextCursor: string | null
-}
-
-export interface ImageBatchV1 {
-  id: string
-  name?: string | null
-  state: 'running' | 'paused' | 'completed'
-  controlState: 'running' | 'paused'
   stats: {
     total: number
     terminal: number
@@ -157,8 +165,55 @@ export interface ImageBatchV1 {
     succeeded: number
     failed: number
     cancelled: number
+    byState: Record<ImageJobStateV1, number>
+    matching: number
   }
-  items: Array<{ itemKey: string; position: number; job: ImageJobV1 }>
+}
+
+export type ImageBatchQaStatusV1 = 'not_run' | 'passed' | 'failed' | 'needs_review'
+export type ImageBatchAcceptanceStatusV1 = 'pending' | 'accepted' | 'needs_review' | 'rejected'
+
+export interface ImageBatchV1 {
+  id: string
+  name?: string | null
+  state: 'running' | 'paused' | 'completed'
+  controlState: 'running' | 'paused'
+  acceptanceState: 'pending' | 'accepted' | 'needs_review' | 'rejected'
+  stats: {
+    total: number
+    terminal: number
+    active: number
+    queued: number
+    succeeded: number
+    failed: number
+    cancelled: number
+    accepted: number
+    needsReview: number
+    rejected: number
+    acceptancePending: number
+    qaPassed: number
+    qaFailed: number
+    qaNeedsReview: number
+    qaNotRun: number
+  }
+  items: Array<{
+    itemKey: string
+    position: number
+    revision: number
+    generationStatus: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+    qaStatus: ImageBatchQaStatusV1
+    acceptanceStatus: ImageBatchAcceptanceStatusV1
+    failureClass?: string | null
+    recoveryAction?: string | null
+    review?: Record<string, unknown> | null
+    job: ImageJobV1
+    jobHistory: Array<{
+      revision: number
+      reason: string
+      createdAt: string
+      job: ImageJobV1
+    }>
+  }>
   events: Array<{ event: string; detail: Record<string, unknown> | null; createdAt: string }>
   createdAt: string
   updatedAt: string
@@ -286,6 +341,47 @@ export async function controlImageBatch(
   action: 'pause' | 'resume' | 'retry-failed',
 ): Promise<ImageBatchV1> {
   return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/${action}`, { method: 'POST' })).json()
+}
+
+export async function reviewImageBatchItem(
+  config: ImageTaskApiConfig,
+  batchId: string,
+  itemKey: string,
+  review: {
+    qaStatus: ImageBatchQaStatusV1
+    acceptanceStatus: ImageBatchAcceptanceStatusV1
+    failureClass?: string
+    recoveryAction?: string
+    detail?: Record<string, unknown>
+  },
+): Promise<ImageBatchV1> {
+  return (await taskFetch(
+    config,
+    `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/review`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(review),
+    },
+  )).json()
+}
+
+export async function replaceImageBatchItemJob(
+  config: ImageTaskApiConfig,
+  batchId: string,
+  itemKey: string,
+  request: ImageJobRequestV1,
+  reason?: string,
+): Promise<ImageBatchV1> {
+  return (await taskFetch(
+    config,
+    `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/job`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ request, ...(reason ? { reason } : {}) }),
+    },
+  )).json()
 }
 
 export async function waitForImageJob(

@@ -33,6 +33,8 @@ const DEFAULT_JOB_LIST_LIMIT = 30
 const MAX_JOB_LIST_LIMIT = 100
 const MAX_BATCH_ITEMS = 500
 const ACCEPTED_ENHANCEMENTS = ['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']
+const QA_STATUSES = ['not_run', 'passed', 'failed', 'needs_review']
+const ACCEPTANCE_STATUSES = ['pending', 'accepted', 'needs_review', 'rejected']
 const DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
   /^https?:\/\/localhost(?::\d+)?$/,
   /^https?:\/\/127\.0\.0\.1(?::\d+)?$/,
@@ -94,6 +96,22 @@ function validateBatchRequest(value) {
   }
   return { valid: errors.length === 0, errors }
 }
+function validateBatchItemReview(value) {
+  const errors = []
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['review must be an object'] }
+  if (!QA_STATUSES.includes(value.qaStatus)) errors.push(`qaStatus must be one of ${QA_STATUSES.join(', ')}`)
+  if (!ACCEPTANCE_STATUSES.includes(value.acceptanceStatus)) errors.push(`acceptanceStatus must be one of ${ACCEPTANCE_STATUSES.join(', ')}`)
+  if (value.failureClass !== undefined && (typeof value.failureClass !== 'string' || !value.failureClass.trim() || value.failureClass.length > 100)) {
+    errors.push('failureClass must be a non-empty string up to 100 characters')
+  }
+  if (value.recoveryAction !== undefined && (typeof value.recoveryAction !== 'string' || !value.recoveryAction.trim() || value.recoveryAction.length > 100)) {
+    errors.push('recoveryAction must be a non-empty string up to 100 characters')
+  }
+  if (value.detail !== undefined && (!value.detail || typeof value.detail !== 'object' || Array.isArray(value.detail))) {
+    errors.push('detail must be an object')
+  }
+  return { valid: errors.length === 0, errors }
+}
 function taskApiCapabilities(providerConfig = {}) {
   return {
     service: 'taostudio-image-task-api',
@@ -122,7 +140,12 @@ function taskApiCapabilities(providerConfig = {}) {
       retry: { maxAttempts: 5 },
       upload: { mediaTypes: ['image/png'], maxBytes: UPLOAD_MAX_BYTES },
       jobs: { states: JOB_STATES, defaultListLimit: DEFAULT_JOB_LIST_LIMIT, maxListLimit: MAX_JOB_LIST_LIMIT },
-      batches: { maxItems: MAX_BATCH_ITEMS, states: ['running', 'paused', 'completed'] },
+      batches: {
+        maxItems: MAX_BATCH_ITEMS,
+        states: ['running', 'paused', 'completed'],
+        qaStatuses: QA_STATUSES,
+        acceptanceStatuses: ACCEPTANCE_STATUSES,
+      },
       events: { transport: 'polling' },
     },
   }
@@ -162,6 +185,9 @@ function providerPayloadError(payload, fallbackRetryable = true) {
   const quota = /(billing|quota|insufficient[_ -]?credits?|credit[_ -]?balance)/.test(classification)
   const permanent = /(content[_ -]?policy|moderation|safety|invalid[_ -]?request|authentication|authorization|permission|not[_ -]?found)/.test(classification) || quota
   const transient = /(rate[_ -]?limit|timeout|temporar|overload|capacity|server|internal|upstream|gateway|unavailable|generation[_ -]?failed)/.test(classification)
+  const contentPolicy = /(content[_ -]?policy|moderation|safety|refus|reject|blocked|disallowed|not allowed|violation)/.test(classification)
+  const invalidInput = /(invalid[_ -]?request|not[_ -]?found)/.test(classification)
+  const authentication = /(authentication|authorization|permission)/.test(classification)
   const error = Object.assign(new Error(
     providerCode ? `provider reported ${providerCode}${providerMessage ? `: ${providerMessage}` : ''}` : 'provider response did not contain an image',
   ), {
@@ -169,6 +195,26 @@ function providerPayloadError(payload, fallbackRetryable = true) {
     providerCode,
     retryable: permanent ? false : transient ? true : fallbackRetryable,
     fallbackEligible: quota || transient || (!permanent && fallbackRetryable),
+    failureClass: contentPolicy
+      ? 'content_policy'
+      : invalidInput
+        ? 'invalid_input'
+        : authentication
+          ? 'authentication'
+          : quota
+            ? 'quota'
+            : transient
+              ? 'provider_transient'
+              : 'provider_response',
+    recoveryAction: contentPolicy
+      ? 'safe_rewrite'
+      : invalidInput
+        ? 'fix_input'
+        : authentication
+          ? 'fix_configuration'
+          : quota || transient
+            ? 'route_fallback'
+            : 'inspect_provider_response',
     diagnostics: { responseKeys: Object.keys(body).sort().slice(0, 20) },
   })
   return error
@@ -202,6 +248,23 @@ function fallbackEligible(error, stage) {
   if (error?.name === 'AbortError') return true
   if (error?.httpStatus === 429 || error?.httpStatus === 408 || error?.httpStatus >= 500) return true
   return ['PROVIDER_TIMEOUT', 'PROVIDER_NETWORK_ERROR', 'PROVIDER_IMAGE_INVALID'].includes(error?.code)
+}
+
+function classifyFailure(error, stage) {
+  if (error?.failureClass && error?.recoveryAction) {
+    return { failureClass: error.failureClass, recoveryAction: error.recoveryAction }
+  }
+  if (stage === 'validating') return { failureClass: 'invalid_input', recoveryAction: 'fix_input' }
+  if (error?.name === 'AbortError' || error?.code === 'PROVIDER_TIMEOUT') {
+    return { failureClass: 'provider_timeout', recoveryAction: 'route_fallback' }
+  }
+  if (error?.code === 'PROVIDER_NETWORK_ERROR' || error?.httpStatus === 429 || error?.httpStatus >= 500) {
+    return { failureClass: 'provider_transient', recoveryAction: 'route_fallback' }
+  }
+  if (error?.code === 'PROVIDER_IMAGE_INVALID') {
+    return { failureClass: 'invalid_asset', recoveryAction: 'route_fallback' }
+  }
+  return { failureClass: 'job_failure', recoveryAction: 'inspect' }
 }
 
 function providerPrompt(request) {
@@ -373,9 +436,26 @@ export class TaskRepository {
         item_key TEXT NOT NULL,
         position INTEGER NOT NULL,
         job_id TEXT NOT NULL UNIQUE,
+        revision INTEGER NOT NULL DEFAULT 0,
+        qa_status TEXT NOT NULL DEFAULT 'not_run',
+        acceptance_status TEXT NOT NULL DEFAULT 'pending',
+        failure_class TEXT,
+        recovery_action TEXT,
+        review_json TEXT,
         PRIMARY KEY (batch_id,item_key),
         UNIQUE (batch_id,position),
         FOREIGN KEY (batch_id) REFERENCES batches(id),
+        FOREIGN KEY (job_id) REFERENCES jobs(id)
+      );
+      CREATE TABLE IF NOT EXISTS batch_item_jobs (
+        batch_id TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        job_id TEXT NOT NULL UNIQUE,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (batch_id,item_key,revision),
+        FOREIGN KEY (batch_id,item_key) REFERENCES batch_items(batch_id,item_key),
         FOREIGN KEY (job_id) REFERENCES jobs(id)
       );
       CREATE TABLE IF NOT EXISTS batch_events (
@@ -407,6 +487,19 @@ export class TaskRepository {
     const jobColumns = new Set(this.db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name))
     if (!jobColumns.has('route_index')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_index INTEGER NOT NULL DEFAULT 0')
     if (!jobColumns.has('route_attempts')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_attempts INTEGER NOT NULL DEFAULT 0')
+    const batchItemColumns = new Set(this.db.prepare('PRAGMA table_info(batch_items)').all().map((column) => column.name))
+    if (!batchItemColumns.has('revision')) this.db.exec('ALTER TABLE batch_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
+    if (!batchItemColumns.has('qa_status')) this.db.exec("ALTER TABLE batch_items ADD COLUMN qa_status TEXT NOT NULL DEFAULT 'not_run'")
+    if (!batchItemColumns.has('acceptance_status')) this.db.exec("ALTER TABLE batch_items ADD COLUMN acceptance_status TEXT NOT NULL DEFAULT 'pending'")
+    if (!batchItemColumns.has('failure_class')) this.db.exec('ALTER TABLE batch_items ADD COLUMN failure_class TEXT')
+    if (!batchItemColumns.has('recovery_action')) this.db.exec('ALTER TABLE batch_items ADD COLUMN recovery_action TEXT')
+    if (!batchItemColumns.has('review_json')) this.db.exec('ALTER TABLE batch_items ADD COLUMN review_json TEXT')
+    this.db.exec(`
+      INSERT OR IGNORE INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at)
+      SELECT bi.batch_id,bi.item_key,bi.revision,bi.job_id,'legacy_backfill',b.created_at
+      FROM batch_items bi
+      JOIN batches b ON b.id=bi.batch_id
+    `)
   }
 
   recoverInterruptedJobs() {
@@ -528,9 +621,25 @@ export class TaskRepository {
       .all(...parameters, limit + 1)
     const hasMore = rows.length > limit
     const items = rows.slice(0, limit).map((row) => this.jobFromRow(row))
+    const stateRows = this.db.prepare('SELECT state,COUNT(*) AS count FROM jobs GROUP BY state').all()
+    const byState = Object.fromEntries(JOB_STATES.map((jobState) => [jobState, 0]))
+    for (const row of stateRows) byState[row.state] = Number(row.count)
+    const total = Object.values(byState).reduce((sum, count) => sum + count, 0)
+    const terminal = byState.succeeded + byState.failed + byState.cancelled
     return {
       items,
       nextCursor: hasMore && items.length ? jobCursor(items[items.length - 1]) : null,
+      stats: {
+        total,
+        terminal,
+        active: total - terminal - byState.queued,
+        queued: byState.queued,
+        succeeded: byState.succeeded,
+        failed: byState.failed,
+        cancelled: byState.cancelled,
+        byState,
+        matching: state ? byState[state] : total,
+      },
     }
   }
 
@@ -559,6 +668,8 @@ export class TaskRepository {
         try {
           this.db.prepare('INSERT INTO batch_items (batch_id,item_key,position,job_id) VALUES (?,?,?,?)')
             .run(id, item.itemKey, position, result.job.id)
+          this.db.prepare('INSERT INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at) VALUES (?,?,?,?,?,?)')
+            .run(id, item.itemKey, 0, result.job.id, 'initial', timestamp)
         } catch (error) {
           if (String(error?.message || '').includes('UNIQUE constraint failed: batch_items.job_id')) {
             throw Object.assign(new Error(`job ${result.job.id} already belongs to another batch`), {
@@ -587,20 +698,67 @@ export class TaskRepository {
     const row = this.db.prepare('SELECT * FROM batches WHERE id=?').get(id)
     if (!row) return null
     const itemRows = this.db.prepare(`
-      SELECT bi.item_key,bi.position,j.*
+      SELECT bi.item_key,bi.position,bi.revision,bi.qa_status,bi.acceptance_status,
+             bi.failure_class,bi.recovery_action,bi.review_json,j.*
       FROM batch_items bi
       JOIN jobs j ON j.id=bi.job_id
       WHERE bi.batch_id=?
       ORDER BY bi.position
     `).all(id)
-    const items = itemRows.map((item) => ({
-      itemKey: item.item_key,
-      position: item.position,
-      job: this.jobFromRow(item),
-    }))
+    const historyRows = this.db.prepare(`
+      SELECT bij.item_key,bij.revision,bij.reason,bij.created_at,j.*
+      FROM batch_item_jobs bij
+      JOIN jobs j ON j.id=bij.job_id
+      WHERE bij.batch_id=?
+      ORDER BY bij.item_key,bij.revision
+    `).all(id)
+    const historyByItem = new Map()
+    for (const history of historyRows) {
+      const values = historyByItem.get(history.item_key) || []
+      values.push({
+        revision: history.revision,
+        reason: history.reason,
+        createdAt: history.created_at,
+        job: this.jobFromRow(history),
+      })
+      historyByItem.set(history.item_key, values)
+    }
+    const items = itemRows.map((item) => {
+      const job = this.jobFromRow(item)
+      const acceptanceStatus = item.acceptance_status === 'pending' && ['failed', 'cancelled'].includes(job.state)
+        ? 'rejected'
+        : item.acceptance_status
+      return {
+        itemKey: item.item_key,
+        position: item.position,
+        revision: item.revision,
+        generationStatus: job.state === 'succeeded'
+          ? 'succeeded'
+          : job.state === 'failed'
+            ? 'failed'
+            : job.state === 'cancelled'
+              ? 'cancelled'
+              : ACTIVE_STATES.includes(job.state)
+                ? 'running'
+                : 'pending',
+        qaStatus: item.qa_status,
+        acceptanceStatus,
+        failureClass: item.failure_class || job.error?.failureClass || null,
+        recoveryAction: item.recovery_action || job.error?.recoveryAction || null,
+        review: item.review_json ? JSON.parse(item.review_json) : null,
+        job,
+        jobHistory: historyByItem.get(item.item_key) || [],
+      }
+    })
     const counts = Object.fromEntries(JOB_STATES.map((state) => [state, 0]))
     items.forEach((item) => { counts[item.job.state] += 1 })
     const terminal = counts.succeeded + counts.failed + counts.cancelled
+    const acceptanceCounts = Object.fromEntries(ACCEPTANCE_STATUSES.map((status) => [status, 0]))
+    const qaCounts = Object.fromEntries(QA_STATUSES.map((status) => [status, 0]))
+    items.forEach((item) => {
+      acceptanceCounts[item.acceptanceStatus] += 1
+      qaCounts[item.qaStatus] += 1
+    })
     const state = terminal === items.length
       ? 'completed'
       : row.control_state === 'paused'
@@ -615,6 +773,13 @@ export class TaskRepository {
       name: row.name,
       state,
       controlState: row.control_state,
+      acceptanceState: acceptanceCounts.pending > 0
+        ? 'pending'
+        : acceptanceCounts.needs_review > 0
+          ? 'needs_review'
+          : acceptanceCounts.rejected > 0
+            ? 'rejected'
+            : 'accepted',
       stats: {
         total: items.length,
         terminal,
@@ -623,6 +788,14 @@ export class TaskRepository {
         succeeded: counts.succeeded,
         failed: counts.failed,
         cancelled: counts.cancelled,
+        accepted: acceptanceCounts.accepted,
+        needsReview: acceptanceCounts.needs_review,
+        rejected: acceptanceCounts.rejected,
+        acceptancePending: acceptanceCounts.pending,
+        qaPassed: qaCounts.passed,
+        qaFailed: qaCounts.failed,
+        qaNeedsReview: qaCounts.needs_review,
+        qaNotRun: qaCounts.not_run,
       },
       items,
       events: this.batchEvents(id),
@@ -661,6 +834,80 @@ export class TaskRepository {
       this.recordBatchEvent(id, 'retry_failed', { retried })
     }
     return this.getBatch(id)
+  }
+
+  reviewBatchItem(id, itemKey, review) {
+    const batch = this.getBatch(id)
+    const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
+    if (!item) return null
+    if (review.acceptanceStatus === 'accepted' && (item.job.state !== 'succeeded' || review.qaStatus !== 'passed')) {
+      throw Object.assign(new Error('accepted batch items require a succeeded job and passed QA'), {
+        statusCode: 409,
+        code: 'BATCH_ITEM_NOT_ACCEPTABLE',
+      })
+    }
+    this.db.prepare(`
+      UPDATE batch_items
+      SET qa_status=?,acceptance_status=?,failure_class=?,recovery_action=?,review_json=?
+      WHERE batch_id=? AND item_key=?
+    `).run(
+      review.qaStatus,
+      review.acceptanceStatus,
+      review.failureClass?.trim() || null,
+      review.recoveryAction?.trim() || null,
+      review.detail ? JSON.stringify(review.detail) : null,
+      id,
+      itemKey,
+    )
+    this.db.prepare('UPDATE batches SET updated_at=? WHERE id=?').run(now(), id)
+    this.recordBatchEvent(id, 'item_reviewed', {
+      itemKey,
+      revision: item.revision,
+      jobId: item.job.id,
+      qaStatus: review.qaStatus,
+      acceptanceStatus: review.acceptanceStatus,
+      failureClass: review.failureClass || null,
+      recoveryAction: review.recoveryAction || null,
+    })
+    return this.getBatch(id)
+  }
+
+  replaceBatchItemJob(id, itemKey, request, reason) {
+    const batch = this.getBatch(id)
+    const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
+    if (!item) return null
+    if (!['succeeded', 'failed', 'cancelled'].includes(item.job.state)) {
+      throw Object.assign(new Error('batch item job must be terminal before replacement'), {
+        statusCode: 409,
+        code: 'BATCH_ITEM_JOB_ACTIVE',
+      })
+    }
+    const revision = item.revision + 1
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = this.createOrGetJob(request)
+      this.db.prepare(`
+        UPDATE batch_items
+        SET job_id=?,revision=?,qa_status='not_run',acceptance_status='pending',
+            failure_class=NULL,recovery_action=NULL,review_json=NULL
+        WHERE batch_id=? AND item_key=?
+      `).run(result.job.id, revision, id, itemKey)
+      this.db.prepare('INSERT INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at) VALUES (?,?,?,?,?,?)')
+        .run(id, itemKey, revision, result.job.id, reason?.trim() || 'replacement', now())
+      this.db.prepare("UPDATE batches SET control_state='running',updated_at=? WHERE id=?").run(now(), id)
+      this.recordBatchEvent(id, 'item_job_replaced', {
+        itemKey,
+        revision,
+        previousJobId: item.job.id,
+        jobId: result.job.id,
+        reason: reason?.trim() || 'replacement',
+      })
+      this.db.exec('COMMIT')
+      return this.getBatch(id)
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   getRequest(id) {
@@ -1302,6 +1549,7 @@ export class TaskWorkerPool {
         route: current.actualRoute,
         routeAttempt: current.routeAttempts,
         totalAttempt: current.attempts,
+        ...classifyFailure(error, stage),
       }
       if (error?.providerCode) detail.providerCode = error.providerCode
       if (error?.httpStatus) detail.httpStatus = error.httpStatus
@@ -1437,6 +1685,34 @@ export async function createTaskApi(options = {}) {
       const batchRetryMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/retry-failed$/)
       if (request.method === 'POST' && batchRetryMatch) {
         const batch = repository.retryFailedBatchJobs(batchRetryMatch[1])
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchItemReviewMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/items\/([^/]+)\/review$/)
+      if (request.method === 'POST' && batchItemReviewMatch) {
+        const body = JSON.parse((await readBody(request, 1024 * 1024)).toString('utf8'))
+        const validation = validateBatchItemReview(body)
+        if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_BATCH_ITEM_REVIEW', details: validation.errors } })
+        const batch = repository.reviewBatchItem(
+          batchItemReviewMatch[1],
+          decodeURIComponent(batchItemReviewMatch[2]),
+          body,
+        )
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchItemJobMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/items\/([^/]+)\/job$/)
+      if (request.method === 'POST' && batchItemJobMatch) {
+        const body = JSON.parse((await readBody(request, 1024 * 1024)).toString('utf8'))
+        const validation = validateImageJobRequest(body.request)
+        if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_JOB', details: validation.errors } })
+        if (body.reason !== undefined && (typeof body.reason !== 'string' || !body.reason.trim() || body.reason.length > 200)) {
+          return void json(response, 400, { error: { code: 'INVALID_REPLACEMENT_REASON', message: 'reason must be a non-empty string up to 200 characters' } })
+        }
+        const batch = repository.replaceBatchItemJob(
+          batchItemJobMatch[1],
+          decodeURIComponent(batchItemJobMatch[2]),
+          body.request,
+          body.reason,
+        )
         return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
       }
       const jobMatch = url.pathname.match(/^\/v1\/image-jobs\/([^/]+)$/)

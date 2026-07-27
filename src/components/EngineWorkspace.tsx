@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
 import {
   Activity,
   Ban,
@@ -8,6 +8,8 @@ import {
   Cpu,
   LoaderCircle,
   Layers,
+  Maximize2,
+  Move,
   Pause,
   Plus,
   Play,
@@ -15,6 +17,8 @@ import {
   Server,
   Unplug,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { calculateImageSize } from '../lib/size'
 import {
@@ -34,6 +38,7 @@ import {
   retryImageJob,
   saveLocalImageTaskApiConfig,
   type ImageJobStateV1,
+  type ImageJobListV1,
   type ImageJobV1,
   type ImageBatchV1,
   type ImageTaskApiConfig,
@@ -126,12 +131,15 @@ export default function EngineWorkspace() {
   })
   const [capabilities, setCapabilities] = useState<ImageTaskCapabilitiesV1 | null>(null)
   const [jobs, setJobs] = useState<ImageJobV1[]>([])
+  const [jobStats, setJobStats] = useState<ImageJobListV1['stats'] | null>(null)
   const [batches, setBatches] = useState<ImageBatchV1[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [filter, setFilter] = useState<ImageJobStateV1 | 'all'>('all')
   const [selectedJob, setSelectedJob] = useState<ImageJobV1 | null>(null)
   const [selectedBatch, setSelectedBatch] = useState<ImageBatchV1 | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [sourcePreviewUrl, setSourcePreviewUrl] = useState<string | null>(null)
+  const [assetLightbox, setAssetLightbox] = useState<'source' | 'final' | null>(null)
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
@@ -151,8 +159,20 @@ export default function EngineWorkspace() {
         cursor: cursor || undefined,
         state: filter === 'all' ? undefined : filter,
       })
-      setJobs((current) => cursor ? [...current, ...result.items] : result.items)
-      setNextCursor(result.nextCursor)
+      setJobStats(result.stats)
+      setJobs((current) => {
+        if (cursor) {
+          const known = new Set(current.map((job) => job.id))
+          return [...current, ...result.items.filter((job) => !known.has(job.id))]
+        }
+        if (current.length <= result.items.length) return result.items
+        const refreshed = new Set(result.items.map((job) => job.id))
+        return [...result.items, ...current.filter((job) => !refreshed.has(job.id))].slice(0, current.length)
+      })
+      const loadedCount = cursor
+        ? jobs.length + result.items.length
+        : Math.max(jobs.length, result.items.length)
+      setNextCursor(loadedCount >= result.stats.matching ? null : result.nextCursor)
       setWorkspaceError(null)
       if (selectedJobId) {
         const detail = await getImageJob(targetConfig, selectedJobId)
@@ -163,7 +183,7 @@ export default function EngineWorkspace() {
     } finally {
       setRefreshing(false)
     }
-  }, [config, filter, selectedJobId])
+  }, [config, filter, jobs.length, selectedJobId])
 
   const connect = useCallback(async (candidate: ImageTaskApiConfig, persist: boolean) => {
     setBusy(true)
@@ -178,6 +198,7 @@ export default function EngineWorkspace() {
         : { ...current, model: nextCapabilities.capabilities.generation.defaultModel || '' })
       const result = await listImageJobs(normalized, { limit: 30 })
       setJobs(result.items)
+      setJobStats(result.stats)
       setNextCursor(result.nextCursor)
       setBatches((await listImageBatches(normalized)).items)
     } catch (error) {
@@ -220,29 +241,73 @@ export default function EngineWorkspace() {
   }, [capabilities, config, refresh, refreshBatches])
 
   useEffect(() => {
-    let objectUrl: string | null = null
-    const assetId = selectedJob?.finalAssetId
-    if (!config || !assetId) {
+    let finalObjectUrl: string | null = null
+    let sourceObjectUrl: string | null = null
+    const finalAssetId = selectedJob?.finalAssetId
+    const sourceAssetId = selectedJob?.sourceAssetId
+    if (!config || (!finalAssetId && !sourceAssetId)) {
       setPreviewUrl(null)
+      setSourcePreviewUrl(null)
       return
     }
-    void getImageAssetBlob(config, assetId)
-      .then((blob) => {
-        objectUrl = URL.createObjectURL(blob)
-        setPreviewUrl(objectUrl)
-      })
-      .catch(() => setPreviewUrl(null))
-    return () => {
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    if (finalAssetId) {
+      void getImageAssetBlob(config, finalAssetId)
+        .then((blob) => {
+          finalObjectUrl = URL.createObjectURL(blob)
+          setPreviewUrl(finalObjectUrl)
+        })
+        .catch(() => setPreviewUrl(null))
+    } else {
+      setPreviewUrl(null)
     }
-  }, [config, selectedJob?.finalAssetId])
+    if (sourceAssetId) {
+      void getImageAssetBlob(config, sourceAssetId)
+        .then((blob) => {
+          sourceObjectUrl = URL.createObjectURL(blob)
+          setSourcePreviewUrl(sourceObjectUrl)
+        })
+        .catch(() => setSourcePreviewUrl(null))
+    } else {
+      setSourcePreviewUrl(null)
+    }
+    return () => {
+      if (finalObjectUrl) URL.revokeObjectURL(finalObjectUrl)
+      if (sourceObjectUrl) URL.revokeObjectURL(sourceObjectUrl)
+    }
+  }, [config, selectedJob?.finalAssetId, selectedJob?.sourceAssetId])
 
   const stats = useMemo(() => ({
-    total: jobs.length,
-    active: jobs.filter((job) => ACTIVE_STATES.has(job.state)).length,
-    failed: jobs.filter((job) => job.state === 'failed').length,
-    succeeded: jobs.filter((job) => job.state === 'succeeded').length,
-  }), [jobs])
+    total: jobStats?.total ?? jobs.length,
+    active: jobStats?.active ?? jobs.filter((job) => ACTIVE_STATES.has(job.state)).length,
+    failed: jobStats?.failed ?? jobs.filter((job) => job.state === 'failed').length,
+    succeeded: jobStats?.succeeded ?? jobs.filter((job) => job.state === 'succeeded').length,
+  }), [jobStats, jobs])
+
+  const loadAllJobs = useCallback(async () => {
+    if (!config) return
+    setRefreshing(true)
+    try {
+      const all: ImageJobV1[] = []
+      let cursor: string | undefined
+      do {
+        const page = await listImageJobs(config, {
+          limit: 100,
+          cursor,
+          state: filter === 'all' ? undefined : filter,
+        })
+        all.push(...page.items)
+        setJobStats(page.stats)
+        cursor = page.nextCursor || undefined
+      } while (cursor)
+      setJobs(all)
+      setNextCursor(null)
+      setWorkspaceError(null)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setRefreshing(false)
+    }
+  }, [config, filter])
 
   const handleConnect = async (event: FormEvent) => {
     event.preventDefault()
@@ -395,6 +460,7 @@ export default function EngineWorkspace() {
     setConfig(null)
     setCapabilities(null)
     setJobs([])
+    setJobStats(null)
     setBatches([])
     setSelectedJob(null)
     setSelectedBatch(null)
@@ -516,7 +582,7 @@ export default function EngineWorkspace() {
 
         <section className="grid grid-cols-4 border-b border-stone-300 dark:border-white/10">
           {[
-            ['当前页', stats.total],
+            ['任务总数', stats.total],
             ['执行中', stats.active],
             ['已成功', stats.succeeded],
             ['失败', stats.failed],
@@ -567,10 +633,27 @@ export default function EngineWorkspace() {
             </div>
             <div className="mb-3 flex items-center justify-between gap-3">
               <h2 className="text-sm font-semibold">任务队列</h2>
-              <select
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <span className="font-mono text-[10px] text-stone-400">
+                  已加载 {jobs.length} / {jobStats?.matching ?? jobs.length}
+                </span>
+                {nextCursor && (
+                  <button
+                    type="button"
+                    onClick={() => void loadAllJobs()}
+                    disabled={refreshing}
+                    className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs font-medium text-stone-600 hover:text-stone-950 disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300"
+                  >
+                    加载全部
+                  </button>
+                )}
+                <select
                 value={filter}
                 onChange={(event) => {
                   setFilter(event.target.value as ImageJobStateV1 | 'all')
+                  setJobs([])
+                  setJobStats(null)
+                  setNextCursor(null)
                   setSelectedJob(null)
                 }}
                 className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs outline-none dark:border-white/10 dark:bg-[#191714]"
@@ -579,7 +662,8 @@ export default function EngineWorkspace() {
                 {capabilities.capabilities.jobs.states.map((state) => (
                   <option key={state} value={state}>{STATE_LABELS[state]}</option>
                 ))}
-              </select>
+                </select>
+              </div>
             </div>
 
             <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
@@ -651,6 +735,7 @@ export default function EngineWorkspace() {
                 job={selectedJob}
                 previewUrl={previewUrl}
                 busy={busy}
+                onOpenPreview={setAssetLightbox}
                 onCancel={handleCancel}
                 onRetry={handleRetry}
               />
@@ -664,6 +749,14 @@ export default function EngineWorkspace() {
           </aside>
         </div>
       </div>
+      {assetLightbox && (previewUrl || sourcePreviewUrl) && (
+        <EngineAssetLightbox
+          initialMode={assetLightbox}
+          sourceUrl={sourcePreviewUrl}
+          finalUrl={previewUrl}
+          onClose={() => setAssetLightbox(null)}
+        />
+      )}
     </main>
   )
 }
@@ -906,6 +999,36 @@ function BatchInspector({
         <div><dt className="text-stone-400">执行中</dt><dd className="mt-1 font-mono">{batch.stats.active}</dd></div>
         <div><dt className="text-stone-400">排队</dt><dd className="mt-1 font-mono">{batch.stats.queued}</dd></div>
       </dl>
+      <div className="mt-5">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-xs font-semibold">交付验收</h3>
+          <span className="text-[10px] text-stone-400">
+            已验收 {batch.stats.accepted} / 待复核 {batch.stats.needsReview} / 拒绝 {batch.stats.rejected}
+          </span>
+        </div>
+        <div className="mt-2 max-h-64 divide-y divide-stone-200 overflow-auto border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
+          {batch.items.map((item) => (
+            <div key={item.itemKey} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-2.5 text-xs">
+              <div className="min-w-0">
+                <div className="truncate font-mono">{item.itemKey}</div>
+                <div className="mt-1 text-[10px] text-stone-400">
+                  Job 修订 {item.revision} · QA {item.qaStatus} · {item.generationStatus}
+                  {item.failureClass ? ` · ${item.failureClass}` : ''}
+                </div>
+              </div>
+              <span className={`self-center rounded px-2 py-1 text-[10px] font-medium ${
+                item.acceptanceStatus === 'accepted'
+                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+                  : item.acceptanceStatus === 'rejected'
+                    ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
+                    : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
+              }`}>
+                {item.acceptanceStatus}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
       <div className="mt-5 flex flex-wrap gap-2">
         {batch.state === 'running' && (
           <button type="button" onClick={() => onControl('pause')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300 px-3 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-40 dark:border-amber-400/30 dark:text-amber-300">
@@ -942,12 +1065,14 @@ function JobInspector({
   job,
   previewUrl,
   busy,
+  onOpenPreview,
   onCancel,
   onRetry,
 }: {
   job: ImageJobV1
   previewUrl: string | null
   busy: boolean
+  onOpenPreview: (mode: 'source' | 'final') => void
   onCancel: () => void
   onRetry: () => void
 }) {
@@ -962,7 +1087,19 @@ function JobInspector({
       </div>
 
       {previewUrl && (
-        <div className="mt-5 overflow-hidden rounded-md border border-stone-300 bg-[repeating-conic-gradient(#ddd_0_25%,#fff_0_50%)_0_0/16px_16px] dark:border-white/10">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => onOpenPreview('final')}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') onOpenPreview('final')
+          }}
+          className="group relative mt-5 overflow-hidden rounded-md border border-stone-300 bg-[repeating-conic-gradient(#ddd_0_25%,#fff_0_50%)_0_0/16px_16px] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[#356c82] dark:border-white/10"
+          aria-label="放大预览 4K 产物"
+        >
+          <span className="absolute right-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-md bg-black/65 text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+            <Maximize2 className="h-4 w-4" />
+          </span>
           <img src={previewUrl} alt="最终产物" className="max-h-[320px] w-full object-contain" />
         </div>
       )}
@@ -1030,6 +1167,137 @@ function JobInspector({
           重新执行
         </button>
       )}
+    </div>
+  )
+}
+
+function EngineAssetLightbox({
+  initialMode,
+  sourceUrl,
+  finalUrl,
+  onClose,
+}: {
+  initialMode: 'source' | 'final'
+  sourceUrl: string | null
+  finalUrl: string | null
+  onClose: () => void
+}) {
+  const [mode, setMode] = useState<'source' | 'final'>(
+    initialMode === 'source' && sourceUrl ? 'source' : 'final',
+  )
+  const [scale, setScale] = useState(1)
+  const [position, setPosition] = useState({ x: 0, y: 0 })
+  const [drag, setDrag] = useState<{ pointerId: number; x: number; y: number } | null>(null)
+  const src = mode === 'source' ? sourceUrl : finalUrl
+
+  const resetView = useCallback(() => {
+    setScale(1)
+    setPosition({ x: 0, y: 0 })
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === '0') resetView()
+      if (event.key === '+' || event.key === '=') setScale((value) => Math.min(4, value + 0.25))
+      if (event.key === '-') setScale((value) => Math.max(0.5, value - 0.25))
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose, resetView])
+
+  const selectMode = (nextMode: 'source' | 'final') => {
+    setMode(nextMode)
+    resetView()
+  }
+
+  const onWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    setScale((value) => Math.max(0.5, Math.min(4, value + (event.deltaY < 0 ? 0.2 : -0.2))))
+  }
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setDrag({ pointerId: event.pointerId, x: event.clientX, y: event.clientY })
+  }
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!drag || drag.pointerId !== event.pointerId) return
+    setPosition((value) => ({
+      x: value.x + event.clientX - drag.x,
+      y: value.y + event.clientY - drag.y,
+    }))
+    setDrag({ pointerId: event.pointerId, x: event.clientX, y: event.clientY })
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex flex-col bg-black/[0.94] text-white backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片放大预览"
+    >
+      <div className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-white/15 px-3 sm:px-5">
+        <div className="flex items-center gap-1 rounded-md bg-white/10 p-1">
+          <button
+            type="button"
+            onClick={() => selectMode('source')}
+            disabled={!sourceUrl}
+            className={`h-8 rounded px-3 text-xs font-medium transition disabled:opacity-30 ${mode === 'source' ? 'bg-white text-black' : 'text-white/70 hover:text-white'}`}
+          >
+            原图
+          </button>
+          <button
+            type="button"
+            onClick={() => selectMode('final')}
+            disabled={!finalUrl}
+            className={`h-8 rounded px-3 text-xs font-medium transition disabled:opacity-30 ${mode === 'final' ? 'bg-white text-black' : 'text-white/70 hover:text-white'}`}
+          >
+            4K
+          </button>
+        </div>
+        <div className="flex items-center gap-1">
+          <button type="button" onClick={() => setScale((value) => Math.max(0.5, value - 0.25))} className="inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/10" title="缩小" aria-label="缩小">
+            <ZoomOut className="h-4 w-4" />
+          </button>
+          <button type="button" onClick={resetView} className="h-9 min-w-14 rounded-md px-2 font-mono text-xs hover:bg-white/10" title="恢复 100%">
+            {Math.round(scale * 100)}%
+          </button>
+          <button type="button" onClick={() => setScale((value) => Math.min(4, value + 0.25))} className="inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/10" title="放大" aria-label="放大">
+            <ZoomIn className="h-4 w-4" />
+          </button>
+          <span className="mx-1 hidden h-5 w-px bg-white/15 sm:block" />
+          <span className="hidden items-center gap-1.5 text-[11px] text-white/45 sm:inline-flex">
+            <Move className="h-3.5 w-3.5" />
+            拖动查看
+          </span>
+          <button type="button" onClick={onClose} className="ml-1 inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/10" title="关闭" aria-label="关闭预览">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+      </div>
+      <div
+        className={`relative min-h-0 flex-1 touch-none overflow-hidden ${drag ? 'cursor-grabbing' : 'cursor-grab'}`}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={() => setDrag(null)}
+        onPointerCancel={() => setDrag(null)}
+        onDoubleClick={resetView}
+      >
+        {src && (
+          <img
+            src={src}
+            alt={mode === 'source' ? '生成原图' : '4K 产物'}
+            draggable={false}
+            className="absolute left-1/2 top-1/2 max-h-[calc(100%-2rem)] max-w-[calc(100%-2rem)] select-none object-contain shadow-2xl"
+            style={{
+              transform: `translate(calc(-50% + ${position.x}px), calc(-50% + ${position.y}px)) scale(${scale})`,
+              transformOrigin: 'center',
+            }}
+          />
+        )}
+      </div>
     </div>
   )
 }

@@ -13,7 +13,7 @@ const token = process.env.IMAGE_TASK_API_TOKEN
 if (!token) throw new Error('IMAGE_TASK_API_TOKEN is required')
 
 const PRESET_4K = {
-  '1:1': '2880x2880', '3:2': '3456x2304', '2:3': '2304x3456', '16:9': '3840x2160',
+  '1:1': '2880x2880', '2:1': '3840x1920', '3:2': '3456x2304', '2:3': '2304x3456', '16:9': '3840x2160',
   '9:16': '2160x3840', '4:3': '3200x2400', '3:4': '2400x3200', '21:9': '3840x1646',
 }
 const fallbackSchema = z.object({
@@ -25,7 +25,7 @@ const batchItemSchema = z.object({
   itemKey: z.string().min(1).max(200),
   prompt: z.string().min(1).optional(),
   sourceAssetId: z.string().optional(),
-  ratio: z.enum(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
+  ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
   dimensions: z.string().regex(/^\d+x\d+$/).optional(),
   provider: z.string().min(1).default('configured'),
   model: z.string().min(1),
@@ -38,6 +38,33 @@ const batchItemSchema = z.object({
 
 function batchJobIdempotencyKey(batchKey, itemKey) {
   return `batch-job-${createHash('sha256').update(`${batchKey}\0${itemKey}`).digest('hex').slice(0, 48)}`
+}
+
+function requestFromBatchItem(batchKey, item) {
+  return {
+    contractVersion: '1',
+    idempotencyKey: batchJobIdempotencyKey(batchKey, item.itemKey),
+    input: {
+      ...(item.prompt ? { prompt: item.prompt } : {}),
+      ...(item.sourceAssetId ? { sourceAssetId: item.sourceAssetId } : {}),
+    },
+    composition: { ratio: item.ratio },
+    generation: {
+      provider: item.provider,
+      model: item.model,
+      ...(item.apiMode ? { apiMode: item.apiMode } : {}),
+      ...(item.fallback ? { fallback: item.fallback } : {}),
+    },
+    output: {
+      ratioMode: 'inherit',
+      format: 'png',
+      quality: 'high',
+      dimensions: item.dimensions || PRESET_4K[item.ratio],
+      enhancement: item.enhancement,
+      contentClass: item.contentClass,
+    },
+    retry: { maxAttempts: item.maxAttempts },
+  }
 }
 
 async function api(path, init = {}) {
@@ -87,10 +114,10 @@ server.registerTool('image_job_create', {
   inputSchema: {
     idempotencyKey: z.string().min(8).max(200),
     prompt: z.string().min(1).optional(),
-    ratio: z.enum(['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
+    ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
     dimensions: z.string().regex(/^\d+x\d+$/).optional().describe(
       'Final output pixels. Optional — defaults to the 4K preset for the given ratio. '
-      + '4K presets: 1:1=2880x2880 3:2=3456x2304 2:3=2304x3456 16:9=3840x2160 '
+      + '4K presets: 1:1=2880x2880 2:1=3840x1920 3:2=3456x2304 2:3=2304x3456 16:9=3840x2160 '
       + '9:16=2160x3840 4:3=3200x2400 3:4=2400x3200 21:9=3840x1646.'
     ),
     provider: z.string().min(1).default('mock'),
@@ -165,30 +192,7 @@ server.registerTool('image_batch_create', {
       ...(name ? { name } : {}),
       items: items.map((item) => ({
         itemKey: item.itemKey,
-        request: {
-          contractVersion: '1',
-          idempotencyKey: batchJobIdempotencyKey(idempotencyKey, item.itemKey),
-          input: {
-            ...(item.prompt ? { prompt: item.prompt } : {}),
-            ...(item.sourceAssetId ? { sourceAssetId: item.sourceAssetId } : {}),
-          },
-          composition: { ratio: item.ratio },
-          generation: {
-            provider: item.provider,
-            model: item.model,
-            ...(item.apiMode ? { apiMode: item.apiMode } : {}),
-            ...(item.fallback ? { fallback: item.fallback } : {}),
-          },
-          output: {
-            ratioMode: 'inherit',
-            format: 'png',
-            quality: 'high',
-            dimensions: item.dimensions || PRESET_4K[item.ratio],
-            enhancement: item.enhancement,
-            contentClass: item.contentClass,
-          },
-          retry: { maxAttempts: item.maxAttempts },
-        },
+        request: requestFromBatchItem(idempotencyKey, item),
       })),
     }),
   })
@@ -217,6 +221,46 @@ server.registerTool('image_batch_retry_failed', {
   description: 'Requeue every failed job in a batch with fresh attempt budgets and resume the batch.',
   inputSchema: { batchId: z.string().min(1) },
 }, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' })).json()))
+
+server.registerTool('image_batch_item_review', {
+  description: 'Record visual QA and final acceptance for one batch item. Accepted requires a succeeded job and passed QA.',
+  inputSchema: {
+    batchId: z.string().min(1),
+    itemKey: z.string().min(1).max(200),
+    qaStatus: z.enum(['not_run', 'passed', 'failed', 'needs_review']),
+    acceptanceStatus: z.enum(['pending', 'accepted', 'needs_review', 'rejected']),
+    failureClass: z.string().min(1).max(100).optional(),
+    recoveryAction: z.string().min(1).max(100).optional(),
+    detail: z.record(z.string(), z.unknown()).optional(),
+  },
+}, async ({ batchId, itemKey, ...review }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/review`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(review),
+  },
+)).json()))
+
+server.registerTool('image_batch_item_replace_job', {
+  description: 'Attach a new revision job to a terminal batch item while preserving its prior job history.',
+  inputSchema: {
+    batchId: z.string().min(1),
+    replacementKey: z.string().min(8).max(200),
+    reason: z.string().min(1).max(200),
+    item: batchItemSchema,
+  },
+}, async ({ batchId, replacementKey, reason, item }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(item.itemKey)}/job`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      reason,
+      request: requestFromBatchItem(replacementKey, item),
+    }),
+  },
+)).json()))
 
 server.registerTool('image_asset_download', {
   description: 'Download a completed source or final asset to a local PNG path.',
