@@ -25,6 +25,13 @@ import {
   validateImageJobRequest,
   verifySourceFinalInvariant,
 } from '../../packages/image-job-core/index.mjs'
+import {
+  buildQaRevisionPrompt,
+  classifyQaVerdict,
+  createProviderBatchAutomationEvaluator,
+  expandBatchRequest,
+  validateBatchAutomation,
+} from './batch-automation.mjs'
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 const ACTIVE_STATES = ['validating', 'generating', 'source_ready', 'enhancing', 'finalizing']
@@ -72,6 +79,7 @@ function validateBatchRequest(value) {
   if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200)) {
     errors.push('name must be a non-empty string up to 200 characters')
   }
+  errors.push(...validateBatchAutomation(value.automation))
   if (!Array.isArray(value.items) || value.items.length < 1 || value.items.length > MAX_BATCH_ITEMS) {
     errors.push(`items must contain 1 to ${MAX_BATCH_ITEMS} entries`)
   } else {
@@ -87,6 +95,9 @@ function validateBatchRequest(value) {
         errors.push(`items[${index}].itemKey must be unique within the batch`)
       } else {
         keys.add(item.itemKey)
+      }
+      if (item.copies !== undefined && (!Number.isInteger(item.copies) || item.copies < 1 || item.copies > 10)) {
+        errors.push(`items[${index}].copies must be an integer from 1 to 10`)
       }
       const validation = validateImageJobRequest(item.request)
       if (!validation.valid) {
@@ -145,6 +156,11 @@ function taskApiCapabilities(providerConfig = {}) {
         states: ['running', 'paused', 'completed'],
         qaStatuses: QA_STATUSES,
         acceptanceStatuses: ACCEPTANCE_STATUSES,
+        automation: {
+          supported: true,
+          maxRevisions: 3,
+          features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'automatic_acceptance'],
+        },
       },
       events: { transport: 'polling' },
     },
@@ -427,6 +443,7 @@ export class TaskRepository {
         idempotency_key TEXT NOT NULL UNIQUE,
         request_hash TEXT NOT NULL,
         name TEXT,
+        automation_json TEXT,
         control_state TEXT NOT NULL DEFAULT 'running',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -434,9 +451,13 @@ export class TaskRepository {
       CREATE TABLE IF NOT EXISTS batch_items (
         batch_id TEXT NOT NULL,
         item_key TEXT NOT NULL,
+        source_item_key TEXT NOT NULL,
         position INTEGER NOT NULL,
+        output_index INTEGER NOT NULL DEFAULT 1,
+        output_count INTEGER NOT NULL DEFAULT 1,
         job_id TEXT NOT NULL UNIQUE,
         revision INTEGER NOT NULL DEFAULT 0,
+        automation_state TEXT NOT NULL DEFAULT 'idle',
         qa_status TEXT NOT NULL DEFAULT 'not_run',
         acceptance_status TEXT NOT NULL DEFAULT 'pending',
         failure_class TEXT,
@@ -487,13 +508,21 @@ export class TaskRepository {
     const jobColumns = new Set(this.db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name))
     if (!jobColumns.has('route_index')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_index INTEGER NOT NULL DEFAULT 0')
     if (!jobColumns.has('route_attempts')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_attempts INTEGER NOT NULL DEFAULT 0')
+    const batchColumns = new Set(this.db.prepare('PRAGMA table_info(batches)').all().map((column) => column.name))
+    if (!batchColumns.has('automation_json')) this.db.exec('ALTER TABLE batches ADD COLUMN automation_json TEXT')
     const batchItemColumns = new Set(this.db.prepare('PRAGMA table_info(batch_items)').all().map((column) => column.name))
+    if (!batchItemColumns.has('source_item_key')) this.db.exec("ALTER TABLE batch_items ADD COLUMN source_item_key TEXT NOT NULL DEFAULT ''")
+    if (!batchItemColumns.has('output_index')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_index INTEGER NOT NULL DEFAULT 1')
+    if (!batchItemColumns.has('output_count')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_count INTEGER NOT NULL DEFAULT 1')
+    if (!batchItemColumns.has('automation_state')) this.db.exec("ALTER TABLE batch_items ADD COLUMN automation_state TEXT NOT NULL DEFAULT 'idle'")
     if (!batchItemColumns.has('revision')) this.db.exec('ALTER TABLE batch_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
     if (!batchItemColumns.has('qa_status')) this.db.exec("ALTER TABLE batch_items ADD COLUMN qa_status TEXT NOT NULL DEFAULT 'not_run'")
     if (!batchItemColumns.has('acceptance_status')) this.db.exec("ALTER TABLE batch_items ADD COLUMN acceptance_status TEXT NOT NULL DEFAULT 'pending'")
     if (!batchItemColumns.has('failure_class')) this.db.exec('ALTER TABLE batch_items ADD COLUMN failure_class TEXT')
     if (!batchItemColumns.has('recovery_action')) this.db.exec('ALTER TABLE batch_items ADD COLUMN recovery_action TEXT')
     if (!batchItemColumns.has('review_json')) this.db.exec('ALTER TABLE batch_items ADD COLUMN review_json TEXT')
+    this.db.exec("UPDATE batch_items SET source_item_key=item_key WHERE source_item_key=''")
+    this.db.exec("UPDATE batch_items SET automation_state='idle' WHERE automation_state='processing'")
     this.db.exec(`
       INSERT OR IGNORE INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at)
       SELECT bi.batch_id,bi.item_key,bi.revision,bi.job_id,'legacy_backfill',b.created_at
@@ -661,13 +690,33 @@ export class TaskRepository {
     const timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare('INSERT INTO batches (id,idempotency_key,request_hash,name,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?)')
-        .run(id, request.idempotencyKey, requestHash, request.name?.trim() || null, 'running', timestamp, timestamp)
+      this.db.prepare('INSERT INTO batches (id,idempotency_key,request_hash,name,automation_json,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+        .run(
+          id,
+          request.idempotencyKey,
+          requestHash,
+          request.name?.trim() || null,
+          request.automation ? JSON.stringify(request.automation) : null,
+          'running',
+          timestamp,
+          timestamp,
+        )
       request.items.forEach((item, position) => {
         const result = this.createOrGetJob(item.request)
         try {
-          this.db.prepare('INSERT INTO batch_items (batch_id,item_key,position,job_id) VALUES (?,?,?,?)')
-            .run(id, item.itemKey, position, result.job.id)
+          this.db.prepare(`
+            INSERT INTO batch_items (
+              batch_id,item_key,source_item_key,position,output_index,output_count,job_id
+            ) VALUES (?,?,?,?,?,?,?)
+          `).run(
+            id,
+            item.itemKey,
+            item.sourceItemKey || item.itemKey,
+            position,
+            item.outputIndex || 1,
+            item.outputCount || 1,
+            result.job.id,
+          )
           this.db.prepare('INSERT INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at) VALUES (?,?,?,?,?,?)')
             .run(id, item.itemKey, 0, result.job.id, 'initial', timestamp)
         } catch (error) {
@@ -697,8 +746,10 @@ export class TaskRepository {
   getBatch(id) {
     const row = this.db.prepare('SELECT * FROM batches WHERE id=?').get(id)
     if (!row) return null
+    const automation = row.automation_json ? JSON.parse(row.automation_json) : { enabled: false }
     const itemRows = this.db.prepare(`
-      SELECT bi.item_key,bi.position,bi.revision,bi.qa_status,bi.acceptance_status,
+      SELECT bi.item_key,bi.source_item_key,bi.position,bi.output_index,bi.output_count,
+             bi.revision,bi.automation_state,bi.qa_status,bi.acceptance_status,
              bi.failure_class,bi.recovery_action,bi.review_json,j.*
       FROM batch_items bi
       JOIN jobs j ON j.id=bi.job_id
@@ -725,13 +776,19 @@ export class TaskRepository {
     }
     const items = itemRows.map((item) => {
       const job = this.jobFromRow(item)
-      const acceptanceStatus = item.acceptance_status === 'pending' && ['failed', 'cancelled'].includes(job.state)
+      const acceptanceStatus = !automation.enabled
+        && item.acceptance_status === 'pending'
+        && ['failed', 'cancelled'].includes(job.state)
         ? 'rejected'
         : item.acceptance_status
       return {
         itemKey: item.item_key,
+        sourceItemKey: item.source_item_key || item.item_key,
         position: item.position,
+        outputIndex: item.output_index || 1,
+        outputCount: item.output_count || 1,
         revision: item.revision,
+        automationState: item.automation_state,
         generationStatus: job.state === 'succeeded'
           ? 'succeeded'
           : job.state === 'failed'
@@ -759,7 +816,8 @@ export class TaskRepository {
       acceptanceCounts[item.acceptanceStatus] += 1
       qaCounts[item.qaStatus] += 1
     })
-    const state = terminal === items.length
+    const automationPending = Boolean(automation.enabled) && acceptanceCounts.pending > 0
+    const state = terminal === items.length && !automationPending
       ? 'completed'
       : row.control_state === 'paused'
         ? 'paused'
@@ -771,6 +829,7 @@ export class TaskRepository {
     return {
       id: row.id,
       name: row.name,
+      automation,
       state,
       controlState: row.control_state,
       acceptanceState: acceptanceCounts.pending > 0
@@ -827,6 +886,12 @@ export class TaskRepository {
     for (const item of batch.items) {
       if (item.job.state !== 'failed') continue
       this.retryJob(item.job.id)
+      this.db.prepare(`
+        UPDATE batch_items
+        SET automation_state='idle',qa_status='not_run',acceptance_status='pending',
+            failure_class=NULL,recovery_action=NULL,review_json=NULL
+        WHERE batch_id=? AND item_key=?
+      `).run(id, item.itemKey)
       retried += 1
     }
     if (retried) {
@@ -848,7 +913,7 @@ export class TaskRepository {
     }
     this.db.prepare(`
       UPDATE batch_items
-      SET qa_status=?,acceptance_status=?,failure_class=?,recovery_action=?,review_json=?
+      SET automation_state='done',qa_status=?,acceptance_status=?,failure_class=?,recovery_action=?,review_json=?
       WHERE batch_id=? AND item_key=?
     `).run(
       review.qaStatus,
@@ -888,7 +953,7 @@ export class TaskRepository {
       const result = this.createOrGetJob(request)
       this.db.prepare(`
         UPDATE batch_items
-        SET job_id=?,revision=?,qa_status='not_run',acceptance_status='pending',
+        SET job_id=?,revision=?,automation_state='idle',qa_status='not_run',acceptance_status='pending',
             failure_class=NULL,recovery_action=NULL,review_json=NULL
         WHERE batch_id=? AND item_key=?
       `).run(result.job.id, revision, id, itemKey)
@@ -908,6 +973,52 @@ export class TaskRepository {
       this.db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  claimNextBatchAutomationItem() {
+    const row = this.db.prepare(`
+      SELECT bi.batch_id,bi.item_key
+      FROM batch_items bi
+      JOIN batches b ON b.id=bi.batch_id
+      JOIN jobs j ON j.id=bi.job_id
+      WHERE b.control_state='running'
+        AND b.automation_json IS NOT NULL
+        AND json_extract(b.automation_json,'$.enabled')=1
+        AND bi.automation_state='idle'
+        AND bi.acceptance_status='pending'
+        AND j.state IN ('succeeded','failed','cancelled')
+      ORDER BY b.created_at,bi.position
+      LIMIT 1
+    `).get()
+    if (!row) return null
+    const changed = this.db.prepare(`
+      UPDATE batch_items
+      SET automation_state='processing'
+      WHERE batch_id=? AND item_key=? AND automation_state='idle'
+    `).run(row.batch_id, row.item_key)
+    if (!changed.changes) return null
+    const batch = this.getBatch(row.batch_id)
+    const item = batch?.items.find((candidate) => candidate.itemKey === row.item_key)
+    return batch && item ? { batch, item } : null
+  }
+
+  resetBatchAutomationItem(id, itemKey) {
+    this.db.prepare(`
+      UPDATE batch_items
+      SET automation_state='idle'
+      WHERE batch_id=? AND item_key=? AND automation_state='processing'
+    `).run(id, itemKey)
+  }
+
+  isCurrentBatchAutomationClaim(id, itemKey, jobId) {
+    const row = this.db.prepare(`
+      SELECT job_id,automation_state,acceptance_status
+      FROM batch_items
+      WHERE batch_id=? AND item_key=?
+    `).get(id, itemKey)
+    return row?.job_id === jobId
+      && row.automation_state === 'processing'
+      && row.acceptance_status === 'pending'
   }
 
   getRequest(id) {
@@ -1017,6 +1128,13 @@ async function mockGenerate(request, signal, attempt) {
         clearTimeout(timeout)
         reject(Object.assign(new Error('provider timeout'), { name: 'AbortError', retryable: true }))
       }, { once: true })
+    })
+  }
+  if (request.generation?.testBehavior === 'content-policy') {
+    throw Object.assign(new Error('mock content policy rejection'), {
+      retryable: false,
+      failureClass: 'content_policy',
+      recoveryAction: 'safe_rewrite',
     })
   }
   if (request.generation?.testBehavior === 'fail') throw Object.assign(new Error('mock provider failure'), { retryable: true })
@@ -1585,6 +1703,184 @@ export class TaskWorkerPool {
   }
 }
 
+function batchRevisionRequest(batch, item, prompt, reason) {
+  const current = item.job.request
+  const route = batch.automation.revisionRoute
+  const originalRoute = routeFromRequest(current, 0)
+  const generation = { ...current.generation }
+  delete generation.testBehavior
+  return {
+    ...current,
+    idempotencyKey: `batch-revision-${sha256(`${batch.id}\0${item.itemKey}\0${item.revision + 1}\0${reason}\0${prompt}`).slice(0, 48)}`,
+    input: { ...current.input, prompt },
+    generation: {
+      ...generation,
+      provider: route.provider,
+      model: route.model,
+      apiMode: route.apiMode,
+      fallback: originalRoute,
+    },
+  }
+}
+
+export class TaskBatchAutomationPool {
+  constructor(options) {
+    this.repository = options.repository
+    this.evaluator = options.evaluator
+    this.pollIntervalMs = options.pollIntervalMs ?? 50
+    this.concurrency = options.concurrency ?? 1
+    this.running = false
+    this.loops = []
+  }
+
+  start() {
+    if (this.running) return
+    this.running = true
+    this.loops = Array.from({ length: this.concurrency }, () => this.loop())
+  }
+
+  async stop() {
+    this.running = false
+    await Promise.allSettled(this.loops)
+  }
+
+  async loop() {
+    while (this.running) {
+      const candidate = this.repository.claimNextBatchAutomationItem()
+      if (!candidate) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, this.pollIntervalMs))
+        continue
+      }
+      await this.process(candidate)
+    }
+  }
+
+  async process({ batch, item }) {
+    const route = batch.automation.revisionRoute
+    const maxRevisions = batch.automation.maxRevisions ?? 2
+    const originalPrompt = item.jobHistory[0]?.job.request.input.prompt || item.job.request.input.prompt
+    try {
+      if (item.job.state === 'cancelled') {
+        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+          qaStatus: 'not_run',
+          acceptanceStatus: 'rejected',
+          failureClass: 'cancelled',
+          recoveryAction: 'manual_restart',
+          detail: { jobId: item.job.id, revision: item.revision, automated: true },
+        })
+        return
+      }
+
+      if (item.job.state === 'failed') {
+        const contentPolicy = item.job.error?.failureClass === 'content_policy'
+          || item.job.error?.recoveryAction === 'safe_rewrite'
+        if (contentPolicy && item.revision < maxRevisions) {
+          const rewrite = await this.evaluator.rewrite({
+            prompt: originalPrompt,
+            error: item.job.error,
+            route,
+          })
+          if (!this.repository.isCurrentBatchAutomationClaim(batch.id, item.itemKey, item.job.id)) return
+          this.repository.replaceBatchItemJob(
+            batch.id,
+            item.itemKey,
+            batchRevisionRequest(batch, item, rewrite.prompt, 'safe_rewrite'),
+            'safe_rewrite',
+          )
+          return
+        }
+        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+          qaStatus: 'not_run',
+          acceptanceStatus: 'rejected',
+          failureClass: item.job.error?.failureClass || 'generation_failed',
+          recoveryAction: contentPolicy ? 'manual_policy_review' : (item.job.error?.recoveryAction || 'inspect_failure'),
+          detail: {
+            jobId: item.job.id,
+            revision: item.revision,
+            automated: true,
+            recoveryExhausted: contentPolicy && item.revision >= maxRevisions,
+          },
+        })
+        return
+      }
+
+      const finalAsset = this.repository.getAsset(item.job.finalAssetId)
+      if (!finalAsset) throw Object.assign(new Error('final asset is unavailable for visual QA'), {
+        code: 'BATCH_AUTOMATION_ASSET_MISSING',
+      })
+      const imageBuffer = await readFile(finalAsset.filePath)
+      const qa = await this.evaluator.qa({
+        prompt: originalPrompt,
+        imageBuffer,
+        route,
+        job: item.job,
+      })
+      if (!this.repository.isCurrentBatchAutomationClaim(batch.id, item.itemKey, item.job.id)) return
+      if (qa.pass) {
+        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+          qaStatus: 'passed',
+          acceptanceStatus: 'accepted',
+          detail: {
+            jobId: item.job.id,
+            revision: item.revision,
+            automated: true,
+            qa,
+            finalManifest: finalAsset.manifest,
+          },
+        })
+        return
+      }
+
+      const classification = classifyQaVerdict(qa)
+      if (item.revision < maxRevisions) {
+        this.repository.replaceBatchItemJob(
+          batch.id,
+          item.itemKey,
+          batchRevisionRequest(
+            batch,
+            item,
+            buildQaRevisionPrompt(originalPrompt, qa),
+            classification.recoveryAction,
+          ),
+          classification.recoveryAction,
+        )
+        return
+      }
+      this.repository.reviewBatchItem(batch.id, item.itemKey, {
+        qaStatus: 'failed',
+        acceptanceStatus: 'needs_review',
+        ...classification,
+        detail: {
+          jobId: item.job.id,
+          revision: item.revision,
+          automated: true,
+          recoveryExhausted: true,
+          qa,
+        },
+      })
+    } catch (error) {
+      if (!this.repository.isCurrentBatchAutomationClaim(batch.id, item.itemKey, item.job.id)) return
+      try {
+        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+          qaStatus: 'needs_review',
+          acceptanceStatus: 'needs_review',
+          failureClass: error?.httpStatus >= 500 ? 'provider_transient' : 'qa_unavailable',
+          recoveryAction: error?.httpStatus >= 500 ? 'health_probe' : 'manual_review',
+          detail: {
+            jobId: item.job.id,
+            revision: item.revision,
+            automated: true,
+            code: error?.code || 'BATCH_AUTOMATION_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+          },
+        })
+      } catch {
+        this.repository.resetBatchAutomationItem(batch.id, item.itemKey)
+      }
+    }
+  }
+}
+
 export async function createTaskApi(options = {}) {
   const stateDir = resolve(options.stateDir ?? '.local-task-api')
   const assetRoot = join(stateDir, 'assets')
@@ -1604,9 +1900,19 @@ export async function createTaskApi(options = {}) {
     repository,
     assetRoot,
     concurrency: options.concurrency,
+    pollIntervalMs: options.pollIntervalMs,
     providerConfig: options.providerConfig,
     providerTimeoutMs: options.providerTimeoutMs,
     providerRetryBaseMs: options.providerRetryBaseMs,
+  })
+  const batchAutomationPool = new TaskBatchAutomationPool({
+    repository,
+    evaluator: options.batchAutomationEvaluator || createProviderBatchAutomationEvaluator({
+      providerConfig: options.providerConfig,
+      timeoutMs: options.batchAutomationTimeoutMs,
+    }),
+    concurrency: options.batchAutomationConcurrency,
+    pollIntervalMs: options.pollIntervalMs,
   })
   const matchAllowedOrigin = createOriginMatcher(options.allowedOrigins)
 
@@ -1663,9 +1969,10 @@ export async function createTaskApi(options = {}) {
       }
       if (request.method === 'POST' && url.pathname === '/v1/image-batches') {
         const body = JSON.parse((await readBody(request, 5 * 1024 * 1024)).toString('utf8'))
-        const validation = validateBatchRequest(body)
+        const expanded = expandBatchRequest(body)
+        const validation = validateBatchRequest(expanded)
         if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_BATCH', details: validation.errors } })
-        const result = repository.createOrGetBatch(body)
+        const result = repository.createOrGetBatch(expanded)
         return void json(response, result.created ? 201 : 200, result.batch, { 'idempotency-replayed': result.created ? 'false' : 'true' })
       }
       if (request.method === 'GET' && url.pathname === '/v1/image-batches') {
@@ -1754,18 +2061,21 @@ export async function createTaskApi(options = {}) {
     recoveredJobs,
     repository,
     workerPool,
+    batchAutomationPool,
     async listen(port = 0, host = '127.0.0.1') {
       await new Promise((resolvePromise, reject) => {
         server.once('error', reject)
         server.listen(port, host, resolvePromise)
       })
       workerPool.start()
+      batchAutomationPool.start()
       const address = server.address()
       return { host, port: address.port, url: `http://${host}:${address.port}` }
     },
     async close() {
       if (closed) return
       closed = true
+      await batchAutomationPool.stop()
       await workerPool.stop()
       if (server.listening) await new Promise((resolvePromise) => server.close(resolvePromise))
       repository.close()

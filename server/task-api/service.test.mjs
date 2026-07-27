@@ -51,6 +51,17 @@ async function wait(url, id, timeoutMs = 8_000) {
   throw new Error(`job ${id} did not finish`)
 }
 
+async function waitBatch(url, id, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const response = await fetch(`${url}/v1/image-batches/${id}`, { headers: headers() })
+    const batch = await response.json()
+    if (batch.state === 'completed') return batch
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
+  }
+  throw new Error(`batch ${id} did not finish`)
+}
+
 afterEach(async () => {
   while (running.length) {
     const instance = running.pop()
@@ -110,6 +121,42 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     await rm(stateDir, { recursive: true, force: true })
   })
 
+  it('recovers interrupted batch automation claims after a service restart', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-automation-restart-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const firstRepository = new TaskRepository(databasePath)
+    const created = firstRepository.createOrGetBatch({
+      idempotencyKey: 'batch-automation-restart-001',
+      automation: {
+        enabled: true,
+        maxRevisions: 2,
+        revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
+      },
+      items: [{
+        itemKey: 'restart-item',
+        request: request({ idempotencyKey: 'batch-automation-restart-job-001' }),
+      }],
+    }).batch
+    firstRepository.db.prepare("UPDATE jobs SET state='failed' WHERE id=?").run(created.items[0].job.id)
+    firstRepository.db.prepare("UPDATE batch_items SET automation_state='processing' WHERE batch_id=? AND item_key=?")
+      .run(created.id, 'restart-item')
+    firstRepository.close()
+
+    const recoveredRepository = new TaskRepository(databasePath)
+    const recovered = recoveredRepository.claimNextBatchAutomationItem()
+    expect(recovered).toMatchObject({
+      batch: { id: created.id },
+      item: {
+        itemKey: 'restart-item',
+        automationState: 'processing',
+        acceptanceStatus: 'pending',
+        job: { state: 'failed' },
+      },
+    })
+    recoveredRepository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
   it('requires bearer authentication', async () => {
     const { url } = await start()
     const response = await fetch(`${url}/v1/image-jobs/missing`)
@@ -162,6 +209,11 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         batches: {
           qaStatuses: ['not_run', 'passed', 'failed', 'needs_review'],
           acceptanceStatuses: ['pending', 'accepted', 'needs_review', 'rejected'],
+          automation: {
+            supported: true,
+            maxRevisions: 3,
+            features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'automatic_acceptance'],
+          },
         },
       },
     })
@@ -405,6 +457,182 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       event: 'item_job_replaced',
       detail: { itemKey: 'reviewed-item', revision: 1, previousJobId: firstJob.id },
     })
+  })
+
+  it('expands multi-output prompts and automatically accepts every QA-passed item', async () => {
+    const evaluator = {
+      rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
+      qa: async () => ({
+        pass: true,
+        edgeClipping: false,
+        backgroundConflict: false,
+        missingCoreStructure: false,
+        blankOrBroken: false,
+        notes: 'pass',
+        model: 'mock-qa',
+      }),
+    }
+    const { url } = await start({ batchAutomationEvaluator: evaluator })
+    const response = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-automation-expand-001',
+        automation: {
+          enabled: true,
+          maxRevisions: 2,
+          revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
+        },
+        items: [{
+          itemKey: 'poster',
+          request: request({
+            idempotencyKey: 'batch-automation-expand-job-001',
+            input: { prompt: 'Generate 2 poster images' },
+          }),
+        }],
+      }),
+    })
+    const created = await response.json()
+    expect(response.status).toBe(201)
+    expect(created).toMatchObject({
+      automation: { enabled: true },
+      stats: { total: 2 },
+      items: [
+        { itemKey: 'poster:1', sourceItemKey: 'poster', outputIndex: 1, outputCount: 2 },
+        { itemKey: 'poster:2', sourceItemKey: 'poster', outputIndex: 2, outputCount: 2 },
+      ],
+    })
+
+    const completed = await waitBatch(url, created.id)
+    expect(completed).toMatchObject({
+      state: 'completed',
+      acceptanceState: 'accepted',
+      stats: { total: 2, succeeded: 2, accepted: 2, qaPassed: 2, acceptancePending: 0 },
+    })
+    expect(completed.items.every((item) => item.automationState === 'done')).toBe(true)
+    expect(completed.items.every((item) => item.job.request.input.prompt.includes('not a contact sheet'))).toBe(true)
+  })
+
+  it('automatically rewrites a policy-rejected item and accepts the recovered revision', async () => {
+    let rewrites = 0
+    const evaluator = {
+      rewrite: async () => {
+        rewrites += 1
+        return { prompt: 'A compliant documentary poster', changes: 'generalized unsafe detail' }
+      },
+      qa: async () => ({
+        pass: true,
+        edgeClipping: false,
+        backgroundConflict: false,
+        missingCoreStructure: false,
+        blankOrBroken: false,
+        notes: 'recovered',
+        model: 'mock-qa',
+      }),
+    }
+    const { url } = await start({ batchAutomationEvaluator: evaluator })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-automation-policy-001',
+        automation: {
+          enabled: true,
+          maxRevisions: 2,
+          revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
+        },
+        items: [{
+          itemKey: 'policy',
+          request: request({
+            idempotencyKey: 'batch-automation-policy-job-001',
+            input: { prompt: 'policy-sensitive source prompt' },
+            generation: { provider: 'mock', model: 'mock-v1', testBehavior: 'content-policy' },
+            retry: { maxAttempts: 1 },
+          }),
+        }],
+      }),
+    }).then((response) => response.json())
+
+    const completed = await waitBatch(url, created.id)
+    expect(rewrites).toBe(1)
+    expect(completed).toMatchObject({
+      state: 'completed',
+      acceptanceState: 'accepted',
+      stats: { total: 1, succeeded: 1, accepted: 1, qaPassed: 1 },
+      items: [{
+        itemKey: 'policy',
+        revision: 1,
+        acceptanceStatus: 'accepted',
+        job: { request: { input: { prompt: 'A compliant documentary poster' } } },
+        jobHistory: [
+          { revision: 0, reason: 'initial', job: { state: 'failed' } },
+          { revision: 1, reason: 'safe_rewrite', job: { state: 'succeeded' } },
+        ],
+      }],
+    })
+  })
+
+  it('automatically revises a QA failure and preserves revision evidence', async () => {
+    let inspections = 0
+    const evaluator = {
+      rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
+      qa: async () => {
+        inspections += 1
+        return inspections === 1
+          ? {
+              pass: false,
+              edgeClipping: true,
+              backgroundConflict: false,
+              missingCoreStructure: false,
+              blankOrBroken: false,
+              notes: 'title clipped',
+              model: 'mock-qa',
+            }
+          : {
+              pass: true,
+              edgeClipping: false,
+              backgroundConflict: false,
+              missingCoreStructure: false,
+              blankOrBroken: false,
+              notes: 'fixed',
+              model: 'mock-qa',
+            }
+      },
+    }
+    const { url } = await start({ batchAutomationEvaluator: evaluator })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-automation-qa-001',
+        automation: {
+          enabled: true,
+          maxRevisions: 2,
+          revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
+        },
+        items: [{
+          itemKey: 'qa',
+          request: request({ idempotencyKey: 'batch-automation-qa-job-001' }),
+        }],
+      }),
+    }).then((response) => response.json())
+
+    const completed = await waitBatch(url, created.id)
+    expect(inspections).toBe(2)
+    expect(completed).toMatchObject({
+      state: 'completed',
+      stats: { accepted: 1, qaPassed: 1 },
+      items: [{
+        itemKey: 'qa',
+        revision: 1,
+        acceptanceStatus: 'accepted',
+        jobHistory: [
+          { revision: 0, reason: 'initial' },
+          { revision: 1, reason: 'recompose' },
+        ],
+      }],
+    })
+    expect(completed.items[0].job.request.input.prompt).toContain('Keep a requested full-bleed background full-bleed')
   })
 
   it('runs a mock job and stores traceable source/final PNG assets', async () => {

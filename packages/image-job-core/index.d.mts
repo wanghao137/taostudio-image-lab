@@ -12,6 +12,7 @@ export const COMMON_SIZE_PRESETS: Readonly<Record<ImageTier, Readonly<Record<str
 export const JOB_STATES: readonly JobState[]
 export const TERMINAL_JOB_STATES: readonly JobState[]
 export const JOB_STATE_TRANSITIONS: Readonly<Record<JobState, readonly JobState[]>>
+export function extractRequestedImageCount(prompt: unknown): number
 export function parseImageSize(value: string): ImageDimensions | null
 export function parseRatio(value: string): ImageDimensions | null
 export function greatestCommonDivisor(a: number, b: number): number

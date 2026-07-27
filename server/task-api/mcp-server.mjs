@@ -21,8 +21,18 @@ const fallbackSchema = z.object({
   model: z.string().min(1),
   apiMode: z.enum(['images', 'responses']).default('responses'),
 })
+const batchAutomationSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxRevisions: z.number().int().min(0).max(3).default(2),
+  revisionRoute: z.object({
+    provider: z.string().min(1).default('configured'),
+    model: z.string().min(1),
+    apiMode: z.literal('responses').default('responses'),
+  }),
+})
 const batchItemSchema = z.object({
   itemKey: z.string().min(1).max(200),
+  copies: z.number().int().min(1).max(10).optional(),
   prompt: z.string().min(1).optional(),
   sourceAssetId: z.string().optional(),
   ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
@@ -181,17 +191,20 @@ server.registerTool('image_batch_create', {
   inputSchema: {
     idempotencyKey: z.string().min(8).max(200),
     name: z.string().min(1).max(200).optional(),
+    automation: batchAutomationSchema.optional(),
     items: z.array(batchItemSchema).min(1).max(500),
   },
-}, async ({ idempotencyKey, name, items }) => {
+}, async ({ idempotencyKey, name, automation, items }) => {
   const response = await api('/v1/image-batches', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       idempotencyKey,
       ...(name ? { name } : {}),
+      ...(automation ? { automation } : {}),
       items: items.map((item) => ({
         itemKey: item.itemKey,
+        ...(item.copies ? { copies: item.copies } : {}),
         request: requestFromBatchItem(idempotencyKey, item),
       })),
     }),

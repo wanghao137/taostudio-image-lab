@@ -15,7 +15,15 @@ const targetRoot = process.argv[2]
 if (!targetRoot) throw new Error('usage: node scripts/sync-skill-engine.mjs <skill-directory> [--check]')
 const sourceDir = resolve('server/task-api')
 const targetDir = resolve(targetRoot, 'engine')
-const files = ['service.mjs', 'cli.mjs', 'mcp-server.mjs', 'service.test.mjs', 'openapi.yaml']
+const files = [
+  'service.mjs',
+  'batch-automation.mjs',
+  'cli.mjs',
+  'mcp-server.mjs',
+  'service.test.mjs',
+  'batch-automation.test.mjs',
+  'openapi.yaml',
+]
 
 // Rewrites both JavaScript imports and OpenAPI schema references.
 const PLATFORM_CORE_PATH = "../../packages/image-job-core"

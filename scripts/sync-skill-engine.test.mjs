@@ -21,9 +21,11 @@ describe('standalone image pipeline engine sync', () => {
     await execFileAsync(process.execPath, [script, target], { cwd: resolve('.') })
 
     const service = await readFile(join(target, 'engine', 'service.mjs'), 'utf8')
+    const automation = await readFile(join(target, 'engine', 'batch-automation.mjs'), 'utf8')
     const openapi = await readFile(join(target, 'engine', 'openapi.yaml'), 'utf8')
     expect(service).toContain("from '../vendor/image-job-core/index.mjs'")
     expect(service).not.toContain('../../packages/image-job-core')
+    expect(automation).toContain("from '../vendor/image-job-core/index.mjs'")
     expect(openapi).toContain('../vendor/image-job-core/schemas/image-job-contract-v1.schema.json')
     expect(openapi).not.toContain('../../packages/image-job-core')
 

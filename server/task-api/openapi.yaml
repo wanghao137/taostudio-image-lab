@@ -364,6 +364,7 @@ components:
       properties:
         idempotencyKey: { type: string, minLength: 8, maxLength: 200 }
         name: { type: string, minLength: 1, maxLength: 200 }
+        automation: { $ref: '#/components/schemas/ImageBatchAutomation' }
         items:
           type: array
           minItems: 1
@@ -373,16 +374,31 @@ components:
             required: [itemKey, request]
             properties:
               itemKey: { type: string, minLength: 1, maxLength: 200 }
+              copies: { type: integer, minimum: 1, maximum: 10 }
               request:
                 $ref: ../../packages/image-job-core/schemas/image-job-contract-v1.schema.json
+    ImageBatchAutomation:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        maxRevisions: { type: integer, minimum: 0, maximum: 3, default: 2 }
+        revisionRoute:
+          type: object
+          required: [provider, model, apiMode]
+          properties:
+            provider: { type: string, minLength: 1 }
+            model: { type: string, minLength: 1 }
+            apiMode: { const: responses }
     ImageBatch:
       type: object
-      required: [id, state, controlState, acceptanceState, stats, items, events, createdAt, updatedAt]
+      required: [id, state, controlState, automation, acceptanceState, stats, items, events, createdAt, updatedAt]
       properties:
         id: { type: string }
         name: { type: [string, 'null'] }
         state: { type: string, enum: [running, paused, completed] }
         controlState: { type: string, enum: [running, paused] }
+        automation: { $ref: '#/components/schemas/ImageBatchAutomation' }
         acceptanceState: { type: string, enum: [pending, accepted, needs_review, rejected] }
         stats:
           type: object
@@ -407,11 +423,15 @@ components:
           type: array
           items:
             type: object
-            required: [itemKey, position, revision, generationStatus, qaStatus, acceptanceStatus, job, jobHistory]
+            required: [itemKey, sourceItemKey, position, outputIndex, outputCount, revision, automationState, generationStatus, qaStatus, acceptanceStatus, job, jobHistory]
             properties:
               itemKey: { type: string }
+              sourceItemKey: { type: string }
               position: { type: integer }
+              outputIndex: { type: integer, minimum: 1 }
+              outputCount: { type: integer, minimum: 1, maximum: 10 }
               revision: { type: integer }
+              automationState: { type: string, enum: [idle, processing, done] }
               generationStatus: { type: string, enum: [pending, running, succeeded, failed, cancelled] }
               qaStatus: { type: string, enum: [not_run, passed, failed, needs_review] }
               acceptanceStatus: { type: string, enum: [pending, accepted, needs_review, rejected] }
@@ -466,7 +486,7 @@ components:
         manifestVersion: { const: '1' }
         capabilities:
           type: object
-          required: [inputModes, apiModes, ratios, generation, output, retry, upload, jobs, events]
+          required: [inputModes, apiModes, ratios, generation, output, retry, upload, jobs, batches, events]
           properties:
             inputModes:
               type: array
@@ -514,6 +534,29 @@ components:
                 states: { type: array, items: { $ref: '#/components/schemas/ImageJobState' } }
                 defaultListLimit: { type: integer }
                 maxListLimit: { type: integer }
+            batches:
+              type: object
+              required: [maxItems, states, qaStatuses, acceptanceStatuses, automation]
+              properties:
+                maxItems: { type: integer }
+                states:
+                  type: array
+                  items: { type: string, enum: [running, paused, completed] }
+                qaStatuses:
+                  type: array
+                  items: { type: string, enum: [not_run, passed, failed, needs_review] }
+                acceptanceStatuses:
+                  type: array
+                  items: { type: string, enum: [pending, accepted, needs_review, rejected] }
+                automation:
+                  type: object
+                  required: [supported, maxRevisions, features]
+                  properties:
+                    supported: { type: boolean }
+                    maxRevisions: { type: integer }
+                    features:
+                      type: array
+                      items: { type: string, enum: [multi_output_expansion, safe_rewrite, visual_qa, automatic_acceptance] }
             events:
               type: object
               required: [transport]

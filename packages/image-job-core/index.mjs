@@ -1,5 +1,18 @@
 const SIZE_PATTERN = /^\s*(\d+)\s*[xX\u00d7]\s*(\d+)\s*$/
 const RATIO_PATTERN = /^\s*(\d+(?:\.\d+)?)\s*[:xX\u00d7]\s*(\d+(?:\.\d+)?)\s*$/
+const CHINESE_NUMBERS = Object.freeze({
+  '\u4e00': 1,
+  '\u4e8c': 2,
+  '\u4e24': 2,
+  '\u4e09': 3,
+  '\u56db': 4,
+  '\u4e94': 5,
+  '\u516d': 6,
+  '\u4e03': 7,
+  '\u516b': 8,
+  '\u4e5d': 9,
+  '\u5341': 10,
+})
 
 export const CONTRACT_VERSION = '1'
 export const MANIFEST_VERSION = '1'
@@ -49,6 +62,22 @@ export const JOB_STATE_TRANSITIONS = Object.freeze({
   failed: Object.freeze(['queued']),
   cancelled: Object.freeze([]),
 })
+
+export function extractRequestedImageCount(prompt) {
+  const text = String(prompt || '')
+  const patterns = [
+    /(?:\u751f\u6210|\u521b\u4f5c|\u5236\u4f5c|\u8bbe\u8ba1|\u8f93\u51fa|\u7ed9\u6211|\u505a)(?:\u51fa)?\s*([1-9]|10|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])\s*(?:\u5f20|\u5e45|\u4e2a)(?:\u56fe|\u56fe\u7247|\u4f5c\u54c1|\u65b9\u6848)?/i,
+    /(?:\u4e00\u7ec4|\u7cfb\u5217|\u5957\u7cfb)\s*([1-9]|10|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])\s*(?:\u5f20|\u5e45|\u4e2a)/i,
+    /\b(?:generate|create|make|design|produce|output)\s+([1-9]|10)\s+(?:images?|pictures?|posters?|illustrations?|variations?)\b/i,
+  ]
+  for (const pattern of patterns) {
+    const raw = text.match(pattern)?.[1]
+    if (!raw) continue
+    const count = Number(raw) || CHINESE_NUMBERS[raw] || 1
+    return Math.max(1, Math.min(10, count))
+  }
+  return 1
+}
 
 const TIER_PIXEL_BUDGET = Object.freeze({ '1K': 1_572_864, '2K': 4_194_304, '4K': MAX_PIXELS })
 const MIN_PIXELS = 655_360

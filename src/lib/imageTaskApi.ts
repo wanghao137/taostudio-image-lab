@@ -149,6 +149,11 @@ export interface ImageTaskCapabilitiesV1 {
       states: Array<'running' | 'paused' | 'completed'>
       qaStatuses: ImageBatchQaStatusV1[]
       acceptanceStatuses: ImageBatchAcceptanceStatusV1[]
+      automation: {
+        supported: boolean
+        maxRevisions: number
+        features: Array<'multi_output_expansion' | 'safe_rewrite' | 'visual_qa' | 'automatic_acceptance'>
+      }
     }
     events: { transport: 'polling' }
   }
@@ -178,6 +183,7 @@ export interface ImageBatchV1 {
   name?: string | null
   state: 'running' | 'paused' | 'completed'
   controlState: 'running' | 'paused'
+  automation: ImageBatchAutomationV1
   acceptanceState: 'pending' | 'accepted' | 'needs_review' | 'rejected'
   stats: {
     total: number
@@ -198,8 +204,12 @@ export interface ImageBatchV1 {
   }
   items: Array<{
     itemKey: string
+    sourceItemKey: string
     position: number
+    outputIndex: number
+    outputCount: number
     revision: number
+    automationState: 'idle' | 'processing' | 'done'
     generationStatus: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
     qaStatus: ImageBatchQaStatusV1
     acceptanceStatus: ImageBatchAcceptanceStatusV1
@@ -219,10 +229,21 @@ export interface ImageBatchV1 {
   updatedAt: string
 }
 
+export interface ImageBatchAutomationV1 {
+  enabled: boolean
+  maxRevisions?: number
+  revisionRoute?: {
+    provider: string
+    model: string
+    apiMode: 'responses'
+  }
+}
+
 export interface ImageBatchCreateRequestV1 {
   idempotencyKey: string
   name?: string
-  items: Array<{ itemKey: string; request: ImageJobRequestV1 }>
+  automation?: ImageBatchAutomationV1
+  items: Array<{ itemKey: string; copies?: number; request: ImageJobRequestV1 }>
 }
 
 export class ImageTaskApiError extends Error {

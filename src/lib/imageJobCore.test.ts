@@ -6,6 +6,7 @@ import {
   calculateImageSize,
   deriveExactSourceTarget,
   deriveInheritedTarget,
+  extractRequestedImageCount,
   formatExactRatio,
   parseImageSize,
   parseRatio,
@@ -29,6 +30,12 @@ const GOLDEN_4K = {
 } as const
 
 describe('Image Job Contract v1 core', () => {
+  it('extracts explicit multi-image counts without inferring vague series language', () => {
+    expect(extractRequestedImageCount('生成三张海报')).toBe(3)
+    expect(extractRequestedImageCount('Generate 4 poster images')).toBe(4)
+    expect(extractRequestedImageCount('设计一组海报')).toBe(1)
+  })
+
   it.each(COMMON_IMAGE_RATIOS)('keeps the %s golden 4K preset stable', (ratio) => {
     const dimensions = calculateImageSize('4K', ratio)
     expect(dimensions).toBe(GOLDEN_4K[ratio as keyof typeof GOLDEN_4K])

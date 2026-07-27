@@ -22,6 +22,11 @@ import {
 } from 'lucide-react'
 import { calculateImageSize } from '../lib/size'
 import {
+  countEngineBatchOutputs,
+  createEngineBatchRequest,
+  parseEngineBatchPrompts,
+} from '../lib/engineBatch'
+import {
   cancelImageJob,
   clearLocalImageTaskApiConfig,
   createImageTaskGeneration,
@@ -375,45 +380,17 @@ export default function EngineWorkspace() {
   const handleCreateBatch = async (event: FormEvent) => {
     event.preventDefault()
     if (!config || !capabilities || !draft.model.trim()) return
-    const prompts = batchDraft.prompts.split(/\r?\n/).map((prompt) => prompt.trim()).filter(Boolean)
+    const prompts = parseEngineBatchPrompts(batchDraft.prompts)
     if (!prompts.length) return
     setBusy(true)
     setWorkspaceError(null)
     try {
-      const batch = await createImageBatch(config, {
-        idempotencyKey: `engine-ui-batch:${crypto.randomUUID()}`,
-        ...(batchDraft.name.trim() ? { name: batchDraft.name.trim() } : {}),
-        items: prompts.map((prompt, index) => ({
-          itemKey: `prompt-${index + 1}`,
-          request: {
-            contractVersion: '1',
-            idempotencyKey: `engine-ui-batch-item:${crypto.randomUUID()}:${index}`,
-            input: { prompt },
-            composition: { ratio: draft.ratio },
-            generation: createImageTaskGeneration({
-              provider: 'configured',
-              model: draft.model.trim(),
-              apiMode: draft.apiMode,
-              ...(draft.fallbackEnabled && draft.fallbackModel.trim() ? {
-                fallback: {
-                  provider: 'configured',
-                  model: draft.fallbackModel.trim(),
-                  apiMode: draft.fallbackApiMode,
-                },
-              } : {}),
-            }),
-            output: {
-              ratioMode: 'inherit',
-              format: 'png',
-              quality: 'high',
-              dimensions: calculateImageSize('4K', draft.ratio) || undefined,
-              enhancement: 'lanczos3',
-              contentClass: 'photo',
-            },
-            retry: { maxAttempts: capabilities.capabilities.retry.maxAttempts },
-          },
-        })),
-      })
+      const batch = await createImageBatch(config, createEngineBatchRequest({
+        name: batchDraft.name,
+        prompts,
+        draft,
+        maxAttempts: capabilities.capabilities.retry.maxAttempts,
+      }))
       setBatchDraft({ name: '', prompts: '' })
       setShowNewBatch(false)
       setShowNewJob(false)
@@ -897,7 +874,9 @@ function NewBatchForm({
   onClose: () => void
   onSubmit: (event: FormEvent) => void
 }) {
-  const promptCount = batchDraft.prompts.split(/\r?\n/).map((prompt) => prompt.trim()).filter(Boolean).length
+  const prompts = parseEngineBatchPrompts(batchDraft.prompts)
+  const promptCount = prompts.length
+  const outputCount = countEngineBatchOutputs(prompts)
   return (
     <form data-engine-editor onSubmit={onSubmit}>
       <div className="flex items-center justify-between">
@@ -941,19 +920,20 @@ function NewBatchForm({
           </select>
         </label>
         <div className="text-xs font-medium text-stone-500 dark:text-stone-400">
-          <div>条目数</div>
-          <div className="mt-2 h-10 rounded-md border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300">{promptCount}</div>
+          <div>提示词 / 输出</div>
+          <div className="mt-2 h-10 rounded-md border border-stone-200 bg-stone-50 px-3 py-2.5 font-mono text-sm text-stone-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300">{promptCount} / {outputCount}</div>
         </div>
       </div>
       <div className="mt-4 border-y border-stone-300 py-3 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
         <div className="flex justify-between gap-3"><span>主路由</span><span className="truncate font-mono">{draft.model} / {draft.apiMode}</span></div>
         <div className="mt-2 flex justify-between gap-3"><span>备用路由</span><span className="truncate font-mono">{draft.fallbackEnabled ? `${draft.fallbackModel} / ${draft.fallbackApiMode}` : '关闭'}</span></div>
+        <div className="mt-2 flex justify-between gap-3"><span>自动 QA / 修订</span><span className="truncate font-mono">{draft.fallbackModel} / responses</span></div>
         <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('2K', draft.ratio)}</span></div>
         <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG</span></div>
       </div>
       <button
         type="submit"
-        disabled={busy || promptCount === 0 || !draft.model.trim() || (draft.fallbackEnabled && !draft.fallbackModel.trim())}
+        disabled={busy || promptCount === 0 || !draft.model.trim() || !draft.fallbackModel.trim()}
         className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-[#356c82] px-4 text-sm font-medium text-white hover:bg-[#2b596b] disabled:opacity-40"
       >
         {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Layers className="h-4 w-4" />}
@@ -972,13 +952,21 @@ function BatchInspector({
   busy: boolean
   onControl: (action: 'pause' | 'resume' | 'retry-failed') => void
 }) {
-  const percentage = batch.stats.total ? Math.round((batch.stats.terminal / batch.stats.total) * 100) : 0
+  const completed = batch.automation.enabled
+    ? batch.stats.accepted + batch.stats.needsReview + batch.stats.rejected
+    : batch.stats.terminal
+  const percentage = batch.stats.total ? Math.round((completed / batch.stats.total) * 100) : 0
   return (
     <div>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[10px] font-medium uppercase text-stone-400">Batch detail</div>
           <h2 className="mt-1 break-all font-mono text-sm font-semibold">{batch.name || batch.id}</h2>
+          {batch.automation.enabled && (
+            <div className="mt-2 text-[10px] font-medium text-[#356c82] dark:text-[#8ec5d7]">
+              自动恢复 · 视觉 QA · 自动验收
+            </div>
+          )}
         </div>
         <span className="shrink-0 rounded-md border border-stone-300 px-2 py-1 text-[11px] font-medium text-stone-600 dark:border-white/10 dark:text-stone-300">
           {batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}
@@ -986,8 +974,8 @@ function BatchInspector({
       </div>
       <div className="mt-5">
         <div className="flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
-          <span>批次进度</span>
-          <span className="font-mono">{batch.stats.terminal}/{batch.stats.total} · {percentage}%</span>
+          <span>{batch.automation.enabled ? '交付进度' : '批次进度'}</span>
+          <span className="font-mono">{completed}/{batch.stats.total} · {percentage}%</span>
         </div>
         <div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
           <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${percentage}%` }} />
@@ -1012,7 +1000,9 @@ function BatchInspector({
               <div className="min-w-0">
                 <div className="truncate font-mono">{item.itemKey}</div>
                 <div className="mt-1 text-[10px] text-stone-400">
+                  {item.outputCount > 1 ? `输出 ${item.outputIndex}/${item.outputCount} · ` : ''}
                   Job 修订 {item.revision} · QA {item.qaStatus} · {item.generationStatus}
+                  {batch.automation.enabled ? ` · 自动化 ${item.automationState}` : ''}
                   {item.failureClass ? ` · ${item.failureClass}` : ''}
                 </div>
               </div>
