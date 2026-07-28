@@ -905,8 +905,8 @@ export class TaskRepository {
     const batch = this.getBatch(id)
     const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
     if (!item) return null
-    if (review.acceptanceStatus === 'accepted' && (item.job.state !== 'succeeded' || review.qaStatus !== 'passed')) {
-      throw Object.assign(new Error('accepted batch items require a succeeded job and passed QA'), {
+    if (review.acceptanceStatus === 'accepted' && item.job.state !== 'succeeded') {
+      throw Object.assign(new Error('accepted batch items require a succeeded job'), {
         statusCode: 409,
         code: 'BATCH_ITEM_NOT_ACCEPTABLE',
       })

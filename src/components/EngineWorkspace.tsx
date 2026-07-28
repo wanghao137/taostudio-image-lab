@@ -151,6 +151,7 @@ export default function EngineWorkspace() {
   const [workspaceError, setWorkspaceError] = useState<string | null>(null)
   const [showNewJob, setShowNewJob] = useState(false)
   const [showNewBatch, setShowNewBatch] = useState(false)
+  const [batchFilter, setBatchFilter] = useState('')
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
   const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
   const selectedJobId = selectedJob?.id
@@ -363,6 +364,7 @@ export default function EngineWorkspace() {
     if (!config) return
     setRefreshing(true)
     try {
+      const MAX_LOAD = 500
       const all: ImageJobV1[] = []
       let cursor: string | undefined
       do {
@@ -374,6 +376,7 @@ export default function EngineWorkspace() {
         all.push(...page.items)
         setJobStats(page.stats)
         cursor = page.nextCursor || undefined
+        if (all.length >= MAX_LOAD) break
       } while (cursor)
       setJobs(all)
       setNextCursor(null)
@@ -570,8 +573,8 @@ export default function EngineWorkspace() {
   }
 
   return (
-    <main className="min-h-[calc(100vh-4rem)] bg-[#f4f1ec] text-stone-900 dark:bg-[#11100e] dark:text-stone-100">
-      <div className="mx-auto max-w-[1500px] px-3 py-4 sm:px-6 sm:py-6">
+    <main className="h-[calc(100vh-4rem)] overflow-hidden bg-[#f4f1ec] text-stone-900 dark:bg-[#11100e] dark:text-stone-100">
+      <div className="mx-auto flex h-full max-w-[1500px] flex-col px-3 py-4 sm:px-6 sm:py-6">
         <header className="flex flex-col gap-4 border-b border-stone-300 pb-5 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <div className="flex items-center gap-2 text-xs font-medium uppercase text-emerald-700 dark:text-emerald-300">
@@ -650,15 +653,24 @@ export default function EngineWorkspace() {
           </div>
         )}
 
-        <div className="grid min-h-[620px] lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
-          <section className="order-2 border-b border-stone-300 py-4 dark:border-white/10 lg:order-1 lg:border-b-0 lg:border-r lg:pr-5">
+        <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
+          <section className="order-2 overflow-auto border-b border-stone-300 py-4 dark:border-white/10 lg:order-1 lg:border-b-0 lg:border-r lg:pr-5">
             <div className="mb-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">批次队列</h2>
                 <span className="text-[10px] font-medium uppercase text-stone-400">{batches.length} 个批次</span>
               </div>
-              <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
-                {batches.map((batch) => (
+              {batches.length > 5 && (
+                <input
+                  type="text"
+                  placeholder="筛选批次…"
+                  value={batchFilter}
+                  onChange={(e) => setBatchFilter(e.target.value)}
+                  className="mb-2 w-full rounded-md border border-stone-300 bg-transparent px-2 py-1 text-xs dark:border-white/10"
+                />
+              )}
+              <div id="batch-queue-list" className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
+                {batches.filter((b) => !batchFilter || (b.name || b.id).toLowerCase().includes(batchFilter.toLowerCase())).map((batch) => (
                   <button
                     type="button"
                     key={batch.id}
@@ -667,7 +679,7 @@ export default function EngineWorkspace() {
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{batch.name || batch.id}</div>
-                      <div className="mt-1 text-[10px] text-stone-400">{batch.stats.succeeded}/{batch.stats.total} 完成 · {batch.stats.failed} 失败</div>
+                      <div className="mt-1 text-[10px] text-stone-400">{batch.stats.succeeded}/{batch.stats.total} 完成 · {batch.stats.failed} 失败{batch.stats.cancelled ? ` · ${batch.stats.cancelled} 取消` : ''}</div>
                     </div>
                     <span className="self-center text-[11px] font-medium text-stone-500">{batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}</span>
                   </button>
@@ -688,7 +700,7 @@ export default function EngineWorkspace() {
                     disabled={refreshing}
                     className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs font-medium text-stone-600 hover:text-stone-950 disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300"
                   >
-                    加载全部
+                    加载全部（最多 500 条）
                   </button>
                 )}
                 <select
@@ -748,7 +760,7 @@ export default function EngineWorkspace() {
             )}
           </section>
 
-          <aside className="order-1 border-b border-stone-300 py-4 pb-24 dark:border-white/10 lg:order-2 lg:border-b-0 lg:pb-4 lg:pl-5">
+          <aside className="order-1 overflow-auto border-b border-stone-300 py-4 lg:order-2 lg:border-b-0 lg:pb-4 lg:pl-5" style={{scrollbarWidth:'thin'}}>
             {showNewBatch ? (
               <NewBatchForm
                 capabilities={capabilities}
@@ -770,7 +782,7 @@ export default function EngineWorkspace() {
                 onSubmit={handleCreate}
               />
             ) : selectedBatch ? (
-              <BatchInspector batch={selectedBatch} busy={busy} onControl={handleBatchControl} />
+              <BatchInspector batch={selectedBatch} busy={busy} onControl={handleBatchControl} onClose={clearInspectorSelection} />
             ) : selectedJob ? (
               <JobInspector
                 job={selectedJob}
@@ -779,6 +791,7 @@ export default function EngineWorkspace() {
                 onOpenPreview={setAssetLightbox}
                 onCancel={handleCancel}
                 onRetry={handleRetry}
+                onClose={clearInspectorSelection}
               />
             ) : (
               <div className="flex min-h-[360px] flex-col items-center justify-center border-y border-stone-300 text-center dark:border-white/10">
@@ -1011,10 +1024,12 @@ function BatchInspector({
   batch,
   busy,
   onControl,
+  onClose,
 }: {
   batch: ImageBatchV1
   busy: boolean
   onControl: (action: 'pause' | 'resume' | 'retry-failed') => void
+  onClose: () => void
 }) {
   const completed = batch.automation.enabled
     ? batch.stats.accepted + batch.stats.needsReview + batch.stats.rejected
@@ -1032,9 +1047,20 @@ function BatchInspector({
             </div>
           )}
         </div>
-        <span className="shrink-0 rounded-md border border-stone-300 px-2 py-1 text-[11px] font-medium text-stone-600 dark:border-white/10 dark:text-stone-300">
-          {batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}
-        </span>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="rounded-md border border-stone-300 px-2 py-1 text-[11px] font-medium text-stone-600 dark:border-white/10 dark:text-stone-300">
+            {batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}
+          </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-stone-300 text-stone-400 hover:text-stone-700 dark:border-white/10 dark:hover:text-stone-200"
+            aria-label="关闭面板"
+            title="关闭"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
       <div className="mt-5">
         <div className="flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
@@ -1045,11 +1071,13 @@ function BatchInspector({
           <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${percentage}%` }} />
         </div>
       </div>
-      <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
+      <dl className="mt-5 grid grid-cols-3 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
         <div><dt className="text-stone-400">成功</dt><dd className="mt-1 font-mono text-emerald-600">{batch.stats.succeeded}</dd></div>
         <div><dt className="text-stone-400">失败</dt><dd className="mt-1 font-mono text-red-500">{batch.stats.failed}</dd></div>
+        <div><dt className="text-stone-400">已取消</dt><dd className="mt-1 font-mono text-stone-400">{batch.stats.cancelled}</dd></div>
         <div><dt className="text-stone-400">执行中</dt><dd className="mt-1 font-mono">{batch.stats.active}</dd></div>
         <div><dt className="text-stone-400">排队</dt><dd className="mt-1 font-mono">{batch.stats.queued}</dd></div>
+        <div><dt className="text-stone-400">验收进度</dt><dd className="mt-1 font-mono">{percentage}%</dd></div>
       </dl>
       <div className="mt-5">
         <div className="flex items-center justify-between gap-3">
@@ -1060,12 +1088,20 @@ function BatchInspector({
         </div>
         <div className="mt-2 max-h-64 divide-y divide-stone-200 overflow-auto border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
           {batch.items.map((item) => (
-            <div key={item.itemKey} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-2.5 text-xs">
+            <div
+              key={item.itemKey}
+              className={`grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-2.5 text-xs ${item.job.state === 'cancelled' ? 'bg-stone-50 opacity-60 dark:bg-white/[0.02]' : ''}`}
+            >
               <div className="min-w-0">
-                <div className="truncate font-mono">{item.itemKey}</div>
+                <div className="flex items-center gap-2 truncate">
+                  <span className="font-mono">{item.itemKey}</span>
+                  {item.job.state === 'cancelled' && (
+                    <span className="shrink-0 rounded bg-stone-200 px-1.5 py-0.5 text-[9px] font-medium text-stone-500 dark:bg-stone-700 dark:text-stone-400">已取消</span>
+                  )}
+                </div>
                 <div className="mt-1 text-[10px] text-stone-400">
                   {item.outputCount > 1 ? `输出 ${item.outputIndex}/${item.outputCount} · ` : ''}
-                  Job 修订 {item.revision} · QA {item.qaStatus} · {item.generationStatus}
+                  Job 修订 {item.revision} · {item.job.state === 'cancelled' ? '已取消' : item.generationStatus}
                   {batch.automation.enabled ? ` · 自动化 ${item.automationState}` : ''}
                   {item.failureClass ? ` · ${item.failureClass}` : ''}
                 </div>
@@ -1122,6 +1158,7 @@ function JobInspector({
   onOpenPreview,
   onCancel,
   onRetry,
+  onClose,
 }: {
   job: ImageJobV1
   previewUrl: string | null
@@ -1129,6 +1166,7 @@ function JobInspector({
   onOpenPreview: (mode: 'source' | 'final') => void
   onCancel: () => void
   onRetry: () => void
+  onClose: () => void
 }) {
   return (
     <div>
@@ -1137,24 +1175,44 @@ function JobInspector({
           <div className="text-[10px] font-medium uppercase text-stone-400">Job detail</div>
           <h2 className="mt-1 break-all font-mono text-sm font-semibold">{job.id}</h2>
         </div>
-        <StatusBadge state={job.state} />
+        <div className="flex shrink-0 items-center gap-2">
+          <StatusBadge state={job.state} />
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-stone-300 text-stone-400 hover:text-stone-700 dark:border-white/10 dark:hover:text-stone-200"
+            aria-label="关闭面板"
+            title="关闭"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
 
       {previewUrl && (
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => onOpenPreview('final')}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') onOpenPreview('final')
-          }}
-          className="group relative mt-5 overflow-hidden rounded-md border border-stone-300 bg-[repeating-conic-gradient(#ddd_0_25%,#fff_0_50%)_0_0/16px_16px] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[#356c82] dark:border-white/10"
-          aria-label="放大预览 4K 产物"
-        >
-          <span className="absolute right-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-md bg-black/65 text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
-            <Maximize2 className="h-4 w-4" />
-          </span>
-          <img src={previewUrl} alt="最终产物" className="max-h-[320px] w-full object-contain" />
+        <div className="mt-4">
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => onOpenPreview('final')}
+            onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onOpenPreview('final') }}
+            className="group relative overflow-hidden rounded-md border border-stone-300 bg-[repeating-conic-gradient(#ddd_0_25%,#fff_0_50%)_0_0/16px_16px] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[#356c82] dark:border-white/10"
+            aria-label="放大预览 4K 产物"
+          >
+            <span className="absolute right-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-md bg-black/65 text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+              <Maximize2 className="h-4 w-4" />
+            </span>
+            {job.sourceAssetId && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenPreview('source') }}
+                className="absolute left-2 top-2 z-10 inline-flex h-7 items-center gap-1 rounded-md bg-black/65 px-2 text-[10px] text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+              >
+                原图
+              </button>
+            )}
+            <img src={previewUrl} alt="最终产物" className="max-h-[420px] w-full object-contain" />
+          </div>
         </div>
       )}
 

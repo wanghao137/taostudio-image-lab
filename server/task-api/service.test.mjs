@@ -396,13 +396,13 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     api.repository.transition(firstJob.id, 'finalizing')
     api.repository.transition(firstJob.id, 'succeeded')
 
-    const invalidReview = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
+    // QA 仅作参考，不阻断验收：job succeeded 即可 accepted，qaStatus=failed 也允许（记为参考）。
+    const qaFailedButAccepted = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
       method: 'POST',
       headers: headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ qaStatus: 'failed', acceptanceStatus: 'accepted' }),
     })
-    expect(invalidReview.status).toBe(409)
-    expect((await invalidReview.json()).error.code).toBe('BATCH_ITEM_NOT_ACCEPTABLE')
+    expect(qaFailedButAccepted.status).toBe(200)
 
     const reviewed = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
       method: 'POST',

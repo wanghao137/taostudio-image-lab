@@ -41,6 +41,24 @@ describe('full batch planning', () => {
     expect(extractRequestedImageCount('\u4e00\u7ec4\u89c6\u89c9\u65b9\u6848')).toBe(1)
   })
 
+  it('expands N-image series with separate-generation signals', () => {
+    // index 56 风格：4-image series generated separately, not combined
+    expect(extractRequestedImageCount('Create a 4-image visual story series. Each image must be generated separately, not combined into one collage.')).toBe(4)
+    expect(extractRequestedImageCount('A 6-frame editorial photo series, each frame captured independently.')).toBe(6)
+    // 无独立生成信号 + grid/layout 合成词 = 单图
+    expect(extractRequestedImageCount('Create a premium 4-panel campaign poster built as a clean 2x2 grid.')).toBe(1)
+    expect(extractRequestedImageCount('A 9-panel editorial campaign board, 3x3 grid layout.')).toBe(1)
+  })
+
+  it('expands Image-N block sequences into independent outputs', () => {
+    // index 1642 风格：Image 1: / Image 2: / Image 3: / Image 4: 独立分块
+    expect(extractRequestedImageCount('Image 1:\nA sunny scene.\nImage 2:\nA rainy scene.\nImage 3:\nA snowy scene.\nImage 4:\nA windy scene.')).toBe(4)
+    // index 615 风格：Image 1 Variation / Image 2 Variation / Image 3 Variation
+    expect(extractRequestedImageCount('Image 1 Variation (couple in cafe)\nImage 2 Variation (girl selfie)\nImage 3 Variation (couple handshake)')).toBe(3)
+    // 单个 Image N 引用（非分块）= 单图
+    expect(extractRequestedImageCount('The image shows a beautiful landscape.')).toBe(1)
+  })
+
   it('expands one manifest entry into independent batch items', () => {
     const entries = expandReadyEntries([{
       index: 7,

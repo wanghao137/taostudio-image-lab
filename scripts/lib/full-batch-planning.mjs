@@ -126,6 +126,6 @@ export function buildQaRevisionInstruction(qa) {
 }
 
 export function shouldUseSolRevision(recoveryAction) {
-  return ['safe_rewrite', 'recompose', 'preserve_background', 'revise_with_qa']
+  return ['safe_rewrite', 'recompose', 'preserve_background', 'revise_with_qa', 'provider_fallback']
     .includes(recoveryAction)
 }

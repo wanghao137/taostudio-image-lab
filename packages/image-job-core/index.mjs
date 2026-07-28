@@ -65,6 +65,10 @@ export const JOB_STATE_TRANSITIONS = Object.freeze({
 
 export function extractRequestedImageCount(prompt) {
   const text = String(prompt || '')
+  const lower = text.toLowerCase()
+  // 单图网格/合成/布局信号：N-panel grid / 2x2 / 3x3 / layout / composite / story board
+  // 这类是"一张图内含 N 格"，不应展开为多张独立图。
+  const gridSingleSignal = /\b(?:grid|2\s*[x×]\s*2|3\s*[x×]\s*3|4\s*[x×]\s*4|layout|quadrant|composite|story\s*board|campaign\s*board|editorial\s*grid|panel\s*grid)\b/
   const patterns = [
     /(?:\u751f\u6210|\u521b\u4f5c|\u5236\u4f5c|\u8bbe\u8ba1|\u8f93\u51fa|\u7ed9\u6211|\u505a)(?:\u51fa)?\s*([1-9]|10|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])\s*(?:\u5f20|\u5e45|\u4e2a)(?:\u56fe|\u56fe\u7247|\u4f5c\u54c1|\u65b9\u6848)?/i,
     /(?:\u4e00\u7ec4|\u7cfb\u5217|\u5957\u7cfb)\s*([1-9]|10|[\u4e00\u4e8c\u4e24\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])\s*(?:\u5f20|\u5e45|\u4e2a)/i,
@@ -75,6 +79,27 @@ export function extractRequestedImageCount(prompt) {
     if (!raw) continue
     const count = Number(raw) || CHINESE_NUMBERS[raw] || 1
     return Math.max(1, Math.min(10, count))
+  }
+  // 多图独立语义：N-image/N-panel/N-frame 系列 + 明确"分别/独立/系列"信号，
+  // 且不含 grid/layout/composite 等单图合成词。
+  if (!gridSingleSignal.test(lower)) {
+    const hasIndependentSignal = /\b(?:series|sequence|story\s*series|separately|not\s+combined|generated\s+separately|each\s+image\s+must|independent\s+images?|distinct\s+(?:images?|posters?|frames?))\b/.test(lower)
+    if (hasIndependentSignal) {
+      const hyphen = lower.match(/\b([2-9]|10)\s*[-\s](?:image|panel|frame|poster|illustration|variation)s?\b/)
+      if (hyphen) return Math.max(1, Math.min(10, Number(hyphen[1])))
+    }
+  }
+  // "Image N:" / "Image N Variation" 独立分块：出现 >=2 个不同编号 = N 张独立图，
+  // 且不含 grid/layout/composite 等单图合成词。
+  if (!gridSingleSignal.test(lower)) {
+    const blockMatches = [...text.matchAll(/\bimage\s*([1-9]|10)\b(?!\s*(?:is|shows|should|must|will|depict|capture|feature|contain|include|size|dimensions?|ratio))/gi)]
+    if (blockMatches.length >= 2) {
+      const nums = [...new Set(blockMatches.map((m) => Number(m[1])))]
+      if (nums.length >= 2) {
+        const count = Math.max(...nums)
+        if (count >= 2) return Math.max(1, Math.min(10, count))
+      }
+    }
   }
   return 1
 }

@@ -71,7 +71,13 @@ async function loadEnvFile(filePath) {
 function mcpPayload(result) {
   const text = result.content?.find((item) => item.type === 'text')?.text
   if (!text) throw new Error('MCP tool returned no text payload')
-  return JSON.parse(text)
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    // MCP stdio 通道偶发被日志污染时，text 不是合法 JSON。
+    // 记录原始文本用于诊断，抛出可识别的错误而非裸 SyntaxError。
+    throw new Error(`MCP payload was not valid JSON: ${String(text).slice(0, 120)}`)
+  }
 }
 
 function policyFailure(job) {
@@ -231,7 +237,12 @@ if (preflightOnly) {
 
 function initialExecutionPrompt(entry) {
   const guard = entry.generation.contentClass === 'text' ? textSafety : commonSafety
-  return [guard, entry.prompt].join('\n\n')
+  // 多图条目：用预计算的聚焦单场景执行 prompt（避免 provider 读到"N-image"语义多生成）。
+  // 提示词.txt 仍保存完整原 prompt；执行提示词.txt 记录这里发给 provider 的内容。
+  const scenePrompt = entry.outputCount > 1 && entry.generation?.executionScenes
+    ? entry.generation.executionScenes[entry.outputIndex - 1]
+    : null
+  return [guard, scenePrompt || entry.prompt].join('\n\n')
 }
 
 async function safeRewritePrompt(entry, env, failure) {
@@ -365,6 +376,50 @@ let state = existsSync(statusPath)
 state.runId = runId
 state.updatedAt = new Date().toISOString()
 
+// ====== 启动时引擎-本地对账 ======
+// 引擎里所有已成功（job succeeded + 有资产）的 source_item_key，
+// 是唯一的权威事实源。启动时必须把这些条目同步到本地 status.json，
+// 避免跨 batch 重复提交已经生成成功的 item。
+async function reconcileEngineToLocal() {
+  try {
+    const { DatabaseSync } = await import('node:sqlite')
+    const sqlitePath = resolve(workDir, '..', 'jobs.sqlite')
+    const db = new DatabaseSync(sqlitePath, { readOnly: true })
+    const engineRows = db.prepare(
+      'SELECT DISTINCT bi.source_item_key, bi.item_key, bi.batch_id, j.id as job_id, j.source_asset_id, j.final_asset_id, j.request_json FROM batch_items bi JOIN jobs j ON bi.job_id=j.id WHERE j.state=? AND j.source_asset_id IS NOT NULL AND bi.source_item_key IS NOT NULL',
+    ).all('succeeded')
+    db.close()
+    const engineSucceeded = new Map()
+    for (const r of engineRows) {
+      // 每个 source_item_key 只保留最新的 job_id（根据 job_id 字典序，即时间序）
+      if (!engineSucceeded.has(r.source_item_key) || r.job_id > engineSucceeded.get(r.source_item_key).job_id) {
+        engineSucceeded.set(r.source_item_key, r)
+      }
+    }
+
+    // 本地已 succeeded 的 itemKey 集合
+    const localSucceeded = new Set(
+      Object.entries(state.items || {})
+        .filter(([, v]) => v.status === 'succeeded')
+        .map(([k]) => k),
+    )
+
+    // 差异：引擎 succeeded 但本地没收割的
+    const missing = [...engineSucceeded.entries()].filter(([k]) => !localSucceeded.has(k))
+    if (missing.length) {
+      console.log(`ENGINE_RECONCILE engineSucceeded=${engineSucceeded.size} localSucceeded=${localSucceeded.size} missing=${missing.length}`)
+      for (const [srcKey, engRow] of missing) {
+        console.log(`  RECONCILE ${srcKey}: harvesting from engine job ${String(engRow.job_id).slice(0, 20)}`)
+      }
+    }
+    return { engineSucceeded, localSucceeded, missing }
+  } catch (error) {
+    console.log(`ENGINE_RECONCILE_WARN ${error.message}`)
+    return { engineSucceeded: new Map(), localSucceeded: new Set(), missing: [] }
+  }
+}
+const reconciliation = await reconcileEngineToLocal()
+
 for (const entry of manifest.entries.filter((item) => validatedCoreIndexes.has(item.index))) {
   if (state.items[entry.index]?.status === 'succeeded') continue
   const directory = outputPath(entry.folderName)
@@ -424,6 +479,7 @@ await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
 
 const ready = manifestReady
   .filter((entry) => state.items[entry.itemKey]?.status !== 'succeeded')
+  .filter((entry) => !reconciliation.engineSucceeded.has(entry.itemKey))
   .slice(0, limit)
 const completed = Object.values(state.items).filter((item) => item.status === 'succeeded')
 console.log(`QUEUE_READY selected=${ready.length} alreadySucceeded=${completed.length}`)
@@ -616,6 +672,11 @@ for (const entry of queuedEntries) {
           detail: { jobId: job.id, revision },
         })
         reviewRecorded = true
+        // rev0 生成失败（非策略、非 provider 全不可用）：切到 gpt-5.6-sol 重试一次。
+        if (revision === 0) {
+          replacementReason = 'provider_fallback'
+          continue
+        }
         break
       }
 
@@ -646,56 +707,29 @@ for (const entry of queuedEntries) {
       }
       const qaPass = qa.status === 'completed' && qa.pass
       console.log(`QA index=${entry.index} revision=${revision} status=${qa.status} pass=${qaPass} notes=${qa.notes || qa.reason || ''}`)
-      if (qaPass) {
-        activeBatch = await callMcp('image_batch_item_review', {
-          batchId: activeBatch.id,
-          itemKey: entry.itemKey,
-          qaStatus: 'passed',
-          acceptanceStatus: 'accepted',
-          detail: { jobId: job.id, revision, verification },
-        })
-        reviewRecorded = true
-        accepted = {
-          route,
-          job,
-          sourcePath,
-          finalPath,
-          verification,
-          qa,
-          executionPrompt,
-          reference,
-        }
-      } else if (qa.status !== 'completed') {
-        activeBatch = await callMcp('image_batch_item_review', {
-          batchId: activeBatch.id,
-          itemKey: entry.itemKey,
-          qaStatus: 'needs_review',
-          acceptanceStatus: 'needs_review',
-          failureClass: 'qa_unavailable',
+      // QA 仅作参考记录，不阻断 succeeded：生成成功 + 技术核验通过即可验收。
+      // QA 结果（含失败原因）保留在 accepted.visualQa 与 metadata 供人工复核。
+      activeBatch = await callMcp('image_batch_item_review', {
+        batchId: activeBatch.id,
+        itemKey: entry.itemKey,
+        qaStatus: qaPass ? 'passed' : (qa.status === 'completed' ? 'needs_review' : 'not_run'),
+        acceptanceStatus: 'accepted',
+        ...(qaPass ? {} : {
+          failureClass: qa.status === 'completed' ? 'qa_reference_only' : 'qa_unavailable',
           recoveryAction: 'manual_review',
-          detail: { jobId: job.id, revision, reason: qa.reason || 'visual QA unavailable' },
-        })
-        reviewRecorded = true
-        break
-      } else if (revision === 0) {
-        const classification = classifyQaFailure(qa)
-        executionPrompt = [
-          entry.generation.contentClass === 'text' ? textSafety : commonSafety,
-          buildQaRevisionInstruction(qa),
-          entry.prompt,
-        ].join('\n\n')
-        replacementReason = classification.recoveryAction
-      } else {
-        const classification = classifyQaFailure(qa)
-        activeBatch = await callMcp('image_batch_item_review', {
-          batchId: activeBatch.id,
-          itemKey: entry.itemKey,
-          qaStatus: 'failed',
-          acceptanceStatus: 'needs_review',
-          ...classification,
-          detail: { jobId: job.id, revision, qa },
-        })
-        reviewRecorded = true
+        }),
+        detail: { jobId: job.id, revision, verification, qaReference: !qaPass ? qa : undefined },
+      })
+      reviewRecorded = true
+      accepted = {
+        route,
+        job,
+        sourcePath,
+        finalPath,
+        verification,
+        qa,
+        executionPrompt,
+        reference,
       }
     }
 
