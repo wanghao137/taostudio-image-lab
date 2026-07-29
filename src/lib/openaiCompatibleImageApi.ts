@@ -19,10 +19,10 @@ import {
   MIME_MAP,
   normalizeBase64Image,
   pickActualParams,
+  PROMPT_REWRITE_GUARD_PREFIX,
 } from './imageApiShared'
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
-
-const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'
+import { prependCodexCliSizePrompt } from './size'
 
 function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
@@ -279,9 +279,12 @@ function createResponsesImageTool(
   const tool: Record<string, unknown> = {
     type: 'image_generation',
     action: isEdit ? 'edit' : 'generate',
-    size: params.size,
     output_format: params.output_format,
     moderation: params.moderation,
+  }
+
+  if (!profile.codexCli) {
+    tool.size = params.size
   }
 
   if (profile.streamImages) {
@@ -670,9 +673,12 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
 
 async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const { prompt: originalPrompt, params, inputImageDataUrls } = opts
-  const firstPrompt = profile.codexCli && !opts.settings.allowPromptRewrite
-    ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${originalPrompt}`
+  const sizePrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
+    ? prependCodexCliSizePrompt(originalPrompt, params.size)
     : originalPrompt
+  const firstPrompt = profile.codexCli && !opts.settings.allowPromptRewrite
+    ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${sizePrompt}`
+    : sizePrompt
   const isEdit = inputImageDataUrls.length > 0
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
@@ -690,7 +696,9 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       const formData = new FormData()
       formData.append('model', profile.model)
       formData.append('prompt', prompt)
-      formData.append('size', params.size)
+      if (!profile.codexCli) {
+        formData.append('size', params.size)
+      }
       formData.append('output_format', params.output_format)
       formData.append('moderation', params.moderation)
 
@@ -751,9 +759,12 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       const body: Record<string, unknown> = {
         model: profile.model,
         prompt,
-        size: params.size,
         output_format: params.output_format,
         moderation: params.moderation,
+      }
+
+      if (!profile.codexCli) {
+        body.size = params.size
       }
 
       if (!profile.codexCli) {
@@ -806,7 +817,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       const rewrite = createSafetyPromptRewrite(originalPrompt, reason)
       if (!rewrite) throw err
       try {
-        return withRefusalRecovery(await sendRequest(rewrite.prompt), rewrite)
+        const retryPrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
+          ? prependCodexCliSizePrompt(rewrite.prompt, params.size)
+          : rewrite.prompt
+        return withRefusalRecovery(await sendRequest(retryPrompt), rewrite)
       } catch (retryErr) {
         attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused'))
       }
@@ -1172,6 +1186,9 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
 
 async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const { prompt, params, inputImageDataUrls } = opts
+  const requestPrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
+    ? prependCodexCliSizePrompt(prompt, params.size)
+    : prompt
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
@@ -1199,6 +1216,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       if (profile.streamImages) {
         body.stream = true
       }
+      if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
 
       const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
         method: 'POST',
@@ -1236,13 +1254,16 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
     }
 
     try {
-      return await sendRequest(prompt, opts.settings.allowPromptRewrite)
+      return await sendRequest(requestPrompt, opts.settings.allowPromptRewrite)
     } catch (err) {
       const reason = getErrorMessage(err)
       const rewrite = createSafetyPromptRewrite(prompt, reason)
       if (!rewrite) throw err
       try {
-        return withRefusalRecovery(await sendRequest(rewrite.prompt, true), rewrite)
+        const retryPrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
+          ? prependCodexCliSizePrompt(rewrite.prompt, params.size)
+          : rewrite.prompt
+        return withRefusalRecovery(await sendRequest(retryPrompt, true), rewrite)
       } catch (retryErr) {
         attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused'))
       }

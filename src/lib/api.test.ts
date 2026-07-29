@@ -24,7 +24,13 @@ describe('callImageApi', () => {
       }))
 
       await callImageApi({
-        settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', apiMode: 'responses', codexCli },
+        settings: {
+          ...DEFAULT_SETTINGS,
+          apiKey: 'test-key',
+          apiMode: 'responses',
+          codexCli,
+          profiles: DEFAULT_SETTINGS.profiles.map((profile) => ({ ...profile, reasoningEffort: 'high' })),
+        },
         prompt: 'prompt',
         params: { ...DEFAULT_PARAMS },
         inputImageDataUrls: [],
@@ -32,7 +38,8 @@ describe('callImageApi', () => {
 
       const [, init] = fetchMock.mock.calls[0]
       const body = JSON.parse(String((init as RequestInit).body))
-      expect(body.input).toBe('Use the following text as the complete prompt. Do not rewrite it:\nprompt')
+      expect(body.input).toBe('Treat everything after this line as one complete image-generation prompt, including the resolution instruction. Follow it exactly without rewriting or omitting anything:\nprompt')
+      expect(body.reasoning).toEqual({ effort: 'high' })
     },
   )
 
@@ -178,7 +185,7 @@ describe('callImageApi', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const firstBody = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))
     const retryBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
-    expect(firstBody.input).toBe('Use the following text as the complete prompt. Do not rewrite it:\nprivate portrait')
+    expect(firstBody.input).toBe('Treat everything after this line as one complete image-generation prompt, including the resolution instruction. Follow it exactly without rewriting or omitting anything:\nprivate portrait')
     expect(retryBody.input).toContain('生成一版合规图像')
     expect(retryBody.input).not.toContain('Do not rewrite it')
     expect(result.images).toEqual(['data:image/png;base64,aW1hZ2U='])
@@ -262,6 +269,67 @@ describe('callImageApi', () => {
     })
   })
 
+  it('preserves the Codex CLI size hint when retrying Images API after a safety rejection', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { message: 'content_policy_violation: safety rejected' },
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true },
+      prompt: 'private portrait',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [],
+    })
+
+    const retryBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
+    expect(retryBody.prompt).toContain('Generate at 1024x1024 resolution.')
+    expect(retryBody.prompt).not.toContain('Treat everything after this line')
+  })
+
+  it('preserves the Codex CLI size hint when retrying Responses API after a safety rejection', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          status: 'failed',
+          error: { message: 'safety rejected' },
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        output: [{
+          type: 'image_generation_call',
+          result: 'aW1hZ2U=',
+        }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', apiMode: 'responses', codexCli: true },
+      prompt: 'private portrait',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [],
+    })
+
+    const retryBody = JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))
+    expect(retryBody.input).toContain('Generate at 1024x1024 resolution.')
+    expect(retryBody.input).not.toContain('Treat everything after this line')
+  })
+
   it('records blocked refusal recovery when the safety retry is refused again', async () => {
     vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({
@@ -293,6 +361,69 @@ describe('callImageApi', () => {
         },
       },
     })
+  })
+
+  it('uses prompt engineering instead of the size parameter in Codex CLI mode', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true, allowPromptRewrite: true },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [],
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.size).toBeUndefined()
+    expect(body.prompt).toBe('Generate at 1024x1024 resolution. prompt')
+  })
+
+  it('does not add a size hint for auto in Codex CLI mode', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true, allowPromptRewrite: true },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, size: 'auto' },
+      inputImageDataUrls: [],
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.size).toBeUndefined()
+    expect(body.prompt).toBe('prompt')
+  })
+
+  it('does not append a size hint to Agent tool requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true, allowPromptRewrite: true },
+      prompt: 'Generate at 1024x1024 resolution. prompt',
+      params: { ...DEFAULT_PARAMS, size: '1024x1024' },
+      inputImageDataUrls: [],
+      skipCodexCliSizePrompt: true,
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.prompt).toBe('Generate at 1024x1024 resolution. prompt')
   })
 
   it('records actual params returned on Images API responses in Codex CLI mode', async () => {

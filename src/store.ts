@@ -92,6 +92,7 @@ import { cleanStaleAgentInputDrafts, clearInputDraftState, isEmptyAgentInputDraf
 import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_NAME, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './lib/persistedState'
 import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveFinalGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks, resolveFinalActualParams } from './lib/taskState'
+import { stripInjectedCodexCliSizePrompt } from './lib/size'
 
 export { ensureImageCached, getCachedImage } from './lib/imageCache'
 export { getActiveAgentRounds, getAgentConversationTaskIds, getAgentRoundTaskIds } from './lib/agentConversationState'
@@ -1729,7 +1730,10 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     await storeImage(img.dataUrl)
   }
 
-  const normalizedParams = normalizeParamsForSettings(params, requestSettings, { hasInputImages: orderedInputImages.length > 0 })
+  const normalizedParams = normalizeParamsForSettings(params, requestSettings, {
+    hasInputImages: orderedInputImages.length > 0,
+    preserveExactSizeIntent: true,
+  })
   const shouldUseTransparentOutput = normalizedParams.output_format === 'png' && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
@@ -2333,7 +2337,7 @@ async function continueRecoveredAgentRound(taskId: string) {
     }
     const roundTasks = updatedState.tasks.filter((item) => item.agentRoundId === round.id)
     const resumeParams = roundTasks.find((item) => item.params)?.params
-      ?? normalizeParamsForSettings(updatedState.params, createSettingsForApiProfile(normalizedSettings, activeProfile), { hasInputImages: round.inputImageIds.length > 0 })
+      ?? normalizeParamsForSettings(updatedState.params, createSettingsForApiProfile(normalizedSettings, imageProfile), { hasInputImages: round.inputImageIds.length > 0 })
     const toolCallsUsed = getAgentRecoveredToolCallCount(updatedRound.responseOutput ?? [], roundTasks)
 
     updateAgentConversation(conversation.id, (current) => ({
@@ -2418,6 +2422,7 @@ export async function submitAgentMessage() {
   }
 
   const requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
+  const imageRequestSettings = createSettingsForApiProfile(normalizedSettings, imageProfile)
   const now = Date.now()
   const editingRound = state.agentEditingRoundId
     ? conversation.rounds.find((item) => item.id === state.agentEditingRoundId) ?? null
@@ -2442,7 +2447,7 @@ export async function submitAgentMessage() {
   const parentRoundId = editingRound ? editingRound.parentRoundId ?? null : activeLeafId
   const parentPath = parentRoundId ? getAgentRoundPath(conversation, parentRoundId) : []
   const normalizedParams = {
-    ...normalizeParamsForSettings(params, requestSettings, { hasInputImages: inputImageIds.length > 0 }),
+    ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0 }),
     n: DEFAULT_PARAMS.n,
     transparent_output: false,
   }
@@ -2510,7 +2515,7 @@ export async function submitAgentMessage() {
     void generateAgentConversationTitle(conversation.id, trimmedPrompt, inputImageIds, requestSettings, activeProfile, fallbackTitle)
   }
 
-  void executeAgentRound(conversation.id, roundId, normalizedParams, requestSettings, activeProfile, imageProfile)
+  void executeAgentRound(conversation.id, roundId, normalizedParams, requestSettings, activeProfile, imageProfile, undefined, params)
 }
 
 export async function regenerateAgentAssistantMessage(conversationId: string, roundId: string) {
@@ -2545,8 +2550,9 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
 
   const inputImageIds = uniqueIds(sourceRound.inputImageIds)
   const requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
+  const imageRequestSettings = createSettingsForApiProfile(normalizedSettings, imageProfile)
   const normalizedParams = {
-    ...normalizeParamsForSettings(params, requestSettings, { hasInputImages: inputImageIds.length > 0 }),
+    ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: inputImageIds.length > 0 }),
     n: DEFAULT_PARAMS.n,
     transparent_output: false,
   }
@@ -2578,7 +2584,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
         : current.messages,
     }))
     state.setAgentEditingRoundId(null)
-    void executeAgentRound(conversationId, sourceRound.id, normalizedParams, requestSettings, activeProfile, imageProfile)
+    void executeAgentRound(conversationId, sourceRound.id, normalizedParams, requestSettings, activeProfile, imageProfile, undefined, params)
     return
   }
 
@@ -2618,7 +2624,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
     messages: [...current.messages, newUserMessage],
   }))
   state.setAgentEditingRoundId(null)
-  void executeAgentRound(conversationId, newRoundId, normalizedParams, requestSettings, activeProfile, imageProfile)
+  void executeAgentRound(conversationId, newRoundId, normalizedParams, requestSettings, activeProfile, imageProfile, undefined, params)
 }
 
 async function executeAgentRound(
@@ -2629,6 +2635,7 @@ async function executeAgentRound(
   activeProfile: ApiProfile,
   imageProfile: ApiProfile,
   resume?: { responseOutput: ResponsesOutputItem[]; recoveredTaskIds: string[]; toolCallsUsed: number },
+  requestedParams: TaskParams = params,
 ) {
   const startedAt = Date.now()
   const controller = new AbortController()
@@ -2658,6 +2665,23 @@ async function executeAgentRound(
     const resumedAssistantContent = resume ? existingAssistantMessage?.content.trim() ?? '' : ''
     const shouldStreamAssistantMessage = activeProfile.streamImages === true
     const imageRequestSettings = createSettingsForApiProfile(requestSettings, imageProfile)
+    const createFinalImageParams = (hasInputImages: boolean): TaskParams => {
+      const finalParams = normalizeParamsForSettings(requestedParams, imageRequestSettings, {
+        hasInputImages,
+        preserveExactSizeIntent: true,
+      })
+      return {
+        ...finalParams,
+        ...(imageProfile.codexCli && requestedParams.exact_size ? { quality: requestedParams.quality } : {}),
+        n: DEFAULT_PARAMS.n,
+        transparent_output: false,
+      }
+    }
+    const createProviderImageParams = (hasInputImages: boolean) =>
+      normalizeParamsForSettings(createFinalImageParams(hasInputImages), imageRequestSettings, { hasInputImages })
+    const finalImageParams = createFinalImageParams(round.inputImageIds.length > 0)
+    const imageParams = createProviderImageParams(round.inputImageIds.length > 0)
+    const taskApiConfig = readLocalImageTaskApiConfig()
     const streamingTaskIds: string[] = resume ? [...round.outputTaskIds] : []
     const taskIdByToolCallId = new Map<string, string>()
     const taskByToolCallId = new Map<string, TaskRecord>()
@@ -2715,8 +2739,8 @@ async function executeAgentRound(
       const task: TaskRecord = {
         id: genId(),
         prompt: taskPrompt,
-        params: options.taskParams ?? { ...params, n: 1 },
-        targetAspectPromptHint: createTargetAspectPromptHint((options.taskParams ?? params).size) ?? undefined,
+        params: options.taskParams ?? finalImageParams,
+        targetAspectPromptHint: createTargetAspectPromptHint((options.taskParams ?? finalImageParams).size) ?? undefined,
         apiProvider: imageProfile.provider,
         apiProfileId: imageProfile.id,
         apiProfileName: imageProfile.name,
@@ -2932,10 +2956,10 @@ async function executeAgentRound(
       prompt: string
       referenceImageDataUrls: string[]
       taskParams: TaskParams
+      providerParams: TaskParams
       signal: AbortSignal
       onPartialImage?: (event: { image: string; partialImageIndex?: number }) => void | Promise<void>
     }) => {
-      const taskApiConfig = readLocalImageTaskApiConfig()
       if (taskApiConfig) {
         const persistImageTaskLink = (job: ImageJobV1) => {
           const next = {
@@ -3012,8 +3036,9 @@ async function executeAgentRound(
           replaceImageMentionsForApi(opts.prompt, opts.referenceImageDataUrls.length),
           opts.taskParams.size,
         ),
-        params: opts.taskParams,
+        params: opts.providerParams,
         inputImageDataUrls: opts.referenceImageDataUrls,
+        skipCodexCliSizePrompt: true,
         onPartialImage: opts.onPartialImage
           ? (partial) => {
               void opts.onPartialImage?.({ image: partial.image, partialImageIndex: partial.partialImageIndex ?? partial.requestIndex })
@@ -3064,10 +3089,8 @@ async function executeAgentRound(
       const referenceIds = uniqueIds(extractAgentReferenceIds(item.prompt))
       const references = await resolveReferenceImages(referenceIds)
       const toolCallId = callId || genId()
-      const taskParams = {
-        ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0 }),
-        n: 1,
-      }
+      const taskParams = createFinalImageParams(references.dataUrls.length > 0)
+      const providerParams = createProviderImageParams(references.dataUrls.length > 0)
 
       const taskId = await ensureStreamingAgentTask(toolCallId, item.prompt, references.imageIds, {
         createdAt: Date.now(),
@@ -3082,6 +3105,7 @@ async function executeAgentRound(
           prompt: item.prompt,
           referenceImageDataUrls: references.dataUrls,
           taskParams,
+          providerParams,
           signal: controller.signal,
           onPartialImage: async ({ image, partialImageIndex }) => {
             if (controller.signal.aborted) return
@@ -3131,12 +3155,8 @@ async function executeAgentRound(
         const referenceIds = uniqueIds(extractAgentReferenceIds(item.prompt))
         const references = await resolveReferenceImages(referenceIds)
         const batchToolCallId = genId()
-        const taskParams = requestSettings.agentApiConfigMode === 'hybrid'
-          ? {
-              ...normalizeParamsForSettings(params, imageRequestSettings, { hasInputImages: references.dataUrls.length > 0 }),
-              n: 1,
-            }
-          : { ...params, n: 1 }
+        const taskParams = createFinalImageParams(references.dataUrls.length > 0)
+        const providerParams = createProviderImageParams(references.dataUrls.length > 0)
         await ensureStreamingAgentTask(batchToolCallId, item.prompt, references.imageIds, {
           createdAt: Date.now(),
           taskParams,
@@ -3145,11 +3165,11 @@ async function executeAgentRound(
           ...(callId ? { agentBatchCallId: callId } : {}),
           agentBatchItemId: item.id,
         })
-        batchExecutionItems.push({ item, batchToolCallId, references, referenceIds, taskParams })
+        batchExecutionItems.push({ item, batchToolCallId, references, referenceIds, taskParams, providerParams })
       }
 
       // Fire all batch items concurrently after all cards are visible.
-      const batchPromises = batchExecutionItems.map(async ({ item, batchToolCallId, references, referenceIds, taskParams }) => {
+      const batchPromises = batchExecutionItems.map(async ({ item, batchToolCallId, references, referenceIds, taskParams, providerParams }) => {
         let committed = false
         const batchResult = requestSettings.agentApiConfigMode === 'hybrid'
           ? {
@@ -3159,6 +3179,7 @@ async function executeAgentRound(
                 prompt: item.prompt,
                 referenceImageDataUrls: references.dataUrls,
                 taskParams,
+                providerParams,
                 signal: controller.signal,
                 onPartialImage: async ({ image, partialImageIndex }) => {
                   if (controller.signal.aborted) return
@@ -3172,7 +3193,7 @@ async function executeAgentRound(
             }
           : await callBatchImageSingle({
               profile: imageProfile,
-              params: taskParams,
+              params: providerParams,
               batchItemId: item.id,
               prompt: appendTargetAspectPromptHint(item.prompt, taskParams.size),
               referenceImageDataUrls: references.dataUrls,
@@ -3268,7 +3289,8 @@ async function executeAgentRound(
       const result = await callAgentResponsesApi({
         settings: requestSettings,
         profile: activeProfile,
-        params,
+        imageProfile,
+        params: imageParams,
         input: apiInputForTurn,
         maskDataUrl,
         signal: controller.signal,
@@ -3381,20 +3403,20 @@ async function executeAgentRound(
         }
         const promptRefIds = uniqueIds(extractAgentReferenceIds(image.revisedPrompt ?? ''))
         const promptRefs = await resolveReferenceImages(promptRefIds)
-        const stored = await storeGeneratedOutputImage(image.dataUrl, params, [])
+        const stored = await storeGeneratedOutputImage(image.dataUrl, finalImageParams, [])
         const actualParams = {
           ...(resolveFinalActualParams(
             hasActualParams(image.actualParams) ? image.actualParams : undefined,
             stored.size,
-            params,
+            finalImageParams,
           ) ?? {}),
           n: 1,
         }
         const task: TaskRecord = {
           id: genId(),
           prompt: image.revisedPrompt ?? round?.prompt ?? userMessage.content,
-          params,
-          targetAspectPromptHint: createTargetAspectPromptHint(params.size) ?? undefined,
+          params: finalImageParams,
+          targetAspectPromptHint: createTargetAspectPromptHint(finalImageParams.size) ?? undefined,
           apiProvider: imageProfile.provider,
           apiProfileId: imageProfile.id,
           apiProfileName: imageProfile.name,
@@ -3734,13 +3756,17 @@ async function executeTask(taskId: string) {
       replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
       task.params.size,
     )
+    const providerParams = normalizeParamsForSettings(task.params, requestSettings, {
+      hasInputImages: inputDataUrls.length > 0,
+    })
 
     const result = await callImageApi({
       settings: requestSettings,
       prompt: promptSentToApi,
-      params: task.params,
+      params: providerParams,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
+      skipCodexCliSizePrompt: task.sourceMode === 'agent',
       onFalRequestEnqueued: (request) => {
         falRequestInfo = request
         updateTaskInStore(taskId, {
@@ -3789,11 +3815,14 @@ async function executeTask(taskId: string) {
     )
     const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
-    const revisedPromptByImage = shouldStoreRevisedPrompts ? mapRevisedPromptsByImage(outputIds, result.revisedPrompts) : undefined
-    const promptWasRevised = shouldStoreRevisedPrompts && result.revisedPrompts?.some(
+    const revisedPrompts = activeProfile.codexCli && task.sourceMode !== 'agent'
+      ? result.revisedPrompts?.map((prompt) => prompt == null ? prompt : stripInjectedCodexCliSizePrompt(prompt, requestPrompt, providerParams.size))
+      : result.revisedPrompts
+    const revisedPromptByImage = shouldStoreRevisedPrompts ? mapRevisedPromptsByImage(outputIds, revisedPrompts) : undefined
+    const promptWasRevised = shouldStoreRevisedPrompts && revisedPrompts?.some(
       (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== promptSentToApi.trim(),
     )
-    const hasRevisedPromptValue = shouldStoreRevisedPrompts && result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
+    const hasRevisedPromptValue = shouldStoreRevisedPrompts && revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
     if (taskProvider === 'openai' && activeProfile.apiMode === 'responses' && !activeProfile.codexCli && !result.refusalRecovery) {
       if (promptWasRevised) {
         showCodexCliPrompt()
@@ -4319,7 +4348,10 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 export async function retryTask(task: TaskRecord) {
   const { settings } = useStore.getState()
   const activeProfile = getActiveApiProfile(settings)
-  const normalizedParams = normalizeParamsForSettings(task.params, settings, { hasInputImages: task.inputImageIds.length > 0 })
+  const normalizedParams = normalizeParamsForSettings(task.params, settings, {
+    hasInputImages: task.inputImageIds.length > 0,
+    preserveExactSizeIntent: true,
+  })
   const shouldUseTransparentOutput = normalizedParams.output_format === 'png' && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
@@ -4369,7 +4401,10 @@ export async function reuseConfig(task: TaskRecord) {
   const taskProfileName = matchedProfile?.name ?? getTaskApiProfileName(task)
   const paramsSettings = shouldTemporarilyReuseProfile && matchedProfile ? createSettingsForApiProfile(normalizedSettings, matchedProfile) : normalizedSettings
 
-  setParams(normalizeParamsForSettings(task.params, paramsSettings, { hasInputImages: task.inputImageIds.length > 0 }))
+  setParams(normalizeParamsForSettings(task.params, paramsSettings, {
+    hasInputImages: task.inputImageIds.length > 0,
+    preserveExactSizeIntent: true,
+  }))
   setReusedTaskApiProfile(
     shouldTemporarilyReuseProfile && matchedProfile ? matchedProfile.id : null,
     missingReusedProfile,

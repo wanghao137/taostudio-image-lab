@@ -4,6 +4,7 @@ import { renderHook, act } from '@testing-library/react'
 import { useStore } from '../../store'
 import { useImageComposer } from '../../hooks/useImageComposer'
 import { DEFAULT_PARAMS } from '../../types'
+import { createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from '../../lib/apiProfiles'
 
 describe('useImageComposer (seed)', () => {
   it('exposes nLimitHint with visible/show/hide', () => {
@@ -103,6 +104,27 @@ describe('useImageComposer (core wiring)', () => {
 })
 
 describe('useImageComposer (4K wiring)', () => {
+  it('keeps the selected 4K exact-size intent in Codex CLI mode', () => {
+    const profile = createDefaultOpenAIProfile({
+      id: 'codex-4k-profile',
+      apiKey: 'test-key',
+      codexCli: true,
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [profile],
+        activeProfileId: profile.id,
+      }),
+      params: { ...DEFAULT_PARAMS, size: '2160x3840', exact_size: true },
+    })
+
+    const { result } = renderHook(() => useImageComposer())
+
+    expect(useStore.getState().params).toMatchObject({ size: '2160x3840', exact_size: true })
+    expect(result.current.displaySize).toBe('2160x3840')
+  })
+
   it('exposes applyAsset4KOriginalRatioPreset as a function', () => {
     const { result } = renderHook(() => useImageComposer())
     expect(typeof result.current.applyAsset4KOriginalRatioPreset).toBe('function')

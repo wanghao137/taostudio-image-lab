@@ -3,7 +3,7 @@ import { useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFr
 import { DEFAULT_PARAMS } from '../types'
 import { getActiveApiProfile, normalizeSettings } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
-import { formatImageRatio, normalizeImageSize, type CommonImageRatio } from '../lib/size'
+import { formatImageRatio, normalizeCodexCliImageSize, normalizeImageSize, type CommonImageRatio } from '../lib/size'
 import {
   ASSET_4K_RATIO_PRESETS,
   createAsset4KOriginalRatioPresetParams,
@@ -108,7 +108,7 @@ export function useImageComposer() {
     : `OpenAI 最大请求数量为 ${outputImageLimit}`
   const displaySize = isFalTextToImage && params.size === 'auto'
     ? DEFAULT_FAL_IMAGE_SIZE
-    : normalizeImageSize(params.size) || DEFAULT_PARAMS.size
+    : (activeProfile.codexCli && !params.exact_size ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || DEFAULT_PARAMS.size
   const exactSizeDisabled = params.size === 'auto'
   const exactSizeEnabled = !exactSizeDisabled && params.exact_size
 
@@ -186,7 +186,10 @@ export function useImageComposer() {
   }, [agentAutoImageCount, params.n])
 
   useEffect(() => {
-    const normalizedParams = normalizeParamsForSettings(params, effectiveSettings, { hasInputImages: inputImages.length > 0 })
+    const normalizedParams = normalizeParamsForSettings(params, effectiveSettings, {
+      hasInputImages: inputImages.length > 0,
+      preserveExactSizeIntent: true,
+    })
     const patch = getChangedParams(params, normalizedParams)
     if (Object.keys(patch).length) {
       setParams(patch)

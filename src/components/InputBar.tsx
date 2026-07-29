@@ -496,6 +496,7 @@ export default function InputBar() {
     promptPlaceholder,
     submitCurrentMode,
     stopActiveAgentResponse,
+    activeProfile,
     isFalProvider,
     agentAutoImageCount,
     moderationDisabled,
@@ -848,7 +849,7 @@ export default function InputBar() {
   }, [transparentOutputHint.hide])
   const compressionHint = useHintTooltip({ enabled: () => compressionDisabled })
   const moderationHint = useHintTooltip({ enabled: () => moderationDisabled })
-  const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage })
+  const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage || activeProfile.codexCli })
   const exactSizeHint = useHintTooltip({ enabled: () => exactSizeDisabled })
   const qualityHint = useHintTooltip({ enabled: () => settings.codexCli || isFalProvider })
   const cursorPosition = cursorPos
@@ -1829,8 +1830,10 @@ export default function InputBar() {
           {displaySize}
         </button>
         <ButtonTooltip
-          visible={isFalTextToImage && sizeHint.visible}
-          text={<>fal.ai 的文生图模式不支持 <code className="rounded bg-white/10 px-1 py-0.5 font-mono">auto</code> 参数</>}
+          visible={(isFalTextToImage || activeProfile.codexCli) && sizeHint.visible}
+          text={isFalTextToImage
+            ? <>fal.ai 的文生图模式不支持 <code className="rounded bg-white/10 px-1 py-0.5 font-mono">auto</code> 参数</>
+            : <>Codex CLI 自定义尺寸会自动限制在 1K 以内</>}
         />
       </label>
       <label
@@ -2235,6 +2238,7 @@ export default function InputBar() {
             onSelect={(size) => setParams({ size })}
             onClose={() => setShowSizePicker(false)}
             allowAuto={!isFalTextToImage}
+            codexCli={activeProfile.codexCli && !params.exact_size}
           />
         </Suspense>
       )}

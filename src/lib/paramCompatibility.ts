@@ -1,6 +1,6 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
 import { getActiveApiProfile } from './apiProfiles'
-import { normalizeImageSize } from './size'
+import { normalizeCodexCliImageSize, normalizeImageSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
 export const MAX_FAL_OUTPUT_IMAGES = 4
@@ -13,7 +13,7 @@ export function getOutputImageLimitForSettings(settings: AppSettings) {
 export function normalizeParamsForSettings(
   params: TaskParams,
   settings: AppSettings,
-  options: { hasInputImages?: boolean } = {},
+  options: { hasInputImages?: boolean; preserveExactSizeIntent?: boolean } = {},
 ): TaskParams {
   const activeProfile = getActiveApiProfile(settings)
   const outputImageLimit = getOutputImageLimitForSettings(settings)
@@ -25,6 +25,9 @@ export function normalizeParamsForSettings(
   nextParams.exact_size = nextParams.size !== 'auto' && Boolean(nextParams.exact_size)
 
   if (activeProfile.provider === 'openai' && activeProfile.codexCli) {
+    if (!options.preserveExactSizeIntent || !nextParams.exact_size) {
+      nextParams.size = normalizeCodexCliImageSize(nextParams.size)
+    }
     nextParams.quality = DEFAULT_PARAMS.quality
   }
 

@@ -233,9 +233,10 @@ import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { formatExportFileTime } from './lib/exportFileName'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
+import * as imageTaskApi from './lib/imageTaskApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -985,7 +986,7 @@ describe('mask draft lifecycle in store actions', () => {
     await clearImages()
   })
 
-  it('resizes exact-size outputs locally and preserves the source image', async () => {
+  it('preserves a 4K exact-size output while limiting the Codex CLI provider request to 1K', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockClear()
     vi.mocked(resizeImageDataUrlToExactSize).mockClear()
@@ -993,9 +994,19 @@ describe('mask draft lifecycle in store actions', () => {
       images: ['data:image/png;base64,actual-1254x1254'],
       actualParams: { output_format: 'png', quality: 'high', size: '1254x1254' },
       actualParamsList: [{ output_format: 'png', quality: 'high', size: '1254x1254' }],
-      revisedPrompts: [],
+      revisedPrompts: ['Generate at 720x1280 resolution. poster'],
+    })
+    const codexProfile = createDefaultOpenAIProfile({
+      id: 'gallery-codex-profile',
+      apiKey: 'test-key',
+      codexCli: true,
     })
     useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [codexProfile],
+        activeProfileId: codexProfile.id,
+      }),
       prompt: 'poster',
       params: {
         ...DEFAULT_PARAMS,
@@ -1010,6 +1021,7 @@ describe('mask draft lifecycle in store actions', () => {
     for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(vi.mocked(callImageApi).mock.calls[0]?.[0].prompt).toContain('Target frame: vertical 9:16 composition')
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0].params.size).toBe('720x1280')
     expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
       'data:image/png;base64,actual-1254x1254',
       { width: 2160, height: 3840 },
@@ -1031,6 +1043,7 @@ describe('mask draft lifecycle in store actions', () => {
     })
     expect(task.actualParams).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high', n: 1 })
     expect(task.actualParamsByImage?.[task.outputImages[0]]).toMatchObject({ size: '2160x3840', output_format: 'png', quality: 'high' })
+    expect(task.revisedPromptByImage?.[task.outputImages[0]]).toBe('poster')
     const outputImage = await getImage(task.outputImages[0])
     const sourceImage = await getImage(task.exactSizeOriginalImages![0])
     expect(outputImage?.dataUrl).toBe('data:image/png;base64,resized-2160x3840')
@@ -4580,6 +4593,247 @@ describe('agent built-in image tool failure', () => {
     })
   })
 
+  it('normalizes Agent image params with the Hybrid image profile', async () => {
+    const imageProfile = createDefaultOpenAIProfile({
+      id: 'codex-image-profile',
+      apiKey: 'image-key',
+      apiMode: 'images',
+      codexCli: true,
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [responsesProfile, imageProfile],
+        activeProfileId: responsesProfile.id,
+        agentApiConfigMode: 'hybrid',
+        agentTextProfileId: responsesProfile.id,
+        agentImageProfileId: imageProfile.id,
+      }),
+      params: { ...DEFAULT_PARAMS, size: '2048x2048' },
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+      text: '',
+      images: [],
+      outputItems: [],
+      responseId: 'response-normalized-params',
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
+
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params.size).toBe('1024x1024')
+  })
+
+  it('preserves native streaming Agent 4K output while limiting the Codex CLI provider request to 1K', async () => {
+    const nativeProfile = createDefaultOpenAIProfile({
+      id: 'codex-native-streaming-profile',
+      apiKey: 'test-key',
+      apiMode: 'responses',
+      streamImages: true,
+      codexCli: true,
+    })
+    vi.mocked(resizeImageDataUrlToExactSize).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [nativeProfile],
+        activeProfileId: nativeProfile.id,
+        agentApiConfigMode: 'off',
+      }),
+      params: {
+        ...DEFAULT_PARAMS,
+        size: '2160x3840',
+        exact_size: true,
+        quality: 'high',
+        output_format: 'png',
+      },
+    })
+    vi.mocked(callAgentResponsesApi).mockImplementationOnce(async (opts) => {
+      const image = {
+        toolCallId: 'native-streaming-4k',
+        dataUrl: 'data:image/png;base64,native-streaming-source',
+        actualParams: { size: '720x1280' },
+      }
+      await opts.onImageToolStarted?.({ toolCallId: image.toolCallId })
+      await opts.onImageToolCompleted?.(image)
+      return {
+        text: '',
+        images: [image],
+        outputItems: [],
+        responseId: 'response-native-streaming-4k',
+      }
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params.size).toBe('720x1280')
+    expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
+      'data:image/png;base64,native-streaming-source',
+      { width: 2160, height: 3840 },
+      'png',
+      'cover',
+    )
+    expect(useStore.getState().tasks[0]).toMatchObject({
+      params: { size: '2160x3840', exact_size: true, quality: 'high' },
+      actualParams: { size: '2160x3840' },
+    })
+  })
+
+  it('preserves native non-streaming Agent 4K output while limiting the Codex CLI provider request to 1K', async () => {
+    const nativeProfile = createDefaultOpenAIProfile({
+      id: 'codex-native-non-streaming-profile',
+      apiKey: 'test-key',
+      apiMode: 'responses',
+      streamImages: false,
+      codexCli: true,
+    })
+    vi.mocked(resizeImageDataUrlToExactSize).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [nativeProfile],
+        activeProfileId: nativeProfile.id,
+        agentApiConfigMode: 'off',
+      }),
+      params: {
+        ...DEFAULT_PARAMS,
+        size: '2160x3840',
+        exact_size: true,
+        quality: 'high',
+        output_format: 'png',
+      },
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+      text: '',
+      images: [{
+        toolCallId: 'native-non-streaming-4k',
+        dataUrl: 'data:image/png;base64,native-non-streaming-source',
+        actualParams: { size: '720x1280' },
+      }],
+      outputItems: [],
+      responseId: 'response-native-non-streaming-4k',
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params.size).toBe('720x1280')
+    expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
+      'data:image/png;base64,native-non-streaming-source',
+      { width: 2160, height: 3840 },
+      'png',
+      'cover',
+    )
+    expect(useStore.getState().tasks[0]).toMatchObject({
+      params: { size: '2160x3840', exact_size: true, quality: 'high' },
+      actualParams: { size: '2160x3840' },
+    })
+  })
+
+  it('preserves Task API final dimensions when the Hybrid image profile uses Codex CLI limits', async () => {
+    const imageProfile = createDefaultOpenAIProfile({
+      id: 'codex-task-api-image-profile',
+      apiKey: 'image-key',
+      apiMode: 'images',
+      codexCli: true,
+    })
+    const readTaskApiConfig = vi.spyOn(imageTaskApi, 'readLocalImageTaskApiConfig').mockReturnValue({
+      baseUrl: 'http://127.0.0.1:9791',
+      token: 'test-token',
+    })
+    const executeImageTask = vi.spyOn(imageTaskApi, 'executeImageTask').mockResolvedValueOnce({
+      job: {
+        id: 'task-api-job',
+        state: 'succeeded',
+        attempts: 1,
+        maxAttempts: 3,
+        sourceAssetId: null,
+        finalAssetId: 'final-asset',
+        updatedAt: new Date().toISOString(),
+      } as imageTaskApi.ImageJobV1,
+      image: new Blob(['image'], { type: 'image/png' }),
+    })
+
+    try {
+      useStore.setState({
+        settings: normalizeSettings({
+          ...useStore.getState().settings,
+          profiles: [responsesProfile, imageProfile],
+          activeProfileId: responsesProfile.id,
+          agentApiConfigMode: 'hybrid',
+          agentTextProfileId: responsesProfile.id,
+          agentImageProfileId: imageProfile.id,
+          agentMaxToolRounds: 1,
+        }),
+        params: { ...DEFAULT_PARAMS, size: '2160x3840', exact_size: true },
+      })
+      vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+        text: '',
+        images: [],
+        outputItems: [{
+          type: 'function_call',
+          name: 'generate_image',
+          call_id: 'task-api-4k-call',
+          arguments: JSON.stringify({ id: 'portrait', prompt: 'vertical portrait' }),
+        }],
+        responseId: 'response-task-api-4k',
+      })
+
+      await submitAgentMessage()
+      await vi.waitFor(() => expect(executeImageTask).toHaveBeenCalledTimes(1))
+
+      expect(executeImageTask.mock.calls[0][1]).toMatchObject({
+        output: {
+          dimensions: '2160x3840',
+          enhancement: 'auto',
+        },
+      })
+      expect(useStore.getState().tasks.find((task) => task.agentToolCallId === 'task-api-4k-call')?.params.size).toBe('2160x3840')
+    } finally {
+      executeImageTask.mockRestore()
+      readTaskApiConfig.mockRestore()
+    }
+  })
+
+  it('does not apply Codex text-profile limits to a non-Codex image profile', async () => {
+    const textProfile = createDefaultOpenAIProfile({
+      ...responsesProfile,
+      id: 'codex-text-profile',
+      codexCli: true,
+    })
+    const imageProfile = createDefaultOpenAIProfile({
+      id: 'standard-image-profile',
+      apiKey: 'image-key',
+      apiMode: 'images',
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [textProfile, imageProfile],
+        activeProfileId: textProfile.id,
+        agentApiConfigMode: 'hybrid',
+        agentTextProfileId: textProfile.id,
+        agentImageProfileId: imageProfile.id,
+      }),
+      params: { ...DEFAULT_PARAMS, size: '2048x2048', quality: 'high' },
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+      text: '',
+      images: [],
+      outputItems: [],
+      responseId: 'response-standard-image-params',
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
+
+    expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params).toMatchObject({
+      size: '2048x2048',
+      quality: 'high',
+    })
+  })
+
   it('does not commit or report a deleted Hybrid single-image result', async () => {
     const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'image-key', apiMode: 'images' })
     const request = deferred<Awaited<ReturnType<typeof callImageApi>>>()
@@ -5611,6 +5865,62 @@ describe('reused task API profile', () => {
     expect(state.settings.activeProfileId).toBe(openaiProfile.id)
     expect(state.reusedTaskApiProfileId).toBeNull()
     expect(state.params).toMatchObject({ n: 8, size: 'auto', quality: 'auto' })
+  })
+
+  it('preserves Codex CLI exact-size intent when reusing a 4K task', async () => {
+    const codexProfile = createDefaultOpenAIProfile({
+      id: 'reuse-codex-profile',
+      apiKey: 'codex-key',
+      codexCli: true,
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [codexProfile],
+        activeProfileId: codexProfile.id,
+      }),
+    })
+
+    await reuseConfig(task({
+      apiProfileId: codexProfile.id,
+      params: { ...DEFAULT_PARAMS, size: '2160x3840', exact_size: true, quality: 'high' },
+    }))
+
+    expect(useStore.getState().params).toMatchObject({
+      size: '2160x3840',
+      exact_size: true,
+    })
+  })
+
+  it('preserves Codex CLI exact-size intent when retrying a 4K task', async () => {
+    const codexProfile = createDefaultOpenAIProfile({
+      id: 'retry-codex-profile',
+      apiKey: 'codex-key',
+      codexCli: true,
+    })
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: [],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [codexProfile],
+        activeProfileId: codexProfile.id,
+      }),
+    })
+
+    await retryTask(task({
+      apiProfileId: codexProfile.id,
+      params: { ...DEFAULT_PARAMS, size: '2160x3840', exact_size: true, quality: 'high' },
+    }))
+
+    expect(useStore.getState().tasks[0].params).toMatchObject({
+      size: '2160x3840',
+      exact_size: true,
+    })
   })
 
   it('asks whether to submit with current API profile when the reused API profile is missing', async () => {

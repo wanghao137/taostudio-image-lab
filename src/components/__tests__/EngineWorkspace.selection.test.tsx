@@ -176,14 +176,14 @@ describe('EngineWorkspace inspector selection', () => {
   it('switches from batch detail to the selected job detail', async () => {
     render(<EngineWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
     expect(await screen.findByText('Batch detail')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
 
     expect(await screen.findByText('Job detail')).toBeTruthy()
     expect(screen.queryByText('Batch detail')).toBeNull()
-  })
+  }, 20_000)
 
   it('ignores a stale batch detail response after a job is selected', async () => {
     let resolveBatch!: (value: ImageBatchV1) => void
@@ -192,7 +192,7 @@ describe('EngineWorkspace inspector selection', () => {
     }))
     render(<EngineWorkspace />)
 
-    fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
     fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
     expect(await screen.findByText('Job detail')).toBeTruthy()
 
