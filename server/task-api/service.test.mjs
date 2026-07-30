@@ -1048,7 +1048,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(providerCalls).toBe(2)
   })
 
-  it('does not retry a provider content policy error returned with HTTP 200', async () => {
+  it('falls back to the secondary route for a content policy error, then terminates if that also fails', async () => {
     let providerCalls = 0
     const provider = createServer((incoming, response) => {
       providerCalls += 1
@@ -1060,7 +1060,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     const providerUrl = `http://127.0.0.1:${provider.address().port}`
     const { url } = await start({ providerConfig: { baseUrl: providerUrl, apiKey: 'test-key', model: 'test-model' } })
     const created = await create(url, request({
-      idempotencyKey: 'content-policy-no-retry-001',
+      idempotencyKey: 'content-policy-fallback-001',
       generation: {
         provider: 'configured',
         model: 'test-model',
@@ -1071,7 +1071,6 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     const job = await wait(url, created.body.id)
     expect(job).toMatchObject({
       state: 'failed',
-      attempts: 1,
       error: {
         code: 'PROVIDER_RESPONSE_ERROR',
         providerCode: 'content_policy_violation',
@@ -1080,9 +1079,10 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         recoveryAction: 'safe_rewrite',
       },
     })
-    expect(job.events.some((event) => event.detail?.reason === 'route_fallback')).toBe(false)
+    expect(job.routeIndex).toBe(1)
+    expect(job.events.some((event) => event.detail?.reason === 'route_fallback')).toBe(true)
     const replay = await create(url, request({
-      idempotencyKey: 'content-policy-no-retry-001',
+      idempotencyKey: 'content-policy-fallback-001',
       generation: {
         provider: 'configured',
         model: 'test-model',
@@ -1091,7 +1091,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       },
     }))
     expect(replay.body.id).toBe(job.id)
-    expect(providerCalls).toBe(1)
+    expect(providerCalls).toBe(2)
   })
 
   it('normalizes a provider-native canvas to the requested source ratio before 4K enhancement', async () => {

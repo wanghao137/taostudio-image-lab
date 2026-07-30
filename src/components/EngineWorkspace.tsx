@@ -574,7 +574,7 @@ export default function EngineWorkspace() {
 
   return (
     <main className="h-[calc(100vh-4rem)] overflow-hidden bg-[#f4f1ec] text-stone-900 dark:bg-[#11100e] dark:text-stone-100">
-      <div className="mx-auto flex h-full max-w-[1500px] flex-col px-3 py-4 sm:px-6 sm:py-6">
+      <div data-selectable-text="" className="mx-auto flex h-full max-w-[1500px] flex-col px-3 py-4 sm:px-6 sm:py-6">
         <header className="flex flex-col gap-4 border-b border-stone-300 pb-5 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <div className="flex items-center gap-2 text-xs font-medium uppercase text-emerald-700 dark:text-emerald-300">

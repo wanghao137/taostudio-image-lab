@@ -210,7 +210,7 @@ function providerPayloadError(payload, fallbackRetryable = true) {
     code: 'PROVIDER_RESPONSE_ERROR',
     providerCode,
     retryable: permanent ? false : transient ? true : fallbackRetryable,
-    fallbackEligible: quota || transient || (!permanent && fallbackRetryable),
+    fallbackEligible: contentPolicy || quota || transient || (!permanent && fallbackRetryable),
     failureClass: contentPolicy
       ? 'content_policy'
       : invalidInput
