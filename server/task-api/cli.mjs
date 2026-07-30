@@ -30,6 +30,10 @@ const api = await createTaskApi({
     apiKey: value('IMAGE_TASK_PROVIDER_API_KEY') || value('IMAGE_API_KEY'),
     model: value('IMAGE_TASK_PROVIDER_MODEL', 'gpt-image-2'),
   },
+  batchWatchdogEnabled: value('IMAGE_TASK_API_BATCH_WATCHDOG', 'true') !== 'false',
+  batchWatchdogPollIntervalMs: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_POLL_MS', '60000')),
+  batchWatchdogCooldownMs: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_COOLDOWN_MS', '120000')),
+  batchWatchdogMaxAttempts: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_MAX_ATTEMPTS', '5')),
 })
 const address = await api.listen(Number(value('IMAGE_TASK_API_PORT', '9789')))
 console.log(`TaoStudio Image Task API listening at ${address.url}`)

@@ -901,6 +901,33 @@ export class TaskRepository {
     return this.getBatch(id)
   }
 
+  listPausedBatchIds() {
+    return this.db.prepare("SELECT id FROM batches WHERE control_state='paused'").all().map((row) => row.id)
+  }
+
+  recentProviderFailures(batchId, sinceIso) {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) as c
+      FROM provider_calls pc
+      JOIN batch_items bi ON bi.job_id=pc.job_id
+      WHERE bi.batch_id=? AND pc.state='failed' AND pc.completed_at>=?
+    `).get(batchId, sinceIso)
+    return row ? row.c : 0
+  }
+
+  countBatchResumeAttempts(batchId) {
+    const rows = this.db.prepare(`
+      SELECT detail_json FROM batch_events
+      WHERE batch_id=? AND event='auto_resume_attempt'
+      ORDER BY id
+    `).all(batchId)
+    return rows.length
+  }
+
+  recordBatchResumeAttempt(batchId, attempt) {
+    this.recordBatchEvent(batchId, 'auto_resume_attempt', { attempt })
+  }
+
   reviewBatchItem(id, itemKey, review) {
     const batch = this.getBatch(id)
     const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
@@ -1881,6 +1908,59 @@ export class TaskBatchAutomationPool {
   }
 }
 
+export class BatchResumeWatchdog {
+  constructor(options) {
+    this.repository = options.repository
+    this.enabled = options.enabled ?? true
+    this.pollIntervalMs = options.pollIntervalMs ?? 60_000
+    this.cooldownMs = options.cooldownMs ?? 120_000
+    this.maxAttempts = options.maxAttempts ?? 5
+    this.running = false
+    this.loops = []
+  }
+
+  start() {
+    if (this.running || !this.enabled) return
+    this.running = true
+    this.loops = [this.loop()]
+  }
+
+  async stop() {
+    this.running = false
+    await Promise.allSettled(this.loops)
+  }
+
+  async loop() {
+    while (this.running) {
+      try {
+        await this.scan()
+      } catch { /* swallow; next tick retries */ }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, this.pollIntervalMs))
+    }
+  }
+
+  async scan() {
+    const pausedIds = this.repository.listPausedBatchIds()
+    if (!pausedIds.length) return
+    const sinceIso = new Date(Date.now() - this.cooldownMs).toISOString()
+    for (const id of pausedIds) {
+      const attempts = this.repository.countBatchResumeAttempts(id)
+      if (attempts >= this.maxAttempts) continue
+      const failures = this.repository.recentProviderFailures(id, sinceIso)
+      if (failures > 0) continue
+      this.repository.recordBatchResumeAttempt(id, attempts + 1)
+      const before = this.repository.getBatch(id)
+      const failedCount = before?.stats?.failed ?? 0
+      if (failedCount > 0) {
+        this.repository.retryFailedBatchJobs(id)
+      } else {
+        this.repository.setBatchControlState(id, 'running')
+      }
+      this.repository.recordBatchEvent(id, 'auto_resumed', { attempt: attempts + 1, failedRetried: failedCount })
+    }
+  }
+}
+
 export async function createTaskApi(options = {}) {
   const stateDir = resolve(options.stateDir ?? '.local-task-api')
   const assetRoot = join(stateDir, 'assets')
@@ -1913,6 +1993,13 @@ export async function createTaskApi(options = {}) {
     }),
     concurrency: options.batchAutomationConcurrency,
     pollIntervalMs: options.pollIntervalMs,
+  })
+  const batchWatchdog = new BatchResumeWatchdog({
+    repository,
+    enabled: options.batchWatchdogEnabled ?? true,
+    pollIntervalMs: options.batchWatchdogPollIntervalMs ?? options.pollIntervalMs ?? 60_000,
+    cooldownMs: options.batchWatchdogCooldownMs ?? 120_000,
+    maxAttempts: options.batchWatchdogMaxAttempts ?? 5,
   })
   const matchAllowedOrigin = createOriginMatcher(options.allowedOrigins)
 
@@ -2062,6 +2149,7 @@ export async function createTaskApi(options = {}) {
     repository,
     workerPool,
     batchAutomationPool,
+    batchWatchdog,
     async listen(port = 0, host = '127.0.0.1') {
       await new Promise((resolvePromise, reject) => {
         server.once('error', reject)
@@ -2069,12 +2157,14 @@ export async function createTaskApi(options = {}) {
       })
       workerPool.start()
       batchAutomationPool.start()
+      batchWatchdog.start()
       const address = server.address()
       return { host, port: address.port, url: `http://${host}:${address.port}` }
     },
     async close() {
       if (closed) return
       closed = true
+      await batchWatchdog.stop()
       await batchAutomationPool.stop()
       await workerPool.stop()
       if (server.listening) await new Promise((resolvePromise) => server.close(resolvePromise))

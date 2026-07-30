@@ -300,7 +300,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
   })
 
   it('pauses queued batch jobs without interrupting work and resumes claiming', async () => {
-    const { url, api } = await start({ concurrency: 0 })
+    const { url, api } = await start({ concurrency: 0, batchWatchdogEnabled: false })
     const payload = {
       idempotencyKey: 'batch-pause-001',
       items: [
@@ -372,6 +372,133 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
     expect(retried.events.at(-1)).toMatchObject({ event: 'retry_failed', detail: { retried: 1 } })
     expect(api.repository.events(claimed.id).some((event) => event.detail?.reason === 'manual_retry')).toBe(true)
+  })
+
+  it('auto-resumes a paused batch after the cooldown window when there are no recent provider failures', async () => {
+    const { url, api } = await start({
+      concurrency: 0,
+      batchWatchdogPollIntervalMs: 30,
+      batchWatchdogCooldownMs: 0,
+      batchWatchdogMaxAttempts: 5,
+    })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-watchdog-resume-001',
+        items: [
+          { itemKey: 'failed-item', request: request({ idempotencyKey: 'watchdog-job-001', retry: { maxAttempts: 1 } }) },
+          { itemKey: 'queued-item', request: request({ idempotencyKey: 'watchdog-job-002' }) },
+        ],
+      }),
+    }).then((response) => response.json())
+    const claimed = api.repository.claimNextJob()
+    api.repository.transition(claimed.id, 'failed', {
+      error: { code: 'PROVIDER_NETWORK_ERROR', message: 'simulated 502', retryable: false },
+    })
+    api.repository.setBatchControlState(created.id, 'paused')
+    expect(api.repository.getBatch(created.id).controlState).toBe('paused')
+
+    // Watchdog runs every 30ms with 0ms cooldown; should auto-resume within ~500ms
+    const deadline = Date.now() + 2000
+    let resumed = false
+    while (Date.now() < deadline) {
+      const batch = api.repository.getBatch(created.id)
+      if (batch.controlState === 'running') { resumed = true; break }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 40))
+    }
+    expect(resumed).toBe(true)
+    const batch = api.repository.getBatch(created.id)
+    expect(batch.stats.queued).toBe(2)
+    expect(batch.events.some((event) => event.event === 'auto_resume_attempt')).toBe(true)
+  })
+
+  it('does not auto-resume when there are recent provider failures within the cooldown window', async () => {
+    const { url, api } = await start({
+      concurrency: 0,
+      batchWatchdogPollIntervalMs: 30,
+      batchWatchdogCooldownMs: 3_600_000,
+      batchWatchdogMaxAttempts: 5,
+    })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-watchdog-cooldown-001',
+        items: [
+          { itemKey: 'cool-failed-item', request: request({ idempotencyKey: 'watchdog-cool-job-001', retry: { maxAttempts: 1 } }) },
+          { itemKey: 'cool-queued-item', request: request({ idempotencyKey: 'watchdog-cool-job-002' }) },
+        ],
+      }),
+    }).then((response) => response.json())
+    const claimed = api.repository.claimNextJob()
+    const callId = api.repository.startProviderCall(claimed)
+    api.repository.finishProviderCall(callId, { state: 'failed', httpStatus: 502, error: { code: 'upstream_error' } })
+    api.repository.transition(claimed.id, 'failed', {
+      error: { code: 'PROVIDER_NETWORK_ERROR', message: 'recent 502', retryable: false },
+    })
+    api.repository.setBatchControlState(created.id, 'paused')
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    expect(api.repository.getBatch(created.id).controlState).toBe('paused')
+  })
+
+  it('stops auto-resuming after reaching maxAttempts', async () => {
+    const { url, api } = await start({
+      concurrency: 0,
+      batchWatchdogPollIntervalMs: 30,
+      batchWatchdogCooldownMs: 0,
+      batchWatchdogMaxAttempts: 2,
+    })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-watchdog-max-001',
+        items: [
+          { itemKey: 'max-item', request: request({ idempotencyKey: 'watchdog-max-job-001' }) },
+          { itemKey: 'max-item-2', request: request({ idempotencyKey: 'watchdog-max-job-002' }) },
+        ],
+      }),
+    }).then((response) => response.json())
+    api.repository.setBatchControlState(created.id, 'paused')
+
+    // Watchdog auto-resumes; re-pause after each resume to drive attempts up to maxAttempts (2)
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      const batch = api.repository.getBatch(created.id)
+      if (batch.controlState === 'running') {
+        const attempts = api.repository.countBatchResumeAttempts(created.id)
+        if (attempts >= 2) break
+        api.repository.setBatchControlState(created.id, 'paused')
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 40))
+    }
+    expect(api.repository.countBatchResumeAttempts(created.id)).toBe(2)
+    // Re-pause and verify it does NOT auto-resume further (at max)
+    api.repository.setBatchControlState(created.id, 'paused')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    expect(api.repository.countBatchResumeAttempts(created.id)).toBe(2)
+  })
+
+  it('does not run the watchdog when disabled', async () => {
+    const { url, api } = await start({
+      concurrency: 0,
+      batchWatchdogEnabled: false,
+      batchWatchdogPollIntervalMs: 30,
+    })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-watchdog-disabled-001',
+        items: [{ itemKey: 'off-item', request: request({ idempotencyKey: 'watchdog-off-job-001' }) }],
+      }),
+    }).then((response) => response.json())
+    api.repository.setBatchControlState(created.id, 'paused')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    expect(api.repository.getBatch(created.id).controlState).toBe('paused')
+    expect(api.repository.countBatchResumeAttempts(created.id)).toBe(0)
   })
 
   it('tracks batch QA, acceptance, and replacement job history independently from generation state', async () => {
