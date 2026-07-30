@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -420,6 +420,96 @@ async function reconcileEngineToLocal() {
 }
 const reconciliation = await reconcileEngineToLocal()
 
+// ====== 收割缺口修复：把引擎已成功但本地未落盘的 item 真正下载到磁盘 ======
+// 之前 reconcileEngineToLocal 只打印 missing 却不下载资产，导致批次中途被打断
+// （如 BATCH_PAUSED）时，引擎里已成功的 item 永远悬空在磁盘上。
+// 这里复用主循环的下载/验证/落盘/状态写入逻辑，把 missing 项收割为 succeeded。
+if (reconciliation.missing.length) {
+  const readyByItemKey = new Map(manifestReady.map((entry) => [entry.itemKey, entry]))
+  for (const [srcKey, engRow] of reconciliation.missing) {
+    const entry = readyByItemKey.get(srcKey)
+    if (!entry) continue
+    const directory = entryDirectory(entry)
+    const sourceCanonical = resolve(directory, '\u539f\u56fe.png')
+    const finalCanonical = resolve(directory, '4K.png')
+    // 已落盘且通过技术核验则跳过
+    if (existsSync(finalCanonical) && existsSync(sourceCanonical)) {
+      try {
+        await verifyAssets(sourceCanonical, finalCanonical, null, null, entry.generation.dimensions)
+        if (state.items[srcKey]?.status !== 'succeeded') {
+          state.items[srcKey] = {
+            ...(state.items[srcKey] || {}),
+            index: entry.index,
+            itemKey: entry.itemKey,
+            outputIndex: entry.outputIndex,
+            outputCount: entry.outputCount,
+            status: 'succeeded',
+            completedAt: new Date().toISOString(),
+            actualRoute: { name: 'harvested', model: engRow.request_json ? JSON.parse(engRow.request_json).generation?.model : 'unknown', apiMode: engRow.request_json ? JSON.parse(engRow.request_json).generation?.apiMode : 'images' },
+            jobId: engRow.job_id,
+            sourceAssetId: engRow.source_asset_id,
+            finalAssetId: engRow.final_asset_id,
+            sourcePath: sourceCanonical,
+            finalPath: finalCanonical,
+            harvestedFromEngine: true,
+          }
+        }
+        continue
+      } catch { /* 文件在但核验不过，走重新下载 */ }
+    }
+    try {
+      const sourcePath = resolve(directory, `\u5019\u9009-${engRow.job_id}-\u539f\u56fe.png`)
+      const finalPath = resolve(directory, `\u5019\u9009-${engRow.job_id}-4K.png`)
+      // 清理可能残留的候选文件，避免引擎下载因 EEXIST 失败
+      for (const stale of [sourcePath, finalPath]) {
+        if (existsSync(stale)) await unlink(stale)
+      }
+      const sourceDownload = await callMcp('image_asset_download', { assetId: engRow.source_asset_id, outputPath: sourcePath })
+      const finalDownload = await callMcp('image_asset_download', { assetId: engRow.final_asset_id, outputPath: finalPath })
+      const verification = await verifyAssets(sourcePath, finalPath, sourceDownload.manifest, finalDownload.manifest, entry.generation.dimensions)
+      await preserveCanonical(directory)
+      await Promise.all([copyFile(sourcePath, sourceCanonical), copyFile(finalPath, finalCanonical)])
+      const requestJson = engRow.request_json ? JSON.parse(engRow.request_json) : {}
+      const routeModel = requestJson.generation?.model || 'unknown'
+      state.items[srcKey] = {
+        index: entry.index,
+        itemKey: entry.itemKey,
+        outputIndex: entry.outputIndex,
+        outputCount: entry.outputCount,
+        title: entry.title,
+        tweetId: entry.tweetId,
+        sourceUrl: entry.url,
+        promptSource: entry.promptSource,
+        status: 'succeeded',
+        completedAt: new Date().toISOString(),
+        actualRoute: { name: routeModel === routes[1].model ? 'fallback' : 'primary', model: routeModel, apiMode: requestJson.generation?.apiMode || 'images' },
+        jobId: engRow.job_id,
+        sourceAssetId: engRow.source_asset_id,
+        finalAssetId: engRow.final_asset_id,
+        sourcePath: sourceCanonical,
+        finalPath: finalCanonical,
+        executionPromptPath: resolve(directory, '\u6267\u884c\u63d0\u793a\u8bcd.txt'),
+        verification,
+        visualInspection: 'harvested',
+        visualQa: { status: 'harvested', pass: null, notes: '从引擎收割，未重新执行视觉 QA', model: 'harvest' },
+        revisions: [],
+        refusalRecovery: { status: 'not_triggered' },
+        harvestedFromEngine: true,
+      }
+      await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[srcKey], null, 2)}\n`, 'utf8')
+      console.log(`HARVESTED index=${entry.index} item=${srcKey} final=${entry.generation.dimensions}`)
+    } catch (error) {
+      console.log(`HARVEST_FAILED index=${entry.index} item=${srcKey} message=${error.message}`)
+    }
+  }
+  state.summary = {
+    succeeded: Object.values(state.items).filter((item) => item.status === 'succeeded').length,
+    needsReview: Object.values(state.items).filter((item) => item.status === 'needs_review').length,
+    errors: Object.values(state.items).filter((item) => item.status === 'batch_error').length,
+  }
+  await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+}
+
 for (const entry of manifest.entries.filter((item) => validatedCoreIndexes.has(item.index))) {
   if (state.items[entry.index]?.status === 'succeeded') continue
   const directory = outputPath(entry.folderName)
@@ -702,9 +792,9 @@ for (const entry of queuedEntries) {
       revisionRecord.finalPath = finalPath
       revisionRecord.verification = verification
       revisionRecord.visualQa = qa
-      if (qa.status === 'unavailable' && /^HTTP 5\d\d$/.test(qa.reason || '')) {
-        throw providerUnavailableError(`visual QA provider returned ${qa.reason}`)
-      }
+      // QA 仅供参考，不阻断已通过技术核验的成功生成。
+      // QA provider 返回 5xx 时降级为 unavailable，继续验收，不熔断整个批次。
+      // 真正的生成 provider 5xx 仍由 providerRoutesUnavailable 检测并触发 BATCH_PAUSED。
       const qaPass = qa.status === 'completed' && qa.pass
       console.log(`QA index=${entry.index} revision=${revision} status=${qa.status} pass=${qaPass} notes=${qa.notes || qa.reason || ''}`)
       // QA 仅作参考记录，不阻断 succeeded：生成成功 + 技术核验通过即可验收。
