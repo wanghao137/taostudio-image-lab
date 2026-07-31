@@ -1,9 +1,16 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { basename, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { Agent, setGlobalDispatcher } from 'undici'
 import sharp from 'sharp'
+
+// Prevent undici's internal timeouts from firing before the engine's own
+// AbortController timeout. The engine controls timeout via providerTimeoutMs;
+// undici must not cut connections early. Set undici's own timers to 15 minutes
+// so the engine's application-level timeout is always the primary gate.
+setGlobalDispatcher(new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 }))
 import {
   API_MODES,
   assertTransition,
@@ -79,6 +86,9 @@ function validateBatchRequest(value) {
   if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200)) {
     errors.push('name must be a non-empty string up to 200 characters')
   }
+  if (value.outputRoot !== undefined && (typeof value.outputRoot !== 'string' || !value.outputRoot.trim())) {
+    errors.push('outputRoot must be a non-empty string path')
+  }
   errors.push(...validateBatchAutomation(value.automation))
   if (!Array.isArray(value.items) || value.items.length < 1 || value.items.length > MAX_BATCH_ITEMS) {
     errors.push(`items must contain 1 to ${MAX_BATCH_ITEMS} entries`)
@@ -98,6 +108,9 @@ function validateBatchRequest(value) {
       }
       if (item.copies !== undefined && (!Number.isInteger(item.copies) || item.copies < 1 || item.copies > 10)) {
         errors.push(`items[${index}].copies must be an integer from 1 to 10`)
+      }
+      if (item.outputPath !== undefined && (typeof item.outputPath !== 'string' || !item.outputPath.trim())) {
+        errors.push(`items[${index}].outputPath must be a non-empty string path`)
       }
       const validation = validateImageJobRequest(item.request)
       if (!validation.valid) {
@@ -299,10 +312,17 @@ function responseShape(text) {
 }
 
 function providerNetworkError(error, phase, signal) {
-  if (signal?.aborted) {
-    return Object.assign(new Error('provider request aborted'), { name: 'AbortError', code: 'PROVIDER_TIMEOUT', retryable: true })
-  }
   const networkCode = safeProviderText(error?.cause?.code ?? error?.code)
+  // UND_ERR_HEADERS_TIMEOUT means undici dropped the connection because the
+  // provider didn't send response headers in time. Treat it like an abort —
+  // the image may have been generated on the provider side, so use the same
+  // retryable timeout classification as an explicit AbortController abort.
+  if (signal?.aborted || networkCode === 'UND_ERR_HEADERS_TIMEOUT') {
+    return Object.assign(
+      new Error(`provider request aborted${networkCode ? ` (${networkCode})` : ''}`),
+      { name: 'AbortError', code: 'PROVIDER_TIMEOUT', retryable: true },
+    )
+  }
   return Object.assign(new Error(`provider network failed during ${phase}${networkCode ? `: ${networkCode}` : ''}`), {
     code: 'PROVIDER_NETWORK_ERROR',
     retryable: true,
@@ -463,6 +483,7 @@ export class TaskRepository {
         failure_class TEXT,
         recovery_action TEXT,
         review_json TEXT,
+        output_path TEXT,
         PRIMARY KEY (batch_id,item_key),
         UNIQUE (batch_id,position),
         FOREIGN KEY (batch_id) REFERENCES batches(id),
@@ -510,6 +531,8 @@ export class TaskRepository {
     if (!jobColumns.has('route_attempts')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_attempts INTEGER NOT NULL DEFAULT 0')
     const batchColumns = new Set(this.db.prepare('PRAGMA table_info(batches)').all().map((column) => column.name))
     if (!batchColumns.has('automation_json')) this.db.exec('ALTER TABLE batches ADD COLUMN automation_json TEXT')
+    if (!batchColumns.has('pause_reason')) this.db.exec('ALTER TABLE batches ADD COLUMN pause_reason TEXT')
+    if (!batchColumns.has('output_root')) this.db.exec('ALTER TABLE batches ADD COLUMN output_root TEXT')
     const batchItemColumns = new Set(this.db.prepare('PRAGMA table_info(batch_items)').all().map((column) => column.name))
     if (!batchItemColumns.has('source_item_key')) this.db.exec("ALTER TABLE batch_items ADD COLUMN source_item_key TEXT NOT NULL DEFAULT ''")
     if (!batchItemColumns.has('output_index')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_index INTEGER NOT NULL DEFAULT 1')
@@ -521,6 +544,7 @@ export class TaskRepository {
     if (!batchItemColumns.has('failure_class')) this.db.exec('ALTER TABLE batch_items ADD COLUMN failure_class TEXT')
     if (!batchItemColumns.has('recovery_action')) this.db.exec('ALTER TABLE batch_items ADD COLUMN recovery_action TEXT')
     if (!batchItemColumns.has('review_json')) this.db.exec('ALTER TABLE batch_items ADD COLUMN review_json TEXT')
+    if (!batchItemColumns.has('output_path')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_path TEXT')
     this.db.exec("UPDATE batch_items SET source_item_key=item_key WHERE source_item_key=''")
     this.db.exec("UPDATE batch_items SET automation_state='idle' WHERE automation_state='processing'")
     this.db.exec(`
@@ -690,13 +714,14 @@ export class TaskRepository {
     const timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare('INSERT INTO batches (id,idempotency_key,request_hash,name,automation_json,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)')
+      this.db.prepare('INSERT INTO batches (id,idempotency_key,request_hash,name,automation_json,output_root,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
         .run(
           id,
           request.idempotencyKey,
           requestHash,
           request.name?.trim() || null,
           request.automation ? JSON.stringify(request.automation) : null,
+          request.outputRoot?.trim() || null,
           'running',
           timestamp,
           timestamp,
@@ -706,8 +731,8 @@ export class TaskRepository {
         try {
           this.db.prepare(`
             INSERT INTO batch_items (
-              batch_id,item_key,source_item_key,position,output_index,output_count,job_id
-            ) VALUES (?,?,?,?,?,?,?)
+              batch_id,item_key,source_item_key,position,output_index,output_count,job_id,output_path
+            ) VALUES (?,?,?,?,?,?,?,?)
           `).run(
             id,
             item.itemKey,
@@ -716,6 +741,7 @@ export class TaskRepository {
             item.outputIndex || 1,
             item.outputCount || 1,
             result.job.id,
+            item.outputPath?.trim() || null,
           )
           this.db.prepare('INSERT INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at) VALUES (?,?,?,?,?,?)')
             .run(id, item.itemKey, 0, result.job.id, 'initial', timestamp)
@@ -750,7 +776,7 @@ export class TaskRepository {
     const itemRows = this.db.prepare(`
       SELECT bi.item_key,bi.source_item_key,bi.position,bi.output_index,bi.output_count,
              bi.revision,bi.automation_state,bi.qa_status,bi.acceptance_status,
-             bi.failure_class,bi.recovery_action,bi.review_json,j.*
+             bi.failure_class,bi.recovery_action,bi.review_json,bi.output_path,j.*
       FROM batch_items bi
       JOIN jobs j ON j.id=bi.job_id
       WHERE bi.batch_id=?
@@ -803,6 +829,7 @@ export class TaskRepository {
         failureClass: item.failure_class || job.error?.failureClass || null,
         recoveryAction: item.recovery_action || job.error?.recoveryAction || null,
         review: item.review_json ? JSON.parse(item.review_json) : null,
+        outputPath: item.output_path || null,
         job,
         jobHistory: historyByItem.get(item.item_key) || [],
       }
@@ -830,6 +857,7 @@ export class TaskRepository {
       id: row.id,
       name: row.name,
       automation,
+      outputRoot: row.output_root || null,
       state,
       controlState: row.control_state,
       acceptanceState: acceptanceCounts.pending > 0
@@ -863,7 +891,7 @@ export class TaskRepository {
     }
   }
 
-  setBatchControlState(id, controlState) {
+  setBatchControlState(id, controlState, reason) {
     const batch = this.getBatch(id)
     if (!batch) return null
     if (batch.state === 'completed') {
@@ -873,8 +901,9 @@ export class TaskRepository {
       })
     }
     if (batch.controlState !== controlState) {
-      this.db.prepare('UPDATE batches SET control_state=?,updated_at=? WHERE id=?').run(controlState, now(), id)
-      this.recordBatchEvent(id, controlState, null)
+      const detailJson = reason ? JSON.stringify({ reason }) : null
+      this.db.prepare('UPDATE batches SET control_state=?,pause_reason=?,updated_at=? WHERE id=?').run(controlState, reason || null, now(), id)
+      this.recordBatchEvent(id, controlState, detailJson ? JSON.parse(detailJson) : null)
     }
     return this.getBatch(id)
   }
@@ -895,14 +924,16 @@ export class TaskRepository {
       retried += 1
     }
     if (retried) {
-      this.db.prepare("UPDATE batches SET control_state='running',updated_at=? WHERE id=?").run(now(), id)
+      this.db.prepare("UPDATE batches SET control_state='running',pause_reason=NULL,updated_at=? WHERE id=?").run(now(), id)
       this.recordBatchEvent(id, 'retry_failed', { retried })
     }
     return this.getBatch(id)
   }
 
   listPausedBatchIds() {
-    return this.db.prepare("SELECT id FROM batches WHERE control_state='paused'").all().map((row) => row.id)
+    // Only auto-resume batches that were paused by the system (e.g. provider_unavailable),
+    // not batches manually paused by the user. Manual pauses have pause_reason='manual' or NULL.
+    return this.db.prepare("SELECT id FROM batches WHERE control_state='paused' AND pause_reason IS NOT NULL AND pause_reason!='manual'").all().map((row) => row.id)
   }
 
   recentProviderFailures(batchId, sinceIso) {
@@ -1122,6 +1153,12 @@ export class TaskRepository {
   getAsset(id) {
     const row = this.db.prepare('SELECT * FROM assets WHERE id=?').get(id)
     return row ? { manifest: JSON.parse(row.manifest_json), filePath: row.file_path } : null
+  }
+
+  getBatchItemByJobId(jobId) {
+    return this.db.prepare(
+      'SELECT batch_id, item_key, revision, output_path FROM batch_items WHERE job_id=?',
+    ).get(jobId) || null
   }
 
   recordEvent(jobId, state, detail) {
@@ -1676,6 +1713,54 @@ export class TaskWorkerPool {
           actualRoute: this.repository.getJob(jobId).actualRoute,
         },
       })
+      // Auto-accept for non-automation batches: when a job succeeds and its
+      // batch has no automation_json, immediately set acceptance_status=
+      // 'accepted', qa_status='passed', record the engine-internal asset paths,
+      // and copy the source/final PNGs to the item's outputPath (if provided).
+      // This keeps batch UI state correct and images on disk even when the
+      // runner process has exited (e.g. watchdog resumed the batch after
+      // provider recovery).
+      const batchItem = this.repository.getBatchItemByJobId(jobId)
+      if (batchItem) {
+        const batch = this.repository.getBatch(batchItem.batch_id)
+        if (batch && !batch.automation.enabled) {
+          const succeededJob = this.repository.getJob(jobId)
+          const sourceAsset = succeededJob.sourceAssetId ? this.repository.getAsset(succeededJob.sourceAssetId) : null
+          const finalAsset = succeededJob.finalAssetId ? this.repository.getAsset(succeededJob.finalAssetId) : null
+          // If the item declares an output directory, copy both PNGs there so
+          // the user-facing files are immediately available on disk without
+          // needing the runner to harvest them.
+          let harvestedFiles = null
+          const outputPath = batchItem.output_path || null
+          if (outputPath && sourceAsset?.filePath && finalAsset?.filePath) {
+            try {
+              await mkdir(outputPath, { recursive: true })
+              const sourceDest = join(outputPath, '\u539f\u56fe.png')
+              const finalDest = join(outputPath, '4K.png')
+              await copyFile(sourceAsset.filePath, sourceDest)
+              await copyFile(finalAsset.filePath, finalDest)
+              harvestedFiles = { sourcePath: sourceDest, finalPath: finalDest }
+            } catch {
+              /* output directory copy failure is non-fatal; assets remain in engine store */
+            }
+          }
+          this.repository.reviewBatchItem(batchItem.batch_id, batchItem.item_key, {
+            qaStatus: 'passed',
+            acceptanceStatus: 'accepted',
+            detail: {
+              jobId,
+              revision: batchItem.revision ?? 0,
+              automated: true,
+              autoAccepted: true,
+              sourceAssetId: succeededJob.sourceAssetId || null,
+              sourceAssetPath: sourceAsset?.filePath || null,
+              finalAssetId: succeededJob.finalAssetId || null,
+              finalAssetPath: finalAsset?.filePath || null,
+              ...(harvestedFiles ? { harvestedFiles } : {}),
+            },
+          })
+        }
+      }
     } catch (error) {
       const current = this.repository.getJob(jobId)
       if (!current || ['cancelled', 'succeeded'].includes(current.state)) return
@@ -2073,7 +2158,15 @@ export async function createTaskApi(options = {}) {
       }
       const batchControlMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/(pause|resume)$/)
       if (request.method === 'POST' && batchControlMatch) {
-        const batch = repository.setBatchControlState(batchControlMatch[1], batchControlMatch[2] === 'pause' ? 'paused' : 'running')
+        const isPause = batchControlMatch[2] === 'pause'
+        let reason = null
+        if (isPause) {
+          try {
+            const body = JSON.parse((await readBody(request, 4096)).toString('utf8'))
+            reason = body?.reason || null
+          } catch { /* no body or not JSON; reason stays null → treated as manual pause */ }
+        }
+        const batch = repository.setBatchControlState(batchControlMatch[1], isPause ? 'paused' : 'running', reason || undefined)
         return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
       }
       const batchRetryMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/retry-failed$/)

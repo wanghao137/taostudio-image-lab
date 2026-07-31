@@ -19,7 +19,7 @@ const api = await createTaskApi({
   stateDir: value('IMAGE_TASK_API_STATE_DIR', '.local-task-api'),
   token: value('IMAGE_TASK_API_TOKEN') || undefined,
   concurrency: Number(value('IMAGE_TASK_API_CONCURRENCY', '1')),
-  providerTimeoutMs: Number(value('IMAGE_TASK_API_PROVIDER_TIMEOUT_MS', '300000')),
+  providerTimeoutMs: Number(value('IMAGE_TASK_API_PROVIDER_TIMEOUT_MS', '600000')),
   providerRetryBaseMs: Number(value('IMAGE_TASK_API_PROVIDER_RETRY_BASE_MS', '15000')),
   allowedOrigins: value('IMAGE_TASK_API_ALLOWED_ORIGINS')
     .split(',')

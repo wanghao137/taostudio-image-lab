@@ -396,7 +396,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     api.repository.transition(claimed.id, 'failed', {
       error: { code: 'PROVIDER_NETWORK_ERROR', message: 'simulated 502', retryable: false },
     })
-    api.repository.setBatchControlState(created.id, 'paused')
+    api.repository.setBatchControlState(created.id, 'paused', 'provider_unavailable')
     expect(api.repository.getBatch(created.id).controlState).toBe('paused')
 
     // Watchdog runs every 30ms with 0ms cooldown; should auto-resume within ~500ms
@@ -437,7 +437,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     api.repository.transition(claimed.id, 'failed', {
       error: { code: 'PROVIDER_NETWORK_ERROR', message: 'recent 502', retryable: false },
     })
-    api.repository.setBatchControlState(created.id, 'paused')
+    api.repository.setBatchControlState(created.id, 'paused', 'provider_unavailable')
 
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
     expect(api.repository.getBatch(created.id).controlState).toBe('paused')
@@ -461,7 +461,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         ],
       }),
     }).then((response) => response.json())
-    api.repository.setBatchControlState(created.id, 'paused')
+    api.repository.setBatchControlState(created.id, 'paused', 'provider_unavailable')
 
     // Watchdog auto-resumes; re-pause after each resume to drive attempts up to maxAttempts (2)
     const deadline = Date.now() + 3000
@@ -470,13 +470,13 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       if (batch.controlState === 'running') {
         const attempts = api.repository.countBatchResumeAttempts(created.id)
         if (attempts >= 2) break
-        api.repository.setBatchControlState(created.id, 'paused')
+        api.repository.setBatchControlState(created.id, 'paused', 'provider_unavailable')
       }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 40))
     }
     expect(api.repository.countBatchResumeAttempts(created.id)).toBe(2)
     // Re-pause and verify it does NOT auto-resume further (at max)
-    api.repository.setBatchControlState(created.id, 'paused')
+    api.repository.setBatchControlState(created.id, 'paused', 'provider_unavailable')
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
     expect(api.repository.countBatchResumeAttempts(created.id)).toBe(2)
   })
@@ -495,7 +495,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         items: [{ itemKey: 'off-item', request: request({ idempotencyKey: 'watchdog-off-job-001' }) }],
       }),
     }).then((response) => response.json())
-    api.repository.setBatchControlState(created.id, 'paused')
+    api.repository.setBatchControlState(created.id, 'paused', 'provider_unavailable')
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
     expect(api.repository.getBatch(created.id).controlState).toBe('paused')
     expect(api.repository.countBatchResumeAttempts(created.id)).toBe(0)
@@ -1475,5 +1475,124 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(finalManifest).toMatchObject({ width: 2400, height: 3200, ratio: '3:4' })
     // Cross-product invariant must hold
     expect(sourceManifest.width * finalManifest.height).toBe(finalManifest.width * sourceManifest.height)
+  })
+
+  it('auto-accepts non-automation batch items when a job succeeds', async () => {
+    const { url } = await start()
+    const response = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-auto-accept-001',
+        items: [{
+          itemKey: 'auto-accept-item',
+          request: request({ idempotencyKey: 'batch-auto-accept-job-001' }),
+        }],
+      }),
+    })
+    const created = await response.json()
+    expect(response.status).toBe(201)
+    expect(created.automation).toMatchObject({ enabled: false })
+
+    const completed = await waitBatch(url, created.id)
+    const item = completed.items[0]
+    expect(item.generationStatus).toBe('succeeded')
+    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.qaStatus).toBe('passed')
+    expect(item.automationState).toBe('done')
+    expect(item.review).toMatchObject({
+      autoAccepted: true,
+      jobId: item.job.id,
+    })
+    expect(item.review.sourceAssetPath).toContain('assets')
+    expect(item.review.finalAssetPath).toContain('assets')
+    expect(item.review.sourceAssetId).toMatch(/^asset_/)
+    expect(item.review.finalAssetId).toMatch(/^asset_/)
+  })
+
+  it('copies source/final PNGs to outputPath on job success (engine-level harvest)', async () => {
+    const { url, stateDir } = await start()
+    const harvestDir = join(stateDir, 'harvest-test')
+    const response = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-engine-harvest-001',
+        outputRoot: harvestDir,
+        items: [{
+          itemKey: 'harvest-item',
+          outputPath: join(harvestDir, 'case-folder'),
+          request: request({ idempotencyKey: 'batch-engine-harvest-job-001' }),
+        }],
+      }),
+    })
+    const created = await response.json()
+    expect(response.status).toBe(201)
+    expect(created.outputRoot).toBe(harvestDir)
+
+    // Poll until the item is accepted (auto-accept runs slightly after the
+    // job succeeds, so waitBatch may return before reviewBatchItem fires).
+    const deadline = Date.now() + 8_000
+    let batch = null
+    while (Date.now() < deadline) {
+      batch = await (await fetch(`${url}/v1/image-batches/${created.id}`, { headers: headers() })).json()
+      if (batch.items[0]?.acceptanceStatus === 'accepted') break
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+    }
+    const item = batch.items[0]
+    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.outputPath).toBe(join(harvestDir, 'case-folder'))
+    // Engine should have copied both PNGs to the outputPath directory
+    const sourceFile = await readFile(join(item.outputPath, '\u539f\u56fe.png'))
+    const finalFile = await readFile(join(item.outputPath, '4K.png'))
+    expect(sourceFile.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+    expect(finalFile.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
+    // SHA-256 of copied files must match the engine asset manifests
+    const sourceManifest = await (await fetch(`${url}/v1/assets/${item.job.sourceAssetId}?manifest=1`, { headers: headers() })).json()
+    const finalManifest = await (await fetch(`${url}/v1/assets/${item.job.finalAssetId}?manifest=1`, { headers: headers() })).json()
+    expect(createHash('sha256').update(sourceFile).digest('hex')).toBe(sourceManifest.sha256)
+    expect(createHash('sha256').update(finalFile).digest('hex')).toBe(finalManifest.sha256)
+  })
+
+  it('does not auto-accept items in automation-enabled batches', async () => {
+    const evaluator = {
+      rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
+      qa: async () => ({
+        pass: true,
+        edgeClipping: false,
+        backgroundConflict: false,
+        missingCoreStructure: false,
+        blankOrBroken: false,
+        notes: 'pass',
+        model: 'mock-qa',
+      }),
+    }
+    const { url } = await start({ batchAutomationEvaluator: evaluator })
+    const response = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-auto-accept-automation-001',
+        automation: {
+          enabled: true,
+          maxRevisions: 2,
+          revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
+        },
+        items: [{
+          itemKey: 'automation-item',
+          request: request({ idempotencyKey: 'batch-auto-accept-automation-job-001' }),
+        }],
+      }),
+    })
+    const created = await response.json()
+    expect(response.status).toBe(201)
+    expect(created.automation).toMatchObject({ enabled: true })
+
+    const completed = await waitBatch(url, created.id)
+    const item = completed.items[0]
+    // Automation batch: acceptance is done by the automation pool, NOT the auto-accept hook.
+    // The item IS accepted (automation pool accepts it), but review.autoAccepted should NOT be present.
+    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.review.autoAccepted).toBeUndefined()
   })
 })
