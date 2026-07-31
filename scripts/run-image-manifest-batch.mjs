@@ -35,18 +35,6 @@ const selectedIndex = cliIndex ? Number(cliIndex.split('=')[1]) : null
 const limit = cliLimit ? Number(cliLimit.split('=')[1]) : Number.POSITIVE_INFINITY
 const runId = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '')
 
-const commonSafety = [
-  'MANDATORY FINAL COMPOSITION CHECK:',
-  'Keep every meaningful subject, title, label, border and decoration fully inside the canvas.',
-  'Before finalizing, inspect all four edges. If anything meaningful is clipped, shrink and recenter the complete composition.',
-].join('\n')
-
-const textSafety = [
-  commonSafety,
-  'Reserve at least 8% blank safe margin at the top and bottom and 5% at the left and right.',
-  'No character, panel, frame, newspaper edge, poster edge or information block may touch or cross the canvas edge.',
-].join('\n')
-
 function hash(value) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -236,13 +224,12 @@ if (preflightOnly) {
 }
 
 function initialExecutionPrompt(entry) {
-  const guard = entry.generation.contentClass === 'text' ? textSafety : commonSafety
   // 多图条目：用预计算的聚焦单场景执行 prompt（避免 provider 读到"N-image"语义多生成）。
   // 提示词.txt 仍保存完整原 prompt；执行提示词.txt 记录这里发给 provider 的内容。
   const scenePrompt = entry.outputCount > 1 && entry.generation?.executionScenes
     ? entry.generation.executionScenes[entry.outputIndex - 1]
     : null
-  return [guard, scenePrompt || entry.prompt].join('\n\n')
+  return scenePrompt || entry.prompt
 }
 
 async function safeRewritePrompt(entry, env, failure) {
@@ -610,9 +597,11 @@ if (queuedEntries.length) {
   const batchResult = await callMcp('image_batch_create', {
     idempotencyKey: `${batchKey}-${runId}`,
     name: `${batchName} ${runId}`,
+    outputRoot,
     items: queuedEntries.map((entry) => ({
       itemKey: entry.itemKey,
       copies: 1,
+      outputPath: entryDirectory(entry),
       prompt: initialExecutionPrompt(entry),
       ...(entry.generation.referenceDependent
         ? { sourceAssetId: preparedReferences.get(entry.index).assetId }
@@ -745,10 +734,7 @@ for (const entry of queuedEntries) {
         }
         if (policyFailure(job) && revision === 0) {
           safeRewrite = await safeRewritePrompt(entry, env, job)
-          executionPrompt = [
-            entry.generation.contentClass === 'text' ? textSafety : commonSafety,
-            safeRewrite.prompt,
-          ].join('\n\n')
+          executionPrompt = safeRewrite.prompt
           replacementReason = 'safe_rewrite'
           continue
         }
@@ -931,7 +917,7 @@ for (const entry of queuedEntries) {
   await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
   if (pauseReason) {
     if (activeBatch?.id && activeBatch.state !== 'completed') {
-      activeBatch = await callMcp('image_batch_pause', { batchId: activeBatch.id })
+      activeBatch = await callMcp('image_batch_pause', { batchId: activeBatch.id, reason: 'provider_unavailable' })
     }
     console.log(`BATCH_PAUSED reason=${pauseReason}`)
     break

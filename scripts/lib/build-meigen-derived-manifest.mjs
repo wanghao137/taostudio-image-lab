@@ -13,6 +13,43 @@ import { extractRequestedImageCount, extractStrictRatio, DIMENSIONS_BY_RATIO } f
 
 const SUPPORTED_RATIOS = Object.keys(DIMENSIONS_BY_RATIO)
 
+// 就近匹配原图宽高比到一个支持比例。返回 { ratio, error } 便于调用方应用容差。
+// 与旧版相比不再"无阈值强行归一"——调用方决定误差可否接受。
+export function bestRatioForSize(width, height) {
+  if (!width || !height) return { ratio: null, error: Number.POSITIVE_INFINITY }
+  const target = width / height
+  let best = null
+  let bestDiff = Number.POSITIVE_INFINITY
+  for (const ratio of SUPPORTED_RATIOS) {
+    const [rw, rh] = ratio.split(':').map(Number)
+    const diff = Math.abs(rw / rh - target)
+    if (diff < bestDiff) {
+      bestDiff = diff
+      best = ratio
+    }
+  }
+  return { ratio: best, error: best ? bestDiff / target : Number.POSITIVE_INFINITY }
+}
+
+// 原图宽高比与某个支持比例的最大允许相对误差。超过则不强行归一，标记 blocked。
+// 8% 容差覆盖了 4:5(0.8)->3:4(0.75, 差6.25%) 这类"近似但不同"的情况——
+// 既然 prompt 没明确写比例，宁可让人工确认，也不要生成被裁切的错误比例图。
+const NEAREST_RATIO_TOLERANCE = 0.08
+
+// ratio 判定的唯一入口：prompt 明确比例优先（忠于作者意图），其次原图就近匹配（加容差）。
+export function resolveEntryRatio(prompt, primaryAsset) {
+  const fromPrompt = extractStrictRatio(prompt)
+  if (fromPrompt) return { ratio: fromPrompt, source: 'prompt' }
+  if (primaryAsset && primaryAsset.width && primaryAsset.height) {
+    const nearest = bestRatioForSize(primaryAsset.width, primaryAsset.height)
+    if (nearest.ratio && nearest.error <= NEAREST_RATIO_TOLERANCE) {
+      return { ratio: nearest.ratio, source: 'nearest_source_aspect' }
+    }
+    return { ratio: null, source: 'aspect_too_far' }
+  }
+  return { ratio: null, source: 'undeterminable' }
+}
+
 // 文字/标识/海报类：排版、标题、字体、卡片、广告、杂志、书籍、报纸、菜单、Logo、品牌、横幅
 const TEXT_KEYWORDS =
   /海报|封面|横幅|banner|杂志|报纸|书籍|菜单|卡片|名片|传单|广告|标签|标题|排版|字体|字效|文字|文章|教程|说明书|目录|日历|证书|邀请函|节目单|歌词|诗|章节|绘本内文|logo|标识|徽标|商标|品牌名|店招|片头|片尾|字幕|弹幕|图文|微博图|朋友圈文案|九宫格|长图排版|条漫|分镜|连环画|漫画格子|表格|数据图|信息图|图表|流程图|思维导图|时间轴|时间线|年表|清单图|盘点|榜单|排行榜|封面图|头图|题图|缩略图|教程图|步骤图|说明书图|产品参数|规格表|价目表|报价单|优惠券|折扣|促销|满减|活动|倒计时|预告|节目预告|播出表|课程表|作息表|行程表|日程|计划表|打卡表|签到表|成绩单|奖状/i
@@ -26,22 +63,6 @@ const LOGO_KEYWORDS = /^.{0,60}(logo|徽标|商标|标识|品牌标志|店招|�
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
-}
-
-function bestRatioForSize(width, height) {
-  if (!width || !height) return null
-  const target = width / height
-  let best = null
-  let bestDiff = Number.POSITIVE_INFINITY
-  for (const ratio of SUPPORTED_RATIOS) {
-    const [rw, rh] = ratio.split(':').map(Number)
-    const diff = Math.abs(rw / rh - target)
-    if (diff < bestDiff) {
-      bestDiff = diff
-      best = ratio
-    }
-  }
-  return best
 }
 
 function classifyContentClass(prompt) {
@@ -149,23 +170,18 @@ export async function buildDerivedManifest({ sourcePath, outputPath, strict = tr
       throw new Error(`${label} folderName is not a safe path segment: ${entry.folderName}`)
     }
 
-    // 3. ratio 判定：prompt 严格比例优先
-    let ratio = extractStrictRatio(prompt)
-    let ratioSource = 'prompt'
-    let primaryAsset = null
-    if (!ratio) {
-      primaryAsset = (entry.assets || []).find((asset) => asset.width && asset.height) || null
-      if (primaryAsset) {
-        ratio = bestRatioForSize(primaryAsset.width, primaryAsset.height)
-        ratioSource = 'nearest_source_aspect'
-      }
-    }
+    // 3. ratio 判定：prompt 明确比例优先（忠于作者意图），其次原图就近匹配（8% 容差）。
+    //    不再无阈值强行归一——原图比例离任何支持比例都太远时标记 blocked，避免错误比例生图。
+    const primaryAsset = (entry.assets || []).find((asset) => asset.width && asset.height) || null
+    const resolved = resolveEntryRatio(prompt, primaryAsset)
+    const ratio = resolved.ratio
+    const ratioSource = resolved.source
     if (!ratio) {
       stats.blocked += 1
       derived.blocked.push({
         index: entry.index,
         meigenId: entry.meigenId,
-        reason: 'ratio_undeterminable',
+        reason: ratioSource === 'aspect_too_far' ? 'ratio_aspect_too_far' : 'ratio_undeterminable',
         promptSha256: recalculated,
       })
       continue

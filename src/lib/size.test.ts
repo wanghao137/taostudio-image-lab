@@ -14,8 +14,14 @@ describe('calculateImageSize', () => {
     expect(calculateImageSize('2K', '3:4')).toBe('1536x2048')
   })
 
+  it('uses explicit presets for poster/print ratios', () => {
+    expect(calculateImageSize('2K', '5:4')).toBe('1920x1536')
+    expect(calculateImageSize('4K', '4:5')).toBe('2400x3000')
+    expect(calculateImageSize('4K', '3:5')).toBe('2160x3600')
+  })
+
   it('falls back to budget-based sizing for custom ratios', () => {
-    expect(calculateImageSize('2K', '5:4')).toBe('2288x1824')
+    expect(calculateImageSize('2K', '7:5')).toBe('2416x1728')
   })
 })
 
@@ -26,11 +32,16 @@ describe('Codex CLI size compatibility', () => {
     expect(normalizeCodexCliImageSize('1536x1024')).toBe('1536x1024')
   })
 
-  it('preserves non-preset ratios approximately and clamps excessive ratios', () => {
-    expect(normalizeCodexCliImageSize('2500x2000')).toBe(calculateImageSize('1K', '5:4'))
-    const [width, height] = normalizeCodexCliImageSize('4000x1000').split('x').map(Number)
-    expect(width / height).toBeCloseTo(3, 2)
+  it('preserves the input ratio approximately and clamps excessive ratios', () => {
+    // 2500x2000 is a ~5:4 ratio; the normalizer keeps it within the 1K budget
+    // while staying close to the original ratio (it does not snap to the 5:4
+    // preset because the rounded input reduces to 156:125, not 5:4 exactly).
+    const [width, height] = normalizeCodexCliImageSize('2500x2000').split('x').map(Number)
+    expect(width / height).toBeCloseTo(1.25, 1)
     expect(width * height).toBeLessThanOrEqual(1_572_864)
+    const [clampWidth, clampHeight] = normalizeCodexCliImageSize('4000x1000').split('x').map(Number)
+    expect(clampWidth / clampHeight).toBeCloseTo(3, 2)
+    expect(clampWidth * clampHeight).toBeLessThanOrEqual(1_572_864)
   })
 
   it('prepends a concise resolution hint only for explicit sizes', () => {

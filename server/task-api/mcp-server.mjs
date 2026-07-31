@@ -15,6 +15,7 @@ if (!token) throw new Error('IMAGE_TASK_API_TOKEN is required')
 const PRESET_4K = {
   '1:1': '2880x2880', '2:1': '3840x1920', '3:2': '3456x2304', '2:3': '2304x3456', '16:9': '3840x2160',
   '9:16': '2160x3840', '4:3': '3200x2400', '3:4': '2400x3200', '21:9': '3840x1646',
+  '4:5': '2400x3000', '5:4': '3000x2400', '3:5': '2160x3600', '5:3': '3600x2160',
 }
 const fallbackSchema = z.object({
   provider: z.string().min(1).default('configured'),
@@ -33,9 +34,10 @@ const batchAutomationSchema = z.object({
 const batchItemSchema = z.object({
   itemKey: z.string().min(1).max(200),
   copies: z.number().int().min(1).max(10).optional(),
+  outputPath: z.string().min(1).optional(),
   prompt: z.string().min(1).optional(),
   sourceAssetId: z.string().optional(),
-  ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
+  ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9', '4:5', '5:4', '3:5', '5:3']),
   dimensions: z.string().regex(/^\d+x\d+$/).optional(),
   provider: z.string().min(1).default('configured'),
   model: z.string().min(1),
@@ -124,11 +126,12 @@ server.registerTool('image_job_create', {
   inputSchema: {
     idempotencyKey: z.string().min(8).max(200),
     prompt: z.string().min(1).optional(),
-    ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9']),
+    ratio: z.enum(['1:1', '2:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9', '4:5', '5:4', '3:5', '5:3']),
     dimensions: z.string().regex(/^\d+x\d+$/).optional().describe(
       'Final output pixels. Optional — defaults to the 4K preset for the given ratio. '
       + '4K presets: 1:1=2880x2880 2:1=3840x1920 3:2=3456x2304 2:3=2304x3456 16:9=3840x2160 '
-      + '9:16=2160x3840 4:3=3200x2400 3:4=2400x3200 21:9=3840x1646.'
+      + '9:16=2160x3840 4:3=3200x2400 3:4=2400x3200 21:9=3840x1646 '
+      + '4:5=2400x3000 5:4=3000x2400 3:5=2160x3600 5:3=3600x2160.'
     ),
     provider: z.string().min(1).default('mock'),
     model: z.string().min(1).default('mock-v1'),
@@ -191,20 +194,23 @@ server.registerTool('image_batch_create', {
   inputSchema: {
     idempotencyKey: z.string().min(8).max(200),
     name: z.string().min(1).max(200).optional(),
+    outputRoot: z.string().min(1).optional(),
     automation: batchAutomationSchema.optional(),
     items: z.array(batchItemSchema).min(1).max(500),
   },
-}, async ({ idempotencyKey, name, automation, items }) => {
+}, async ({ idempotencyKey, name, outputRoot, automation, items }) => {
   const response = await api('/v1/image-batches', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       idempotencyKey,
       ...(name ? { name } : {}),
+      ...(outputRoot ? { outputRoot } : {}),
       ...(automation ? { automation } : {}),
       items: items.map((item) => ({
         itemKey: item.itemKey,
         ...(item.copies ? { copies: item.copies } : {}),
+        ...(item.outputPath ? { outputPath: item.outputPath } : {}),
         request: requestFromBatchItem(idempotencyKey, item),
       })),
     }),
@@ -221,9 +227,16 @@ server.registerTool('image_batch_get', {
 }, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}`)).json()))
 
 server.registerTool('image_batch_pause', {
-  description: 'Pause a batch. Active jobs continue; queued jobs stop being claimed.',
-  inputSchema: { batchId: z.string().min(1) },
-}, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/pause`, { method: 'POST' })).json()))
+  description: 'Pause a batch. Active jobs continue; queued jobs stop being claimed. Pass reason to distinguish manual vs system pauses.',
+  inputSchema: { batchId: z.string().min(1), reason: z.string().optional() },
+}, async ({ batchId, reason }) => {
+  const fetchOptions = { method: 'POST' }
+  if (reason) {
+    fetchOptions.body = JSON.stringify({ reason })
+    fetchOptions.headers = { 'content-type': 'application/json' }
+  }
+  return textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/pause`, fetchOptions)).json())
+})
 
 server.registerTool('image_batch_resume', {
   description: 'Resume a paused batch.',

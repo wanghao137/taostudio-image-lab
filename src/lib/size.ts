@@ -20,6 +20,10 @@ export const COMMON_IMAGE_RATIOS = [
   { label: '4:3', value: '4:3' },
   { label: '3:4', value: '3:4' },
   { label: '21:9', value: '21:9' },
+  { label: '4:5', value: '4:5' },
+  { label: '5:4', value: '5:4' },
+  { label: '3:5', value: '3:5' },
+  { label: '5:3', value: '5:3' },
 ] as const
 
 export type CommonImageRatio = typeof COMMON_IMAGE_RATIOS[number]['value']

@@ -15,6 +15,10 @@ export const DIMENSIONS_BY_RATIO = Object.freeze({
   '4:3': '3200x2400',
   '3:4': '2400x3200',
   '21:9': '3840x1646',
+  '4:5': '2400x3000',
+  '5:4': '3000x2400',
+  '3:5': '2160x3600',
+  '5:3': '3600x2160',
 })
 
 export function sha256(value) {
@@ -24,7 +28,7 @@ export function sha256(value) {
 export function extractStrictRatio(prompt) {
   const normalized = String(prompt || '').replace(/\uff1a/g, ':')
   const matches = [...normalized.matchAll(
-    /(?:\u6bd4\u4f8b|\u753b\u5e45|\u5c3a\u5bf8|\u6a2a\u7248|\u7ad6\u7248|aspect(?:\s+ratio)?)?[^0-9]{0,12}(21:9|16:9|9:16|4:3|3:4|3:2|2:3|2:1|1:1)/gi,
+    /(?:\u6bd4\u4f8b|\u753b\u5e45|\u5c3a\u5bf8|\u6a2a\u7248|\u7ad6\u7248|aspect(?:\s+ratio)?)?[^0-9]{0,12}(21:9|16:9|9:16|5:4|4:5|5:3|3:5|4:3|3:4|3:2|2:3|2:1|1:1)/gi,
   )]
   const ratio = matches.at(-1)?.[1] || null
   if (ratio && DIMENSIONS_BY_RATIO[ratio]) return ratio
