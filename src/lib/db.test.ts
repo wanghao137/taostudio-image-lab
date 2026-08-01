@@ -7,6 +7,8 @@ import {
   clearAgentConversations,
   clearImages,
   clearTasks,
+  clearTasksAndAdvanceGeneration,
+  getTaskGeneration,
   getAllAgentConversations,
   getAllImageIds,
   getAllTasks,
@@ -162,5 +164,19 @@ describe('db — real IndexedDB transaction semantics (fake-indexeddb)', () => {
     const all = await getAllTasks()
     expect(all.length).toBe(1)
     expect(all[0].prompt).toBe('second')
+  })
+
+  it('rejects a stale tab write after another tab advances the task generation', async () => {
+    const oldGeneration = await getTaskGeneration()
+    await putTask(sampleTask({ id: 'before-clear', storageGeneration: oldGeneration }), oldGeneration)
+
+    const newGeneration = await clearTasksAndAdvanceGeneration()
+    expect(newGeneration).toBe(oldGeneration + 1)
+
+    await putTask(sampleTask({ id: 'resurrected', storageGeneration: oldGeneration }), oldGeneration)
+    expect(await getAllTasks()).toEqual([])
+
+    await putTask(sampleTask({ id: 'fresh', storageGeneration: newGeneration }), newGeneration)
+    expect((await getAllTasks()).map((task) => task.id)).toEqual(['fresh'])
   })
 })

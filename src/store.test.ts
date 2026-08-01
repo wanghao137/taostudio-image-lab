@@ -20,13 +20,21 @@ vi.mock('./lib/db', () => {
     updatedAt: number
   } | undefined
   let imageSeq = 0
+  let taskGeneration = 0
 
   return {
     CURRENT_THUMBNAIL_VERSION: 2,
     getAllTasks: async () => [...tasks.values()],
-    putTask: vi.fn(async (task: TaskRecord) => {
+    putTask: vi.fn(async (task: TaskRecord, expectedGeneration?: number) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== taskGeneration) return task.id
       tasks.set(task.id, task)
       return task.id
+    }),
+    getTaskGeneration: async () => taskGeneration,
+    clearTasksAndAdvanceGeneration: vi.fn(async () => {
+      taskGeneration += 1
+      tasks.clear()
+      return taskGeneration
     }),
     deleteTask: vi.fn(async (id: string) => {
       tasks.delete(id)
@@ -227,7 +235,7 @@ vi.mock('./lib/agentApi', async (importOriginal) => {
     })),
   }
 })
-import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getLocalAutoSaveDirectoryHandle, getStoredFreshImageThumbnail, putAgentConversation, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
+import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getLocalAutoSaveDirectoryHandle, getStoredFreshImageThumbnail, putAgentConversation, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
@@ -6127,6 +6135,7 @@ describe('clearData', () => {
 
   beforeEach(async () => {
     vi.mocked(clearTasks).mockClear()
+    vi.mocked(clearTasksAndAdvanceGeneration).mockClear()
     vi.mocked(clearAgentConversations).mockClear()
     vi.mocked(clearImages).mockClear()
     __resetTasksClearedForTests()
@@ -6249,7 +6258,7 @@ describe('clearData', () => {
 
   it('reports partial failure when task clear throws', async () => {
     // 让第一次 clearTasks 调用抛出异常，模拟 IndexedDB 事务失败
-    vi.mocked(clearTasks).mockRejectedValueOnce(new DOMException('QuotaExceededError', 'QuotaExceededError'))
+    vi.mocked(clearTasksAndAdvanceGeneration).mockRejectedValueOnce(new DOMException('QuotaExceededError', 'QuotaExceededError'))
 
     await clearData({ clearTasks: true, clearConfig: false })
 

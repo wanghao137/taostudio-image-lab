@@ -259,6 +259,8 @@ export interface ImageTaskLink {
 
 export interface TaskRecord {
   id: string
+  /** IndexedDB task generation. Writes from a generation cleared in another tab are rejected. */
+  storageGeneration?: number
   prompt: string
   params: TaskParams
   /** 生成时使用的 Provider 类型 */

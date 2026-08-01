@@ -1,13 +1,15 @@
 import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 4
+const DB_VERSION = 5
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
 const STORE_THUMBNAILS = 'thumbnails'
 const STORE_AGENT_CONVERSATIONS = 'agentConversations'
 const STORE_LOCAL_AUTO_SAVE = 'localAutoSave'
+const STORE_META = 'meta'
 const LOCAL_AUTO_SAVE_DIRECTORY_KEY = 'directory'
+const TASK_GENERATION_KEY = 'taskGeneration'
 const THUMBNAIL_MAX_SIZE = 720
 const THUMBNAIL_QUALITY = 0.9
 const THUMBNAIL_VERSION = 2
@@ -40,6 +42,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_LOCAL_AUTO_SAVE)) {
         db.createObjectStore(STORE_LOCAL_AUTO_SAVE, { keyPath: 'id' })
+      }
+      if (!db.objectStoreNames.contains(STORE_META)) {
+        db.createObjectStore(STORE_META, { keyPath: 'id' })
       }
     }
     req.onsuccess = () => resolve(req.result)
@@ -88,8 +93,58 @@ export function getAllTasks(): Promise<TaskRecord[]> {
   return dbTransaction(STORE_TASKS, 'readonly', (s) => s.getAll())
 }
 
-export function putTask(task: TaskRecord): Promise<IDBValidKey> {
-  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.put(task))
+export function putTask(task: TaskRecord, expectedGeneration?: number): Promise<IDBValidKey> {
+  if (expectedGeneration === undefined) {
+    return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.put(task))
+  }
+
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_TASKS, STORE_META], 'readwrite')
+        const taskStore = tx.objectStore(STORE_TASKS)
+        const metaStore = tx.objectStore(STORE_META)
+        const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+        generationRequest.onsuccess = () => {
+          const currentGeneration = Number(generationRequest.result?.value ?? 0)
+          if (currentGeneration !== expectedGeneration) return
+          taskStore.put(task)
+        }
+        generationRequest.onerror = () => reject(generationRequest.error)
+        tx.oncomplete = () => resolve(task.id)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
+export function getTaskGeneration(): Promise<number> {
+  return dbTransaction(STORE_META, 'readonly', (s) => s.get(TASK_GENERATION_KEY))
+    .then((record) => Number((record as { value?: number } | undefined)?.value ?? 0))
+}
+
+/** Atomically invalidates every existing task writer and clears all task rows. */
+export function clearTasksAndAdvanceGeneration(): Promise<number> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_TASKS, STORE_META], 'readwrite')
+        const taskStore = tx.objectStore(STORE_TASKS)
+        const metaStore = tx.objectStore(STORE_META)
+        const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+        let nextGeneration = 0
+
+        generationRequest.onsuccess = () => {
+          nextGeneration = Number(generationRequest.result?.value ?? 0) + 1
+          metaStore.put({ id: TASK_GENERATION_KEY, value: nextGeneration })
+          taskStore.clear()
+        }
+        generationRequest.onerror = () => reject(generationRequest.error)
+        tx.oncomplete = () => resolve(nextGeneration)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
 }
 
 export function deleteTask(id: string): Promise<undefined> {

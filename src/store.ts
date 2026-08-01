@@ -29,7 +29,8 @@ import {
   putTask as dbPutTask,
   deleteTask as dbDeleteTask,
   commitTaskDeletion,
-  clearTasks as dbClearTasks,
+  clearTasksAndAdvanceGeneration,
+  getTaskGeneration,
   getAllAgentConversations,
   putAgentConversation as dbPutAgentConversation,
   replaceAgentConversations,
@@ -112,6 +113,28 @@ let agentConversationMigrationPending = false
 // 异步写入（Agent 流式回调、executeTask、recovery timer 等）把任务重新写回内存/IndexedDB。
 // 仅在 initStore（页面加载）和新的用户生成（submitTask/submitAgentMessage/retryTask）时重置。
 let tasksCleared = false
+let taskStorageGeneration = 0
+const taskClearChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
+  ? new window.BroadcastChannel('taostudio-image-lab-task-clear')
+  : null
+
+taskClearChannel?.addEventListener('message', (event: MessageEvent) => {
+  if (event.data?.type !== 'tasks-cleared') return
+  tasksCleared = true
+  taskStorageGeneration = Math.max(taskStorageGeneration, Number(event.data.generation) || 0)
+  for (const timer of falRecoveryTimers.values()) clearTimeout(timer)
+  falRecoveryTimers.clear()
+  for (const timer of customRecoveryTimers.values()) clearTimeout(timer)
+  customRecoveryTimers.clear()
+  for (const timer of openAIWatchdogTimers.values()) clearTimeout(timer)
+  openAIWatchdogTimers.clear()
+  for (const controller of agentRoundControllers.values()) controller.abort()
+  agentRoundControllers.clear()
+  agentRecoveryContinuations.clear()
+  deletedActiveAgentTasks.clear()
+  clearImageCaches()
+  useStore.setState({ tasks: [], agentConversations: [], activeAgentConversationId: null })
+})
 const AGENT_STOPPED_MESSAGE = '已停止生成。'
 const AGENT_RECOVERY_PAUSE_ERROR = 'AgentRecoveryPauseError'
 const AGENT_CONVERSATION_TITLE_MAX_LENGTH = 28
@@ -1066,7 +1089,12 @@ function getPersistableTask(task: TaskRecord): TaskRecord {
 function putTask(task: TaskRecord): Promise<IDBValidKey> {
   // 数据已被用户清除：丢弃飞行中写入，避免把已清除的任务重新写回 IndexedDB。
   if (tasksCleared) return Promise.resolve(task.id)
-  return dbPutTask(getPersistableTask(task))
+  const generation = task.storageGeneration ?? taskStorageGeneration
+  return dbPutTask(getPersistableTask({ ...task, storageGeneration: generation }), generation)
+}
+
+async function refreshTaskStorageGeneration() {
+  taskStorageGeneration = await getTaskGeneration()
 }
 
 export function getCodexCliPromptKey(settings: AppSettings): string {
@@ -1459,6 +1487,8 @@ export async function initStore() {
   // 页面加载/刷新：重置数据清除标志，允许从（已清空后的）IndexedDB 正常加载，
   // 并允许后续生成正常写入。
   tasksCleared = false
+  await refreshTaskStorageGeneration()
+  const initTaskStorageGeneration = taskStorageGeneration
   const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
   const storedTasks = await getAllTasks()
   const storedAgentConversations = normalizeAgentConversations(await getAllAgentConversations())
@@ -1495,7 +1525,8 @@ export async function initStore() {
   if (shouldRewritePersistedLocalState) {
     useStore.setState({})
   }
-  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks, Date.now())
+  const generationTasks = storedTasks.map((task) => ({ ...task, storageGeneration: taskStorageGeneration }))
+  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(generationTasks, Date.now())
   const interruptedTaskIds = new Set(interruptedTasks.map((task) => task.id))
   const favoriteState = useStore.getState()
   const normalizedFavorites = normalizeLoadedFavoriteState(markedTasks.map(getPersistableTask), favoriteState.favoriteCollections, favoriteState.defaultFavoriteCollectionId)
@@ -1509,6 +1540,13 @@ export async function initStore() {
   await Promise.all(tasks
     .filter((task, index) => normalizedFavorites.changed || interruptedTaskIds.has(task.id) || task.rawResponsePayload !== markedTasks[index]?.rawResponsePayload)
     .map((task) => putTask(task)))
+  const latestTaskStorageGeneration = await getTaskGeneration()
+  if (latestTaskStorageGeneration !== initTaskStorageGeneration) {
+    taskStorageGeneration = latestTaskStorageGeneration
+    tasksCleared = true
+    useStore.setState({ tasks: [], agentConversations: [], activeAgentConversationId: null })
+    return
+  }
   useStore.getState().setTasks(tasks)
   showSupportPromptForExistingLocalData(tasks)
   for (const task of tasks) {
@@ -1664,6 +1702,7 @@ export async function initStore() {
 export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean } = {}) {
   // 用户发起新生成：重置数据清除标志，确保新任务能正常写入。
   tasksCleared = false
+  await refreshTaskStorageGeneration()
   const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, showToast, setConfirmDialog } =
     useStore.getState()
 
@@ -1760,6 +1799,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const taskId = genId()
   const task: TaskRecord = {
     id: taskId,
+    storageGeneration: taskStorageGeneration,
     prompt: prompt.trim(),
     params: taskParams,
     targetAspectPromptHint: createTargetAspectPromptHint(taskParams.size) ?? undefined,
@@ -2382,6 +2422,7 @@ async function continueRecoveredAgentRound(taskId: string) {
 export async function submitAgentMessage() {
   // 用户发起新 Agent 生成：重置数据清除标志。
   tasksCleared = false
+  await refreshTaskStorageGeneration()
   const state = useStore.getState()
   const { settings, prompt, inputImages, maskDraft, params, showToast } = state
   const normalizedSettings = normalizeSettings(settings)
@@ -2751,6 +2792,7 @@ async function executeAgentRound(
 
       const task: TaskRecord = {
         id: genId(),
+        storageGeneration: taskStorageGeneration,
         prompt: taskPrompt,
         params: options.taskParams ?? finalImageParams,
         targetAspectPromptHint: createTargetAspectPromptHint((options.taskParams ?? finalImageParams).size) ?? undefined,
@@ -4367,6 +4409,7 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 export async function retryTask(task: TaskRecord) {
   // 用户重试生成：重置数据清除标志。
   tasksCleared = false
+  await refreshTaskStorageGeneration()
   const { settings } = useStore.getState()
   const activeProfile = getActiveApiProfile(settings)
   const normalizedParams = normalizeParamsForSettings(task.params, settings, {
@@ -4383,6 +4426,7 @@ export async function retryTask(task: TaskRecord) {
   const taskId = genId()
   const newTask: TaskRecord = {
     id: taskId,
+    storageGeneration: taskStorageGeneration,
     prompt: task.prompt,
     params: taskParams,
     targetAspectPromptHint: createTargetAspectPromptHint(taskParams.size) ?? undefined,
@@ -4767,7 +4811,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   // 先取消所有恢复轮询 / 超时监控，防止清空期间或清空后有数据被写回 IndexedDB
   if (options.clearTasks) {
-    // 立即置位清除标志：关闭"clearData 的 dbClearTasks await 期间，飞行中的 executeTask
+    // 立即置位清除标志：关闭"clearData 的原子清除事务期间，飞行中的 executeTask
     // 读到尚未清空的内存而继续写回 IndexedDB"的竞态窗口。任何此后到达的 putTask 写入都成为空操作。
     tasksCleared = true
     for (const timer of falRecoveryTimers.values()) clearTimeout(timer)
@@ -4790,8 +4834,9 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   if (options.clearTasks) {
     try {
-      await dbClearTasks()
+      taskStorageGeneration = await clearTasksAndAdvanceGeneration()
       setTasks([])
+      taskClearChannel?.postMessage({ type: 'tasks-cleared', generation: taskStorageGeneration })
       const remaining = await getAllTasks()
       if (remaining.length > 0) {
         clearTasksFailed = true
