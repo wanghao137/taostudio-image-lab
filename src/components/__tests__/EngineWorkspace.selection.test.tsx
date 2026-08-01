@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type {
   ImageBatchV1,
   ImageJobListV1,
@@ -202,5 +202,38 @@ describe('EngineWorkspace inspector selection', () => {
       expect(screen.queryByText('Batch detail')).toBeNull()
       expect(screen.getByText('Job detail')).toBeTruthy()
     })
+  })
+
+  it('separates active, attention-required, and archived batches', async () => {
+    const runningBatch = {
+      ...batch,
+      id: 'batch-running',
+      name: 'Active batch',
+      state: 'running',
+      controlState: 'running',
+      acceptanceState: 'pending',
+      runner: { active: true, owner: 'runner-test', attempt: 1, heartbeatAt: batch.updatedAt, leaseExpiresAt: batch.updatedAt },
+      stats: { ...batch.stats, terminal: 0, active: 1, queued: 0, succeeded: 0, accepted: 0, acceptancePending: 1, qaPassed: 0, qaNotRun: 1 },
+    } satisfies ImageBatchV1
+    const interruptedBatch = {
+      ...batch,
+      id: 'batch-interrupted',
+      name: 'Interrupted batch',
+      state: 'running',
+      controlState: 'running',
+      acceptanceState: 'pending',
+      runner: { active: false, owner: 'expired-runner', attempt: 2, heartbeatAt: batch.updatedAt, leaseExpiresAt: batch.updatedAt },
+      stats: { ...batch.stats, terminal: 0, active: 1, succeeded: 0, accepted: 0, acceptancePending: 1, qaPassed: 0, qaNotRun: 1 },
+    } satisfies ImageBatchV1
+    apiMocks.listImageBatches.mockResolvedValue({ items: [batch, interruptedBatch, runningBatch] })
+
+    render(<EngineWorkspace />)
+
+    const activeSection = await screen.findByLabelText('执行中')
+    const attentionSection = screen.getByLabelText('待处理')
+    const historySection = screen.getByLabelText('历史记录')
+    expect(within(activeSection).getByText('Active batch')).toBeTruthy()
+    expect(within(attentionSection).getByText('Interrupted batch')).toBeTruthy()
+    expect(within(historySection).getByText('Selection test batch')).toBeTruthy()
   })
 })

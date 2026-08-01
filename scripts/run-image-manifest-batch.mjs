@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
@@ -218,8 +218,18 @@ function entryDirectory(entry) {
 const manifestReady = expandReadyEntries(manifest.entries)
   .filter((entry) => selectedIndex === null || entry.index === selectedIndex)
 for (const entry of manifestReady) entryDirectory(entry)
+const plannedScope = manifestReady.slice(0, limit)
+const plannedItemKeys = new Set(plannedScope.map((entry) => entry.itemKey))
+// A logical batch describes one exact manifest scope. runId is intentionally
+// absent: it identifies a runner attempt, not a new generation workload.
+const logicalBatchKey = `${batchKey}-${hash(JSON.stringify({
+  outputRoot,
+  selectedIndex,
+  manifest,
+  itemKeys: plannedScope.map((entry) => entry.itemKey),
+})).slice(0, 40)}`
 if (preflightOnly) {
-  console.log(`BATCH_PREFLIGHT_OK key=${batchKey} selected=${manifestReady.slice(0, limit).length}`)
+  console.log(`BATCH_PREFLIGHT_OK key=${batchKey} selected=${plannedScope.length}`)
   process.exit(0)
 }
 
@@ -350,13 +360,97 @@ const client = new Client({ name: clientName, version: '1.0.0' })
 await client.connect(transport)
 
 async function callMcp(name, args) {
-  return mcpPayload(await client.callTool(
+  const isLeaseOperation = name.startsWith('image_batch_runner_')
+  const timeout = isLeaseOperation ? 15_000 : 1_830_000
+  const pending = client.callTool(
     { name, arguments: args },
     undefined,
-    { timeout: 1_830_000, maxTotalTimeout: 1_830_000 },
-  ))
+    { timeout, maxTotalTimeout: timeout },
+  )
+  const result = runnerLease.batchId && !isLeaseOperation
+    ? await awaitWithRunnerLease(pending)
+    : await pending
+  return mcpPayload(result)
 }
 
+const RUNNER_LEASE_MS = 120_000
+const RUNNER_HEARTBEAT_MS = 30_000
+const runnerOwner = `${clientName}:${runId}:${process.pid}:${randomUUID()}`
+const runnerLease = {
+  batchId: null,
+  heartbeat: null,
+  heartbeatError: null,
+  renewing: false,
+  lossWaiters: new Set(),
+}
+
+async function awaitWithRunnerLease(pending) {
+  ensureRunnerLease()
+  let rejectLeaseLoss
+  const leaseLost = new Promise((_, reject) => { rejectLeaseLoss = reject })
+  runnerLease.lossWaiters.add(rejectLeaseLoss)
+  try {
+    return await Promise.race([pending, leaseLost])
+  } finally {
+    runnerLease.lossWaiters.delete(rejectLeaseLoss)
+  }
+}
+
+async function acquireRunner(batch) {
+  const claimed = await callMcp('image_batch_runner_acquire', {
+    batchId: batch.id,
+    owner: runnerOwner,
+    leaseMs: RUNNER_LEASE_MS,
+  })
+  if (!claimed?.id) throw new Error(`runner lease acquisition returned no batch for ${batch.id}`)
+  runnerLease.batchId = claimed.id
+  return claimed
+}
+
+async function renewRunnerLease() {
+  if (!runnerLease.batchId || runnerLease.renewing || runnerLease.heartbeatError) return
+  runnerLease.renewing = true
+  try {
+    await callMcp('image_batch_runner_heartbeat', {
+      batchId: runnerLease.batchId,
+      owner: runnerOwner,
+      leaseMs: RUNNER_LEASE_MS,
+    })
+  } catch (error) {
+    runnerLease.heartbeatError = error instanceof Error ? error : new Error(String(error))
+    runnerLease.heartbeatError.code ||= 'RUNNER_LEASE_LOST'
+    for (const rejectLeaseLoss of runnerLease.lossWaiters) rejectLeaseLoss(runnerLease.heartbeatError)
+    runnerLease.lossWaiters.clear()
+    console.error(`RUNNER_LEASE_LOST ${runnerLease.heartbeatError.message}`)
+  } finally {
+    runnerLease.renewing = false
+  }
+}
+
+function startRunnerHeartbeat() {
+  if (runnerLease.heartbeat) return
+  runnerLease.heartbeat = setInterval(() => { void renewRunnerLease() }, RUNNER_HEARTBEAT_MS)
+}
+
+function ensureRunnerLease() {
+  if (runnerLease.heartbeatError) throw runnerLease.heartbeatError
+}
+
+async function releaseRunner() {
+  if (runnerLease.heartbeat) clearInterval(runnerLease.heartbeat)
+  runnerLease.heartbeat = null
+  if (!runnerLease.batchId) return
+  try {
+    await callMcp('image_batch_runner_release', {
+      batchId: runnerLease.batchId,
+      owner: runnerOwner,
+    })
+  } finally {
+    runnerLease.batchId = null
+  }
+}
+
+try {
 let state = existsSync(statusPath)
   ? JSON.parse(await readFile(statusPath, 'utf8'))
   : { schemaVersion: 1, startedAt: new Date().toISOString(), items: {} }
@@ -554,15 +648,47 @@ state.summary = {
 }
 await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
 
-const ready = manifestReady
-  .filter((entry) => state.items[entry.itemKey]?.status !== 'succeeded')
-  .filter((entry) => !reconciliation.engineSucceeded.has(entry.itemKey))
-  .slice(0, limit)
 const completed = Object.values(state.items).filter((item) => item.status === 'succeeded')
-console.log(`QUEUE_READY selected=${ready.length} alreadySucceeded=${completed.length}`)
+const existingLookup = await callMcp('image_batch_find_by_logical_key', { logicalKey: logicalBatchKey })
+let activeBatch = existingLookup.batch || null
+if (!activeBatch && state.batchId) {
+  try {
+    const legacyBatch = await callMcp('image_batch_get', { batchId: state.batchId })
+    const legacyMatchesScope = legacyBatch?.items?.every((item) => plannedItemKeys.has(item.itemKey))
+    if (legacyBatch?.outputRoot === outputRoot && legacyMatchesScope) {
+      activeBatch = await callMcp('image_batch_adopt_logical_key', {
+        batchId: legacyBatch.id,
+        logicalKey: logicalBatchKey,
+      })
+      console.log(`BATCH_LEGACY_ADOPTED batch=${activeBatch.id}`)
+    } else if (legacyBatch) {
+      console.log(`BATCH_LEGACY_SKIPPED batch=${legacyBatch.id} reason=scope_mismatch`)
+    }
+  } catch (error) {
+    console.log(`BATCH_LEGACY_LOOKUP_IGNORED ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+const entryByItemKey = new Map(plannedScope.map((entry) => [entry.itemKey, entry]))
+const ready = activeBatch
+  ? activeBatch.items
+    .filter((item) => item.job.state !== 'succeeded')
+    .map((item) => entryByItemKey.get(item.itemKey))
+    .filter(Boolean)
+  : manifestReady
+    .filter((entry) => state.items[entry.itemKey]?.status !== 'succeeded')
+    .filter((entry) => !reconciliation.engineSucceeded.has(entry.itemKey))
+    .filter((entry) => plannedItemKeys.has(entry.itemKey))
+if (activeBatch) {
+  const missingManifestEntries = activeBatch.items.filter((item) => !entryByItemKey.has(item.itemKey))
+  if (missingManifestEntries.length) {
+    throw new Error(`logical batch ${activeBatch.id} no longer matches the manifest; ${missingManifestEntries.length} item(s) are missing`)
+  }
+}
+console.log(`QUEUE_READY mode=${activeBatch ? 'resume' : 'create'} selected=${ready.length} alreadySucceeded=${completed.length}`)
 
 const preparedReferences = new Map()
 const queuedEntries = []
+let pauseReason = null
 for (const entry of ready) {
   const directory = entryDirectory(entry)
   await mkdir(directory, { recursive: true })
@@ -592,42 +718,57 @@ for (const entry of ready) {
   }
 }
 
-let activeBatch = null
 if (queuedEntries.length) {
-  const batchResult = await callMcp('image_batch_create', {
-    idempotencyKey: `${batchKey}-${runId}`,
-    name: `${batchName} ${runId}`,
-    outputRoot,
-    items: queuedEntries.map((entry) => ({
-      itemKey: entry.itemKey,
-      copies: 1,
-      outputPath: entryDirectory(entry),
-      prompt: initialExecutionPrompt(entry),
-      ...(entry.generation.referenceDependent
-        ? { sourceAssetId: preparedReferences.get(entry.index).assetId }
-        : {}),
-      ratio: entry.generation.ratio,
-      dimensions: entry.generation.dimensions,
-      provider: 'configured',
-      model: routes[0].model,
-      apiMode: routes[0].apiMode,
-      fallback: {
+  if (!activeBatch) {
+    const batchResult = await callMcp('image_batch_create', {
+      idempotencyKey: logicalBatchKey,
+      logicalKey: logicalBatchKey,
+      name: batchName,
+      outputRoot,
+      items: queuedEntries.map((entry) => ({
+        itemKey: entry.itemKey,
+        copies: 1,
+        outputPath: entryDirectory(entry),
+        prompt: initialExecutionPrompt(entry),
+        ...(entry.generation.referenceDependent
+          ? { sourceAssetId: preparedReferences.get(entry.index).assetId }
+          : {}),
+        ratio: entry.generation.ratio,
+        dimensions: entry.generation.dimensions,
         provider: 'configured',
-        model: routes[1].model,
-        apiMode: routes[1].apiMode,
-      },
-      enhancement: 'lanczos3',
-      contentClass: entry.generation.contentClass,
-      maxAttempts: 3,
-    })),
-  })
-  activeBatch = batchResult.batch
+        model: routes[0].model,
+        apiMode: routes[0].apiMode,
+        fallback: {
+          provider: 'configured',
+          model: routes[1].model,
+          apiMode: routes[1].apiMode,
+        },
+        enhancement: 'lanczos3',
+        contentClass: entry.generation.contentClass,
+        maxAttempts: 3,
+      })),
+    })
+    activeBatch = batchResult.batch
+    console.log(`BATCH_${batchResult.replayed ? 'REATTACHED' : 'CREATED'} batch=${activeBatch.id} items=${queuedEntries.length}`)
+  }
+  activeBatch = await acquireRunner(activeBatch)
+  startRunnerHeartbeat()
+  if (activeBatch.controlState === 'paused' && activeBatch.state !== 'completed') {
+    if (['runner_disconnected', 'cleanup_restart'].includes(activeBatch.pauseReason)) {
+      activeBatch = await callMcp('image_batch_resume', { batchId: activeBatch.id })
+      console.log(`BATCH_RESUMED batch=${activeBatch.id} reason=${activeBatch.pauseReason || 'runner_recovery'}`)
+    } else {
+      pauseReason = `batch ${activeBatch.id} remains paused for ${activeBatch.pauseReason || 'manual'}`
+      queuedEntries.length = 0
+      console.log(`BATCH_PRESERVED ${pauseReason}`)
+    }
+  }
   state.batchId = activeBatch.id
+  state.logicalBatchKey = logicalBatchKey
+  state.runner = { owner: runnerOwner, attempt: activeBatch.runner?.attempt || null, attachedAt: new Date().toISOString() }
   await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
-  console.log(`BATCH_CREATED batch=${activeBatch.id} items=${queuedEntries.length}`)
 }
 
-let pauseReason = null
 for (const entry of queuedEntries) {
   const directory = entryDirectory(entry)
   const stateKey = entry.itemKey
@@ -650,6 +791,7 @@ for (const entry of queuedEntries) {
 
   const revisions = []
   try {
+    ensureRunnerLease()
     const reference = entry.generation.referenceDependent
       ? preparedReferences.get(entry.index)
       : null
@@ -878,7 +1020,8 @@ for (const entry of queuedEntries) {
       console.log(`SUCCEEDED index=${entry.index} route=${accepted.route.name} final=${entry.generation.dimensions}`)
     }
   } catch (error) {
-    if (activeBatch?.id) {
+    const runnerLeaseLost = error?.code === 'RUNNER_LEASE_LOST'
+    if (activeBatch?.id && !runnerLeaseLost) {
       try {
         activeBatch = await callMcp('image_batch_item_review', {
           batchId: activeBatch.id,
@@ -895,7 +1038,7 @@ for (const entry of queuedEntries) {
     }
     state.items[stateKey] = {
       ...state.items[stateKey],
-      status: 'batch_error',
+      status: runnerLeaseLost ? 'interrupted' : 'batch_error',
       completedAt: new Date().toISOString(),
       revisions,
       error: {
@@ -906,6 +1049,7 @@ for (const entry of queuedEntries) {
     if (error?.code === 'PROVIDER_UNAVAILABLE') pauseReason = state.items[stateKey].error.message
     await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[stateKey], null, 2)}\n`, 'utf8')
     console.log(`ERROR index=${entry.index} item=${entry.itemKey} message=${state.items[stateKey].error.message}`)
+    if (runnerLeaseLost) throw error
   }
 
   state.updatedAt = new Date().toISOString()
@@ -924,5 +1068,13 @@ for (const entry of queuedEntries) {
   }
 }
 
-await client.close()
 if (!pauseReason) console.log(`BATCH_DONE ${JSON.stringify(state.summary || {})}`)
+} finally {
+  try {
+    await releaseRunner()
+  } catch (error) {
+    console.error(`RUNNER_RELEASE_FAILED ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    await client.close()
+  }
+}

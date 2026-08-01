@@ -181,8 +181,17 @@ export type ImageBatchAcceptanceStatusV1 = 'pending' | 'accepted' | 'needs_revie
 export interface ImageBatchV1 {
   id: string
   name?: string | null
+  logicalKey?: string | null
   state: 'running' | 'paused' | 'completed'
   controlState: 'running' | 'paused'
+  pauseReason?: string | null
+  runner?: {
+    active: boolean
+    owner: string | null
+    attempt: number
+    heartbeatAt: string | null
+    leaseExpiresAt: string | null
+  }
   automation: ImageBatchAutomationV1
   acceptanceState: 'pending' | 'accepted' | 'needs_review' | 'rejected'
   stats: {
@@ -241,6 +250,7 @@ export interface ImageBatchAutomationV1 {
 
 export interface ImageBatchCreateRequestV1 {
   idempotencyKey: string
+  logicalKey?: string
   name?: string
   automation?: ImageBatchAutomationV1
   items: Array<{ itemKey: string; copies?: number; request: ImageJobRequestV1 }>

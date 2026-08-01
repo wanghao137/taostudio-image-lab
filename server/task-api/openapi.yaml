@@ -162,6 +162,95 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ImageBatch' }
         '404': { description: Batch not found }
+  /v1/image-batches/by-logical-key/{logicalKey}:
+    get:
+      operationId: getImageBatchByLogicalKey
+      description: Resolve the durable batch for one manifest scope before starting or resuming a runner.
+      parameters:
+        - { name: logicalKey, in: path, required: true, schema: { type: string, minLength: 8, maxLength: 200 } }
+      responses:
+        '200':
+          description: Durable logical batch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { description: Logical batch not found }
+  /v1/image-batches/{id}/runner/acquire:
+    post:
+      operationId: acquireImageBatchRunner
+      description: Atomically acquire the exclusive runner lease for one logical batch.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunnerLeaseRequest' }
+      responses:
+        '200':
+          description: Runner lease acquired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Another runner holds an unexpired lease }
+        '404': { description: Batch not found }
+  /v1/image-batches/{id}/runner/heartbeat:
+    post:
+      operationId: heartbeatImageBatchRunner
+      description: Renew a runner lease held by the supplied owner.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunnerLeaseRequest' }
+      responses:
+        '200':
+          description: Runner lease renewed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Lease expired or belongs to another runner }
+        '404': { description: Batch not found }
+  /v1/image-batches/{id}/runner/release:
+    post:
+      operationId: releaseImageBatchRunner
+      description: Release a runner lease after a normal exit.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunnerReleaseRequest' }
+      responses:
+        '200':
+          description: Runner lease released
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Lease belongs to another runner }
+        '404': { description: Batch not found }
+  /v1/image-batches/{id}/logical-key:
+    post:
+      operationId: adoptImageBatchLogicalKey
+      description: Attach a stable logical key to a legacy persisted batch before restart recovery.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LogicalKeyRequest' }
+      responses:
+        '200':
+          description: Batch now has the supplied logical key
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '409': { description: Batch or logical key belongs to another logical scope }
+        '404': { description: Batch not found }
   /v1/image-batches/{id}/pause:
     post:
       operationId: pauseImageBatch
@@ -363,6 +452,7 @@ components:
       required: [idempotencyKey, items]
       properties:
         idempotencyKey: { type: string, minLength: 8, maxLength: 200 }
+        logicalKey: { type: string, minLength: 8, maxLength: 200, description: Stable identity for one logical manifest scope across runner attempts }
         name: { type: string, minLength: 1, maxLength: 200 }
         automation: { $ref: '#/components/schemas/ImageBatchAutomation' }
         items:
@@ -396,8 +486,19 @@ components:
       properties:
         id: { type: string }
         name: { type: [string, 'null'] }
+        logicalKey: { type: [string, 'null'] }
         state: { type: string, enum: [running, paused, completed] }
         controlState: { type: string, enum: [running, paused] }
+        pauseReason: { type: [string, 'null'] }
+        runner:
+          type: object
+          required: [active, owner, attempt, heartbeatAt, leaseExpiresAt]
+          properties:
+            active: { type: boolean }
+            owner: { type: [string, 'null'] }
+            attempt: { type: integer, minimum: 0 }
+            heartbeatAt: { type: [string, 'null'], format: date-time }
+            leaseExpiresAt: { type: [string, 'null'], format: date-time }
         automation: { $ref: '#/components/schemas/ImageBatchAutomation' }
         acceptanceState: { type: string, enum: [pending, accepted, needs_review, rejected] }
         stats:
@@ -460,6 +561,22 @@ components:
               createdAt: { type: string, format: date-time }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+    RunnerLeaseRequest:
+      type: object
+      required: [owner, leaseMs]
+      properties:
+        owner: { type: string, minLength: 1, maxLength: 200 }
+        leaseMs: { type: integer, minimum: 10000, maximum: 300000 }
+    RunnerReleaseRequest:
+      type: object
+      required: [owner]
+      properties:
+        owner: { type: string, minLength: 1, maxLength: 200 }
+    LogicalKeyRequest:
+      type: object
+      required: [logicalKey]
+      properties:
+        logicalKey: { type: string, minLength: 8, maxLength: 200 }
     ImageBatchItemReview:
       type: object
       required: [qaStatus, acceptanceStatus]

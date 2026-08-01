@@ -42,10 +42,13 @@ import {
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 const ACTIVE_STATES = ['validating', 'generating', 'source_ready', 'enhancing', 'finalizing']
+const TERMINAL_JOB_STATES = ['succeeded', 'failed', 'cancelled']
 const UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 const DEFAULT_JOB_LIST_LIMIT = 30
 const MAX_JOB_LIST_LIMIT = 100
 const MAX_BATCH_ITEMS = 500
+const MIN_RUNNER_LEASE_MS = 10_000
+const MAX_RUNNER_LEASE_MS = 5 * 60_000
 const ACCEPTED_ENHANCEMENTS = ['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']
 const QA_STATUSES = ['not_run', 'passed', 'failed', 'needs_review']
 const ACCEPTANCE_STATUSES = ['pending', 'accepted', 'needs_review', 'rejected']
@@ -82,6 +85,9 @@ function validateBatchRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['batch must be an object'] }
   if (typeof value.idempotencyKey !== 'string' || value.idempotencyKey.length < 8 || value.idempotencyKey.length > 200) {
     errors.push('idempotencyKey must contain 8 to 200 characters')
+  }
+  if (value.logicalKey !== undefined && (typeof value.logicalKey !== 'string' || !value.logicalKey.trim() || value.logicalKey.length < 8 || value.logicalKey.length > 200)) {
+    errors.push('logicalKey must contain 8 to 200 characters when provided')
   }
   if (value.name !== undefined && (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200)) {
     errors.push('name must be a non-empty string up to 200 characters')
@@ -135,6 +141,23 @@ function validateBatchItemReview(value) {
     errors.push('detail must be an object')
   }
   return { valid: errors.length === 0, errors }
+}
+function validateRunnerLeaseRequest(value, requireLeaseMs = true) {
+  const errors = []
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['runner lease request must be an object'] }
+  if (typeof value.owner !== 'string' || !value.owner.trim() || value.owner.length > 200) {
+    errors.push('owner must be a non-empty string up to 200 characters')
+  }
+  if (requireLeaseMs && (!Number.isInteger(value.leaseMs) || value.leaseMs < MIN_RUNNER_LEASE_MS || value.leaseMs > MAX_RUNNER_LEASE_MS)) {
+    errors.push(`leaseMs must be an integer from ${MIN_RUNNER_LEASE_MS} to ${MAX_RUNNER_LEASE_MS}`)
+  }
+  return { valid: errors.length === 0, errors }
+}
+function validateLogicalKeyRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.logicalKey !== 'string' || !value.logicalKey.trim() || value.logicalKey.length < 8 || value.logicalKey.length > 200) {
+    return { valid: false, errors: ['logicalKey must contain 8 to 200 characters'] }
+  }
+  return { valid: true, errors: [] }
 }
 function taskApiCapabilities(providerConfig = {}) {
   return {
@@ -461,10 +484,15 @@ export class TaskRepository {
       CREATE TABLE IF NOT EXISTS batches (
         id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
+        logical_key TEXT,
         request_hash TEXT NOT NULL,
         name TEXT,
         automation_json TEXT,
         control_state TEXT NOT NULL DEFAULT 'running',
+        runner_owner TEXT,
+        runner_lease_expires_at INTEGER NOT NULL DEFAULT 0,
+        runner_heartbeat_at TEXT,
+        runner_attempt INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -533,6 +561,12 @@ export class TaskRepository {
     if (!batchColumns.has('automation_json')) this.db.exec('ALTER TABLE batches ADD COLUMN automation_json TEXT')
     if (!batchColumns.has('pause_reason')) this.db.exec('ALTER TABLE batches ADD COLUMN pause_reason TEXT')
     if (!batchColumns.has('output_root')) this.db.exec('ALTER TABLE batches ADD COLUMN output_root TEXT')
+    if (!batchColumns.has('logical_key')) this.db.exec('ALTER TABLE batches ADD COLUMN logical_key TEXT')
+    if (!batchColumns.has('runner_owner')) this.db.exec('ALTER TABLE batches ADD COLUMN runner_owner TEXT')
+    if (!batchColumns.has('runner_lease_expires_at')) this.db.exec('ALTER TABLE batches ADD COLUMN runner_lease_expires_at INTEGER NOT NULL DEFAULT 0')
+    if (!batchColumns.has('runner_heartbeat_at')) this.db.exec('ALTER TABLE batches ADD COLUMN runner_heartbeat_at TEXT')
+    if (!batchColumns.has('runner_attempt')) this.db.exec('ALTER TABLE batches ADD COLUMN runner_attempt INTEGER NOT NULL DEFAULT 0')
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS batches_logical_key_unique ON batches(logical_key) WHERE logical_key IS NOT NULL')
     const batchItemColumns = new Set(this.db.prepare('PRAGMA table_info(batch_items)').all().map((column) => column.name))
     if (!batchItemColumns.has('source_item_key')) this.db.exec("ALTER TABLE batch_items ADD COLUMN source_item_key TEXT NOT NULL DEFAULT ''")
     if (!batchItemColumns.has('output_index')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_index INTEGER NOT NULL DEFAULT 1')
@@ -699,6 +733,11 @@ export class TaskRepository {
   createOrGetBatch(request) {
     const requestJson = stableJson(request)
     const requestHash = sha256(requestJson)
+    const logicalKey = request.logicalKey?.trim() || null
+    if (logicalKey) {
+      const existingLogical = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
+      if (existingLogical) return { batch: this.getBatch(existingLogical.id), created: false, logicalReused: true }
+    }
     const existing = this.db.prepare('SELECT * FROM batches WHERE idempotency_key=?').get(request.idempotencyKey)
     if (existing) {
       if (existing.request_hash !== requestHash) {
@@ -714,10 +753,30 @@ export class TaskRepository {
     const timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare('INSERT INTO batches (id,idempotency_key,request_hash,name,automation_json,output_root,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      // A second runner can reach this point after the optimistic read above. The
+      // immediate transaction makes the logical-key check and first claim atomic.
+      if (logicalKey) {
+        const existingLogical = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
+        if (existingLogical) {
+          this.db.exec('COMMIT')
+          return { batch: this.getBatch(existingLogical.id), created: false, logicalReused: true }
+        }
+      }
+      for (const item of request.items) {
+        const sourceItemKey = item.sourceItemKey || item.itemKey
+        const claimed = this.activeSourceItemClaim(sourceItemKey)
+        if (claimed) {
+          throw Object.assign(new Error(`source item ${sourceItemKey} is already active in batch ${claimed.batchName || claimed.batchId}`), {
+            statusCode: 409,
+            code: 'SOURCE_ITEM_ALREADY_CLAIMED',
+          })
+        }
+      }
+      this.db.prepare('INSERT INTO batches (id,idempotency_key,logical_key,request_hash,name,automation_json,output_root,control_state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(
           id,
           request.idempotencyKey,
+          logicalKey,
           requestHash,
           request.name?.trim() || null,
           request.automation ? JSON.stringify(request.automation) : null,
@@ -762,6 +821,165 @@ export class TaskRepository {
       throw error
     }
     return { batch: this.getBatch(id), created: true }
+  }
+
+  getBatchByLogicalKey(logicalKey) {
+    const row = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
+    return row ? this.getBatch(row.id) : null
+  }
+
+  adoptBatchLogicalKey(id, logicalKey) {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT logical_key FROM batches WHERE id=?').get(id)
+      if (!row) {
+        this.db.exec('COMMIT')
+        return null
+      }
+      if (row.logical_key && row.logical_key !== logicalKey) {
+        throw Object.assign(new Error('batch already belongs to a different logical key'), {
+          statusCode: 409,
+          code: 'BATCH_LOGICAL_KEY_CONFLICT',
+        })
+      }
+      const claimed = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
+      if (claimed && claimed.id !== id) {
+        throw Object.assign(new Error('logical key already belongs to another batch'), {
+          statusCode: 409,
+          code: 'BATCH_LOGICAL_KEY_CONFLICT',
+        })
+      }
+      if (!row.logical_key) {
+        this.db.prepare('UPDATE batches SET logical_key=?,updated_at=? WHERE id=?').run(logicalKey, now(), id)
+        this.recordBatchEvent(id, 'logical_key_adopted', { logicalKey })
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.getBatch(id)
+  }
+
+  activeSourceItemClaim(sourceItemKey, excludeBatchId = null) {
+    const terminalPlaceholders = TERMINAL_JOB_STATES.map(() => '?').join(',')
+    const exclusion = excludeBatchId ? 'AND bi.batch_id<>?' : ''
+    const parameters = [sourceItemKey, ...TERMINAL_JOB_STATES]
+    if (excludeBatchId) parameters.push(excludeBatchId)
+    const row = this.db.prepare(`
+      SELECT bi.batch_id AS batch_id,b.name AS batch_name,j.id AS job_id,j.state AS job_state
+      FROM batch_items bi
+      JOIN batches b ON b.id=bi.batch_id
+      JOIN jobs j ON j.id=bi.job_id
+      WHERE bi.source_item_key=?
+        AND j.state NOT IN (${terminalPlaceholders})
+        ${exclusion}
+      ORDER BY j.created_at DESC
+      LIMIT 1
+    `).get(...parameters)
+    return row ? {
+      batchId: row.batch_id,
+      batchName: row.batch_name,
+      jobId: row.job_id,
+      jobState: row.job_state,
+    } : null
+  }
+
+  acquireBatchRunner(id, owner, leaseMs) {
+    const timestamp = now()
+    const nowMs = Date.now()
+    const expiresAtMs = nowMs + leaseMs
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT * FROM batches WHERE id=?').get(id)
+      if (!row) {
+        this.db.exec('COMMIT')
+        return null
+      }
+      const currentExpiry = Number(row.runner_lease_expires_at || 0)
+      if (row.runner_owner && row.runner_owner !== owner && currentExpiry > nowMs) {
+        throw Object.assign(new Error(`batch runner lease is held until ${new Date(currentExpiry).toISOString()}`), {
+          statusCode: 409,
+          code: 'RUNNER_LEASE_HELD',
+        })
+      }
+      const nextAttempt = Number(row.runner_attempt || 0) + (row.runner_owner === owner && currentExpiry > nowMs ? 0 : 1)
+      this.db.prepare(`
+        UPDATE batches
+        SET runner_owner=?,runner_lease_expires_at=?,runner_heartbeat_at=?,runner_attempt=?,updated_at=?
+        WHERE id=?
+      `).run(owner, expiresAtMs, timestamp, nextAttempt, timestamp, id)
+      this.recordBatchEvent(id, 'runner_acquired', {
+        owner,
+        attempt: nextAttempt,
+        leaseExpiresAt: new Date(expiresAtMs).toISOString(),
+      })
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.getBatch(id)
+  }
+
+  heartbeatBatchRunner(id, owner, leaseMs) {
+    const timestamp = now()
+    const nowMs = Date.now()
+    const expiresAtMs = nowMs + leaseMs
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT runner_owner,runner_lease_expires_at FROM batches WHERE id=?').get(id)
+      if (!row) {
+        this.db.exec('COMMIT')
+        return null
+      }
+      if (row.runner_owner !== owner) {
+        throw Object.assign(new Error('batch runner lease belongs to another runner'), {
+          statusCode: 409,
+          code: 'RUNNER_LEASE_HELD',
+        })
+      }
+      if (Number(row.runner_lease_expires_at || 0) <= nowMs) {
+        throw Object.assign(new Error('batch runner lease has expired'), {
+          statusCode: 409,
+          code: 'RUNNER_LEASE_EXPIRED',
+        })
+      }
+      this.db.prepare('UPDATE batches SET runner_lease_expires_at=?,runner_heartbeat_at=?,updated_at=? WHERE id=?')
+        .run(expiresAtMs, timestamp, timestamp, id)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.getBatch(id)
+  }
+
+  releaseBatchRunner(id, owner) {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare('SELECT runner_owner FROM batches WHERE id=?').get(id)
+      if (!row) {
+        this.db.exec('COMMIT')
+        return null
+      }
+      if (row.runner_owner && row.runner_owner !== owner) {
+        throw Object.assign(new Error('batch runner lease belongs to another runner'), {
+          statusCode: 409,
+          code: 'RUNNER_LEASE_HELD',
+        })
+      }
+      if (row.runner_owner === owner) {
+        this.db.prepare('UPDATE batches SET runner_owner=NULL,runner_lease_expires_at=0,runner_heartbeat_at=NULL,updated_at=? WHERE id=?')
+          .run(now(), id)
+        this.recordBatchEvent(id, 'runner_released', { owner })
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.getBatch(id)
   }
 
   listBatches(limit = DEFAULT_JOB_LIST_LIMIT) {
@@ -853,13 +1071,23 @@ export class TaskRepository {
       (latest, item) => item.job.updatedAt > latest ? item.job.updatedAt : latest,
       row.updated_at,
     )
+    const runnerLeaseExpiresAt = Number(row.runner_lease_expires_at || 0)
     return {
       id: row.id,
       name: row.name,
+      logicalKey: row.logical_key || null,
       automation,
       outputRoot: row.output_root || null,
       state,
       controlState: row.control_state,
+      pauseReason: row.pause_reason || null,
+      runner: {
+        active: Boolean(row.runner_owner) && runnerLeaseExpiresAt > Date.now(),
+        owner: row.runner_owner || null,
+        attempt: Number(row.runner_attempt || 0),
+        heartbeatAt: row.runner_heartbeat_at || null,
+        leaseExpiresAt: runnerLeaseExpiresAt ? new Date(runnerLeaseExpiresAt).toISOString() : null,
+      },
       acceptanceState: acceptanceCounts.pending > 0
         ? 'pending'
         : acceptanceCounts.needs_review > 0
@@ -2002,6 +2230,7 @@ export class BatchResumeWatchdog {
     this.maxAttempts = options.maxAttempts ?? 5
     this.running = false
     this.loops = []
+    this.wakePoll = null
   }
 
   start() {
@@ -2012,7 +2241,22 @@ export class BatchResumeWatchdog {
 
   async stop() {
     this.running = false
+    this.wakePoll?.()
     await Promise.allSettled(this.loops)
+  }
+
+  async waitForNextScan() {
+    await new Promise((resolvePromise) => {
+      const timeout = setTimeout(() => {
+        this.wakePoll = null
+        resolvePromise()
+      }, this.pollIntervalMs)
+      this.wakePoll = () => {
+        clearTimeout(timeout)
+        this.wakePoll = null
+        resolvePromise()
+      }
+    })
   }
 
   async loop() {
@@ -2020,7 +2264,8 @@ export class BatchResumeWatchdog {
       try {
         await this.scan()
       } catch { /* swallow; next tick retries */ }
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, this.pollIntervalMs))
+      if (!this.running) break
+      await this.waitForNextScan()
     }
   }
 
@@ -2151,9 +2396,37 @@ export async function createTaskApi(options = {}) {
         const limit = parseJobListLimit(url.searchParams.get('limit'))
         return void json(response, 200, { items: repository.listBatches(limit) })
       }
+      const batchByLogicalKeyMatch = url.pathname.match(/^\/v1\/image-batches\/by-logical-key\/([^/]+)$/)
+      if (request.method === 'GET' && batchByLogicalKeyMatch) {
+        const batch = repository.getBatchByLogicalKey(decodeURIComponent(batchByLogicalKeyMatch[1]))
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
       const batchMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)$/)
       if (request.method === 'GET' && batchMatch) {
         const batch = repository.getBatch(batchMatch[1])
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchRunnerMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/runner\/(acquire|heartbeat|release)$/)
+      if (request.method === 'POST' && batchRunnerMatch) {
+        const action = batchRunnerMatch[2]
+        const body = JSON.parse((await readBody(request, 4096)).toString('utf8'))
+        const validation = validateRunnerLeaseRequest(body, action !== 'release')
+        if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_RUNNER_LEASE', details: validation.errors } })
+        const batchId = batchRunnerMatch[1]
+        const owner = body.owner.trim()
+        const batch = action === 'acquire'
+          ? repository.acquireBatchRunner(batchId, owner, body.leaseMs)
+          : action === 'heartbeat'
+            ? repository.heartbeatBatchRunner(batchId, owner, body.leaseMs)
+            : repository.releaseBatchRunner(batchId, owner)
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchLogicalKeyMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/logical-key$/)
+      if (request.method === 'POST' && batchLogicalKeyMatch) {
+        const body = JSON.parse((await readBody(request, 4096)).toString('utf8'))
+        const validation = validateLogicalKeyRequest(body)
+        if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_LOGICAL_KEY', details: validation.errors } })
+        const batch = repository.adoptBatchLogicalKey(batchLogicalKeyMatch[1], body.logicalKey.trim())
         return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
       }
       const batchControlMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/(pause|resume)$/)

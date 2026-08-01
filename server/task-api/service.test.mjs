@@ -299,6 +299,154 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect((await conflict.json()).error.code).toBe('BATCH_IDEMPOTENCY_CONFLICT')
   })
 
+  it('reuses one durable logical batch across runner restarts', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const firstPayload = {
+      idempotencyKey: 'logical-batch-attempt-001',
+      logicalKey: 'manifest-scope-8de4f0a1',
+      name: 'Manifest full run',
+      items: [{ itemKey: 'one', request: request({ idempotencyKey: 'logical-batch-job-001' }) }],
+    }
+    const firstResponse = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(firstPayload),
+    })
+    const first = await firstResponse.json()
+    expect(firstResponse.status).toBe(201)
+    expect(first.logicalKey).toBe(firstPayload.logicalKey)
+
+    const resumedResponse = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        ...firstPayload,
+        idempotencyKey: 'logical-batch-attempt-002',
+        name: 'Name from a later runner must not create another batch',
+        items: [{ itemKey: 'one', request: request({ idempotencyKey: 'logical-batch-job-002' }) }],
+      }),
+    })
+    const resumed = await resumedResponse.json()
+    expect(resumedResponse.status).toBe(200)
+    expect(resumed.id).toBe(first.id)
+    expect(resumed.items).toHaveLength(1)
+
+    const lookup = await fetch(`${url}/v1/image-batches/by-logical-key/${encodeURIComponent(firstPayload.logicalKey)}`, { headers: headers() })
+    expect(lookup.status).toBe(200)
+    expect((await lookup.json()).id).toBe(first.id)
+  })
+
+  it('adopts a persisted legacy batch id before creating a logical replacement', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'legacy-logical-adoption-001',
+        items: [{ itemKey: 'legacy-item', request: request({ idempotencyKey: 'legacy-logical-adoption-job-001' }) }],
+      }),
+    }).then((response) => response.json())
+
+    const adopted = await fetch(`${url}/v1/image-batches/${created.id}/logical-key`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ logicalKey: 'legacy-manifest-scope-8de4f0a1' }),
+    })
+    expect(adopted.status).toBe(200)
+    const adoptedBatch = await adopted.json()
+    expect(adoptedBatch.logicalKey).toBe('legacy-manifest-scope-8de4f0a1')
+    expect(adoptedBatch.events.at(-1)).toMatchObject({ event: 'logical_key_adopted' })
+  })
+
+  it('prevents a second active batch from claiming the same source item', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const firstResponse = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'source-claim-first-001',
+        items: [{ itemKey: 'shared-source', request: request({ idempotencyKey: 'source-claim-first-job-001' }) }],
+      }),
+    })
+    const first = await firstResponse.json()
+    expect(firstResponse.status).toBe(201)
+
+    const conflicting = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'source-claim-second-001',
+        items: [{ itemKey: 'shared-source', request: request({ idempotencyKey: 'source-claim-second-job-001' }) }],
+      }),
+    })
+    expect(conflicting.status).toBe(409)
+    expect((await conflicting.json()).error.code).toBe('SOURCE_ITEM_ALREADY_CLAIMED')
+
+    await fetch(`${url}/v1/image-jobs/${first.items[0].job.id}/cancel`, { method: 'POST', headers: headers() })
+    const terminalReuse = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'source-claim-third-001',
+        items: [{ itemKey: 'shared-source', request: request({ idempotencyKey: 'source-claim-third-job-001' }) }],
+      }),
+    })
+    expect(terminalReuse.status).toBe(201)
+  })
+
+  it('enforces an exclusive runner lease and records recovery attempts', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'runner-lease-batch-001',
+        items: [{ itemKey: 'leased-item', request: request({ idempotencyKey: 'runner-lease-job-001' }) }],
+      }),
+    }).then((response) => response.json())
+
+    const acquired = await fetch(`${url}/v1/image-batches/${created.id}/runner/acquire`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ owner: 'runner-a', leaseMs: 10_000 }),
+    })
+    const acquiredBatch = await acquired.json()
+    expect(acquired.status).toBe(200)
+    expect(acquiredBatch.runner).toMatchObject({ active: true, owner: 'runner-a', attempt: 1 })
+
+    const blocked = await fetch(`${url}/v1/image-batches/${created.id}/runner/acquire`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ owner: 'runner-b', leaseMs: 10_000 }),
+    })
+    expect(blocked.status).toBe(409)
+    expect((await blocked.json()).error.code).toBe('RUNNER_LEASE_HELD')
+
+    const renewed = await fetch(`${url}/v1/image-batches/${created.id}/runner/heartbeat`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ owner: 'runner-a', leaseMs: 10_000 }),
+    })
+    expect(renewed.status).toBe(200)
+
+    const released = await fetch(`${url}/v1/image-batches/${created.id}/runner/release`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ owner: 'runner-a' }),
+    })
+    expect(released.status).toBe(200)
+    expect((await released.json()).runner.active).toBe(false)
+
+    const recovered = await fetch(`${url}/v1/image-batches/${created.id}/runner/acquire`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ owner: 'runner-b', leaseMs: 10_000 }),
+    })
+    const recoveredBatch = await recovered.json()
+    expect(recovered.status).toBe(200)
+    expect(recoveredBatch.runner).toMatchObject({ active: true, owner: 'runner-b', attempt: 2 })
+  })
+
   it('pauses queued batch jobs without interrupting work and resumes claiming', async () => {
     const { url, api } = await start({ concurrency: 0, batchWatchdogEnabled: false })
     const payload = {

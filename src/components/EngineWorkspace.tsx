@@ -107,6 +107,87 @@ function StatusBadge({ state }: { state: ImageJobStateV1 }) {
   )
 }
 
+function batchStateLabel(batch: ImageBatchV1) {
+  if (batch.state === 'running') {
+    if (batch.runner?.active) return '接管中'
+    return (batch.runner?.attempt || 0) > 0 ? '等待接管' : '执行中'
+  }
+  if (batch.state === 'paused') return batch.pauseReason === 'runner_disconnected' ? '等待接管' : '已暂停'
+  if (batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return '待复核'
+  return '已归档'
+}
+
+function batchStateTone(batch: ImageBatchV1) {
+  if (batch.state === 'running') return (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
+    ? 'text-amber-700 dark:text-amber-300'
+    : 'text-sky-700 dark:text-sky-300'
+  if (batch.state === 'paused' || batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return 'text-amber-700 dark:text-amber-300'
+  return 'text-stone-500 dark:text-stone-400'
+}
+
+function BatchQueueRow({
+  batch,
+  selected,
+  onSelect,
+}: {
+  batch: ImageBatchV1
+  selected: boolean
+  onSelect: (batch: ImageBatchV1) => void
+}) {
+  const issueCount = batch.stats.failed + batch.stats.cancelled + batch.stats.needsReview + batch.stats.rejected
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(batch)}
+      className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 border-l-2 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:px-3 ${selected ? 'border-l-[#356c82] bg-white dark:bg-white/[0.04]' : batch.state === 'running' ? 'border-l-sky-400/70' : issueCount ? 'border-l-amber-400/70' : 'border-l-transparent'}`}
+    >
+      <div className="min-w-0">
+        <div className="truncate text-sm font-medium">{batch.name || batch.id}</div>
+        <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-stone-400">
+          <span>{batch.stats.succeeded}/{batch.stats.total} 完成</span>
+          {batch.stats.failed > 0 && <span>{batch.stats.failed} 失败</span>}
+          {batch.stats.cancelled > 0 && <span>{batch.stats.cancelled} 取消</span>}
+          {batch.stats.needsReview + batch.stats.rejected > 0 && <span>{batch.stats.needsReview + batch.stats.rejected} 待复核</span>}
+        </div>
+      </div>
+      <time className="hidden self-center whitespace-nowrap text-[10px] text-stone-400 sm:block">{formatTime(batch.updatedAt)}</time>
+      <span className={`self-center whitespace-nowrap text-[11px] font-medium ${batchStateTone(batch)}`}>{batchStateLabel(batch)}</span>
+    </button>
+  )
+}
+
+function BatchQueueSection({
+  title,
+  batches,
+  selectedBatchId,
+  onSelect,
+}: {
+  title: string
+  batches: ImageBatchV1[]
+  selectedBatchId: string | undefined
+  onSelect: (batch: ImageBatchV1) => void
+}) {
+  if (!batches.length) return null
+  return (
+    <section aria-label={title} className="border-t border-stone-200 first:border-t-0 dark:border-white/[0.06]">
+      <div className="flex items-center justify-between px-2 py-2 sm:px-3">
+        <h3 className="text-[10px] font-medium uppercase text-stone-400">{title}</h3>
+        <span className="font-mono text-[10px] text-stone-400">{batches.length}</span>
+      </div>
+      <div className="divide-y divide-stone-200 dark:divide-white/[0.06]">
+        {batches.map((batch) => (
+          <BatchQueueRow
+            key={batch.id}
+            batch={batch}
+            selected={selectedBatchId === batch.id}
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
 interface NewJobDraft {
   prompt: string
   ratio: string
@@ -359,6 +440,24 @@ export default function EngineWorkspace() {
     failed: jobStats?.failed ?? jobs.filter((job) => job.state === 'failed').length,
     succeeded: jobStats?.succeeded ?? jobs.filter((job) => job.state === 'succeeded').length,
   }), [jobStats, jobs])
+
+  const batchGroups = useMemo(() => {
+    const filtered = batches.filter((batch) => !batchFilter || (batch.name || batch.id).toLowerCase().includes(batchFilter.toLowerCase()))
+    const runnerDisconnected = (batch: ImageBatchV1) => batch.state === 'running' && (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
+    const active = filtered.filter((batch) => batch.state === 'running' && !runnerDisconnected(batch))
+    const needsAttention = filtered.filter((batch) => !active.includes(batch) && (
+      runnerDisconnected(batch)
+      || batch.state === 'paused'
+      || batch.acceptanceState === 'needs_review'
+      || batch.acceptanceState === 'rejected'
+      || batch.stats.failed > 0
+      || batch.stats.cancelled > 0
+    ))
+    const activeIds = new Set(active.map((batch) => batch.id))
+    const attentionIds = new Set(needsAttention.map((batch) => batch.id))
+    const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id))
+    return { filtered, active, needsAttention, history }
+  }, [batches, batchFilter])
 
   const loadAllJobs = useCallback(async () => {
     if (!config) return
@@ -658,9 +757,9 @@ export default function EngineWorkspace() {
             <div className="mb-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">批次队列</h2>
-                <span className="text-[10px] font-medium uppercase text-stone-400">{batches.length} 个批次</span>
+                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.history.length} 历史</span>
               </div>
-              {batches.length > 5 && (
+              {batches.length > 3 && (
                 <input
                   type="text"
                   placeholder="筛选批次…"
@@ -669,22 +768,11 @@ export default function EngineWorkspace() {
                   className="mb-2 w-full rounded-md border border-stone-300 bg-transparent px-2 py-1 text-xs dark:border-white/10"
                 />
               )}
-              <div id="batch-queue-list" className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
-                {batches.filter((b) => !batchFilter || (b.name || b.id).toLowerCase().includes(batchFilter.toLowerCase())).map((batch) => (
-                  <button
-                    type="button"
-                    key={batch.id}
-                    onClick={() => handleSelectBatch(batch)}
-                    className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] ${selectedBatch?.id === batch.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{batch.name || batch.id}</div>
-                      <div className="mt-1 text-[10px] text-stone-400">{batch.stats.succeeded}/{batch.stats.total} 完成 · {batch.stats.failed} 失败{batch.stats.cancelled ? ` · ${batch.stats.cancelled} 取消` : ''}</div>
-                    </div>
-                    <span className="self-center text-[11px] font-medium text-stone-500">{batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}</span>
-                  </button>
-                ))}
-                {!batches.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有批次</div>}
+              <div id="batch-queue-list" className="border-y border-stone-300 dark:border-white/10">
+                <BatchQueueSection title="执行中" batches={batchGroups.active} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                <BatchQueueSection title="待处理" batches={batchGroups.needsAttention} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                <BatchQueueSection title="历史记录" batches={batchGroups.history} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                {!batchGroups.filtered.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有匹配的批次</div>}
               </div>
             </div>
             <div className="mb-3 flex items-center justify-between gap-3">

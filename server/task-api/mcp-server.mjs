@@ -193,17 +193,19 @@ server.registerTool('image_batch_create', {
   description: 'Create an idempotent server-side image batch. Every item becomes a durable job with a stable derived idempotency key.',
   inputSchema: {
     idempotencyKey: z.string().min(8).max(200),
+    logicalKey: z.string().min(8).max(200).optional(),
     name: z.string().min(1).max(200).optional(),
     outputRoot: z.string().min(1).optional(),
     automation: batchAutomationSchema.optional(),
     items: z.array(batchItemSchema).min(1).max(500),
   },
-}, async ({ idempotencyKey, name, outputRoot, automation, items }) => {
+}, async ({ idempotencyKey, logicalKey, name, outputRoot, automation, items }) => {
   const response = await api('/v1/image-batches', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       idempotencyKey,
+      ...(logicalKey ? { logicalKey } : {}),
       ...(name ? { name } : {}),
       ...(outputRoot ? { outputRoot } : {}),
       ...(automation ? { automation } : {}),
@@ -225,6 +227,58 @@ server.registerTool('image_batch_get', {
   description: 'Get a batch with aggregate progress, ordered items, jobs, and batch events.',
   inputSchema: { batchId: z.string().min(1) },
 }, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}`)).json()))
+
+server.registerTool('image_batch_find_by_logical_key', {
+  description: 'Find the durable logical batch for a manifest run. Use this before creating a new batch after a runner restart.',
+  inputSchema: { logicalKey: z.string().min(8).max(200) },
+}, async ({ logicalKey }) => {
+  const response = await fetch(new URL(`/v1/image-batches/by-logical-key/${encodeURIComponent(logicalKey)}`, baseUrl), {
+    headers: { authorization: `Bearer ${token}` },
+  })
+  if (response.status === 404) return textResult({ batch: null })
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null)
+    throw new Error(payload?.error?.message || payload?.error?.code || `HTTP ${response.status}`)
+  }
+  return textResult({ batch: await response.json() })
+})
+
+server.registerTool('image_batch_adopt_logical_key', {
+  description: 'Attach a stable logical key to a legacy batch selected from its persisted batchId. This migrates restart recovery without creating a duplicate batch.',
+  inputSchema: { batchId: z.string().min(1), logicalKey: z.string().min(8).max(200) },
+}, async ({ batchId, logicalKey }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/logical-key`,
+  { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ logicalKey }) },
+)).json()))
+
+const runnerLeaseSchema = {
+  batchId: z.string().min(1),
+  owner: z.string().min(1).max(200),
+}
+
+server.registerTool('image_batch_runner_acquire', {
+  description: 'Acquire the exclusive lease to operate one logical batch. A second runner is rejected until the lease expires.',
+  inputSchema: { ...runnerLeaseSchema, leaseMs: z.number().int().min(10_000).max(300_000) },
+}, async ({ batchId, owner, leaseMs }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/runner/acquire`,
+  { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ owner, leaseMs }) },
+)).json()))
+
+server.registerTool('image_batch_runner_heartbeat', {
+  description: 'Renew the exclusive lease held by this runner while it waits for jobs or processes assets.',
+  inputSchema: { ...runnerLeaseSchema, leaseMs: z.number().int().min(10_000).max(300_000) },
+}, async ({ batchId, owner, leaseMs }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/runner/heartbeat`,
+  { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ owner, leaseMs }) },
+)).json()))
+
+server.registerTool('image_batch_runner_release', {
+  description: 'Release this runner lease after a normal batch exit. Expired leases are also recoverable by a later runner.',
+  inputSchema: runnerLeaseSchema,
+}, async ({ batchId, owner }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/runner/release`,
+  { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ owner }) },
+)).json()))
 
 server.registerTool('image_batch_pause', {
   description: 'Pause a batch. Active jobs continue; queued jobs stop being claimed. Pass reason to distinguish manual vs system pauses.',
