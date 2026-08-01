@@ -108,6 +108,10 @@ const agentRecoveryContinuations = new Set<string>()
 const deletedActiveAgentTasks = new Map<string, { task: TaskRecord; controller: AbortController }>()
 let agentConversationPersistenceReady = false
 let agentConversationMigrationPending = false
+// 数据清除标志：clearData 成功清空任务后置为 true，用于阻止清除后仍在飞行中的
+// 异步写入（Agent 流式回调、executeTask、recovery timer 等）把任务重新写回内存/IndexedDB。
+// 仅在 initStore（页面加载）和新的用户生成（submitTask/submitAgentMessage/retryTask）时重置。
+let tasksCleared = false
 const AGENT_STOPPED_MESSAGE = '已停止生成。'
 const AGENT_RECOVERY_PAUSE_ERROR = 'AgentRecoveryPauseError'
 const AGENT_CONVERSATION_TITLE_MAX_LENGTH = 28
@@ -1060,6 +1064,8 @@ function getPersistableTask(task: TaskRecord): TaskRecord {
 }
 
 function putTask(task: TaskRecord): Promise<IDBValidKey> {
+  // 数据已被用户清除：丢弃飞行中写入，避免把已清除的任务重新写回 IndexedDB。
+  if (tasksCleared) return Promise.resolve(task.id)
   return dbPutTask(getPersistableTask(task))
 }
 
@@ -1450,6 +1456,9 @@ async function recoverFalTask(taskId: string) {
 
 /** 初始化：从 IndexedDB 加载任务，按需恢复输入图片，并清理孤立图片 */
 export async function initStore() {
+  // 页面加载/刷新：重置数据清除标志，允许从（已清空后的）IndexedDB 正常加载，
+  // 并允许后续生成正常写入。
+  tasksCleared = false
   const legacyAgentConversations = normalizeAgentConversations(useStore.getState().agentConversations)
   const storedTasks = await getAllTasks()
   const storedAgentConversations = normalizeAgentConversations(await getAllAgentConversations())
@@ -1653,6 +1662,8 @@ export async function initStore() {
 
 /** 提交新任务 */
 export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean } = {}) {
+  // 用户发起新生成：重置数据清除标志，确保新任务能正常写入。
+  tasksCleared = false
   const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, showToast, setConfirmDialog } =
     useStore.getState()
 
@@ -2369,6 +2380,8 @@ async function continueRecoveredAgentRound(taskId: string) {
 }
 
 export async function submitAgentMessage() {
+  // 用户发起新 Agent 生成：重置数据清除标志。
+  tasksCleared = false
   const state = useStore.getState()
   const { settings, prompt, inputImages, maskDraft, params, showToast } = state
   const normalizedSettings = normalizeSettings(settings)
@@ -2766,8 +2779,12 @@ async function executeAgentRound(
 
       taskIdByToolCallId.set(toolCallId, task.id)
       taskByToolCallId.set(toolCallId, task)
-      useStore.getState().setTasks([task, ...useStore.getState().tasks])
-      attachTaskToAgentRound(task.id)
+      // 数据已被用户清除：不把新生成的 Agent 任务加入内存或写回 IndexedDB。
+      // 仍返回 task.id 以保持回调签名，但 putTask 会因 tasksCleared 成为空操作。
+      if (!tasksCleared) {
+        useStore.getState().setTasks([task, ...useStore.getState().tasks])
+        attachTaskToAgentRound(task.id)
+      }
       await putTask(task)
       return task.id
     }
@@ -3938,6 +3955,8 @@ async function executeTask(taskId: string) {
 }
 
 export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
+  // 数据已被用户清除：飞行中的生成回调（Agent 流式、recovery 等）不应把任务写回。
+  if (tasksCleared && !useStore.getState().tasks.some((t) => t.id === taskId)) return
   const { tasks, setTasks, defaultFavoriteCollectionId } = useStore.getState()
   const updated = tasks.map((t) =>
     t.id === taskId ? { ...t, ...normalizeFavoritePatch(t, patch, defaultFavoriteCollectionId) } : t,
@@ -4346,6 +4365,8 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 
 /** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
+  // 用户重试生成：重置数据清除标志。
+  tasksCleared = false
   const { settings } = useStore.getState()
   const activeProfile = getActiveApiProfile(settings)
   const normalizedParams = normalizeParamsForSettings(task.params, settings, {
@@ -4746,12 +4767,20 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   // 先取消所有恢复轮询 / 超时监控，防止清空期间或清空后有数据被写回 IndexedDB
   if (options.clearTasks) {
+    // 立即置位清除标志：关闭"clearData 的 dbClearTasks await 期间，飞行中的 executeTask
+    // 读到尚未清空的内存而继续写回 IndexedDB"的竞态窗口。任何此后到达的 putTask 写入都成为空操作。
+    tasksCleared = true
     for (const timer of falRecoveryTimers.values()) clearTimeout(timer)
     falRecoveryTimers.clear()
     for (const timer of customRecoveryTimers.values()) clearTimeout(timer)
     customRecoveryTimers.clear()
     for (const timer of openAIWatchdogTimers.values()) clearTimeout(timer)
     openAIWatchdogTimers.clear()
+    // 中止所有进行中的 Agent 生成轮次，使其飞行中的流式回调不再创建/更新任务。
+    for (const controller of agentRoundControllers.values()) controller.abort()
+    agentRoundControllers.clear()
+    agentRecoveryContinuations.clear()
+    deletedActiveAgentTasks.clear()
   }
 
   let clearTasksFailed = false
@@ -4805,6 +4834,11 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     })
     clearInputImages()
     clearMaskDraft()
+
+    // 若清除失败，撤销标志，避免误拦后续正常写入（保留的数据仍可使用）。
+    if (clearTasksFailed || clearAgentConversationsFailed || clearImagesFailed) {
+      tasksCleared = false
+    }
   }
 
   if (options.clearConfig) {
@@ -4824,6 +4858,11 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     failed ? '部分数据清空失败，请刷新页面后重试' : '所选数据已清空',
     failed ? 'error' : 'success',
   )
+}
+
+/** 重置数据清除标志，仅供单元测试在 beforeEach 中调用。 */
+export function __resetTasksClearedForTests() {
+  tasksCleared = false
 }
 
 async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<ReturnType<typeof getCustomQueuedImageResult>>) {
@@ -4978,6 +5017,8 @@ export interface ImportOptions {
 /** 导入 ZIP 数据 */
 export async function importData(input: File | File[], options: ImportOptions = { importConfig: true, importTasks: true }): Promise<boolean> {
   try {
+    // 导入数据：重置清除标志，使导入的任务能正常写入。
+    tasksCleared = false
     const state = useStore.getState()
     if (options.importTasks && hasActiveDataOperations(state.tasks, state.agentConversations)) throw new Error('当前有任务正在进行，请完成或停止后再导入。')
     const files = Array.isArray(input) ? input : [input]

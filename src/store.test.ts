@@ -236,7 +236,7 @@ import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import * as imageTaskApi from './lib/imageTaskApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -6129,6 +6129,7 @@ describe('clearData', () => {
     vi.mocked(clearTasks).mockClear()
     vi.mocked(clearAgentConversations).mockClear()
     vi.mocked(clearImages).mockClear()
+    __resetTasksClearedForTests()
     await clearTasks()
     await clearAgentConversations()
     await clearImages()
@@ -6353,5 +6354,103 @@ describe('clearData', () => {
     }
 
     expect((await getAllTasks()).length).toBe(0)
+  })
+
+  it('does not resurrect a gallery task when its in-flight generation resolves after clear', async () => {
+    // 用一个可控的 callImageApi，模拟"生成已发起 → 用户清除 → 生成回调返回"的时序
+    const apiDeferred = deferred<{ images: string[]; actualParams: Record<string, unknown>; actualParamsList: Array<Partial<Record<string, unknown>>>; revisedPrompts: (string | null)[] }>()
+    vi.mocked(callImageApi).mockReturnValueOnce(apiDeferred.promise as ReturnType<typeof callImageApi>)
+    useStore.setState({
+      settings: localAutoSaveSettings(false, { enabled: false }),
+      prompt: '测试提示词',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      showToast: vi.fn(),
+    })
+
+    await submitTask() // 创建 running 任务并触发 executeTask（卡在 callImageApi）
+    expect(useStore.getState().tasks.length).toBe(1)
+    expect(useStore.getState().tasks[0].status).toBe('running')
+
+    // 用户在此期间清除了数据
+    await clearData({ clearTasks: true, clearConfig: false })
+    expect(useStore.getState().tasks.length).toBe(0)
+    expect((await getAllTasks()).length).toBe(0)
+
+    // 记录清除后 IDB put 调用次数
+    const putCallsBeforeResolve = vi.mocked(putDbTask).mock.calls.length
+
+    // 生成回调返回，executeTask 尝试 storeTaskOutputImages + updateTaskInStore + putTask
+    apiDeferred.resolve({
+      images: ['data:image/png;base64,resurrected'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+
+    // 等待所有微任务/宏任务落定
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    // 关键断言：任务不得复活（内存与 IDB 均为空）
+    expect(useStore.getState().tasks.length).toBe(0)
+    expect((await getAllTasks()).length).toBe(0)
+    // 清除后不应再有任务被写入 IndexedDB（putTask 守卫生效）
+    expect(vi.mocked(putDbTask).mock.calls.length).toBe(putCallsBeforeResolve)
+  })
+
+  it('does not write to IndexedDB when putTask runs after clear even if a task lingers in memory', async () => {
+    await clearData({ clearTasks: true, clearConfig: false })
+    expect((await getAllTasks()).length).toBe(0)
+
+    // 模拟飞行中回调闭包仍持有任务引用：手动把一个"运行中"任务放回内存。
+    // （ensureStreamingAgentTask 的 taskIdByToolCallId 闭包就是这种场景。）
+    const lingeringTask = task({ id: 'lingering-agent-task', status: 'running', finishedAt: null, elapsed: null })
+    useStore.setState({ tasks: [lingeringTask] })
+
+    const putCallsBefore = vi.mocked(putDbTask).mock.calls.length
+    // 回调尝试把它标记为完成并写入 —— putTask 必须因 tasksCleared 成为空操作
+    updateTaskInStore('lingering-agent-task', { status: 'done', outputImages: ['img-1'] })
+
+    // 关键断言：clearData 之后，putTask 不得写入 IndexedDB
+    expect(vi.mocked(putDbTask).mock.calls.length).toBe(putCallsBefore)
+    expect((await getAllTasks()).length).toBe(0)
+  })
+
+  it('allows new task writes after clear via initStore reset (autosave unaffected)', async () => {
+    // 清除数据（仅任务，保留配置 → 自动保存目录句柄不清理）
+    const handle = fakeDirectoryHandle('AutoArchive')
+    await putLocalAutoSaveDirectoryHandle(handle)
+    useStore.setState({ settings: localAutoSaveSettings(true, { directoryName: 'AutoArchive' }) })
+    await putDbTask(task({ id: 'old-task' }))
+    useStore.setState({ tasks: [task({ id: 'old-task' })] })
+
+    await clearData({ clearTasks: true, clearConfig: false })
+    expect((await getAllTasks()).length).toBe(0)
+    expect(useStore.getState().tasks.length).toBe(0)
+
+    // 清任务不应影响自动保存目录句柄（autosave 功能完整）
+    const dirHandle = await getLocalAutoSaveDirectoryHandle()
+    expect(dirHandle).toBeDefined()
+    expect(useStore.getState().settings.localAutoSave.enabled).toBe(true)
+
+    // initStore 重置清除标志后，重新写入的任务能正常加载，putTask 不再被阻止
+    __resetTasksClearedForTests() // 模拟页面刷新后 initStore 的重置
+    await initStore()
+    await putDbTask(task({ id: 'fresh-task', prompt: 'fresh' }))
+    await initStore()
+    expect(useStore.getState().tasks.some((t) => t.id === 'fresh-task')).toBe(true)
+
+    // 清除后正常生成的新任务，自动保存应能更新其状态（不报错、不复活旧数据）
+    useStore.setState({
+      tasks: [task({ id: 'fresh-task', status: 'done', outputImages: [], localAutoSave: { status: 'pending' } })],
+    })
+    await runLocalAutoSaveForTask('fresh-task')
+    // fresh-task 仍在，旧任务未复活
+    expect(useStore.getState().tasks.length).toBe(1)
+    expect(useStore.getState().tasks[0].id).toBe('fresh-task')
   })
 })
