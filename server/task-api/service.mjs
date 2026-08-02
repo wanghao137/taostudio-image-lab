@@ -622,6 +622,43 @@ export class TaskRepository {
       FROM batch_items bi
       JOIN batches b ON b.id=bi.batch_id
     `)
+
+    // QA-passed terminal items are delivery-safe by policy. Older versions
+    // left every successful item pending human review; promote only those
+    // with explicit QA evidence and never overwrite a human rejection.
+    const legacyQaPassed = this.db.prepare(`
+      SELECT bi.batch_id,bi.item_key,bi.revision,j.id AS job_id
+      FROM batch_items bi
+      JOIN jobs j ON j.id=bi.job_id
+      WHERE j.state='succeeded'
+        AND bi.qa_status='passed'
+        AND bi.acceptance_status!='rejected'
+        AND bi.human_review_status NOT IN ('approved','rejected')
+    `).all()
+    if (legacyQaPassed.length) {
+      const decidedAt = now()
+      const update = this.db.prepare(`
+        UPDATE batch_items
+        SET acceptance_status='accepted',human_review_status='approved',human_review_json=?
+        WHERE batch_id=? AND item_key=?
+      `)
+      for (const item of legacyQaPassed) {
+        update.run(JSON.stringify({
+          actor: 'system',
+          decision: 'qa_passed_auto_accepted',
+          decidedAt,
+          jobId: item.job_id,
+          revision: item.revision,
+          migrated: true,
+        }), item.batch_id, item.item_key)
+        this.recordBatchEvent(item.batch_id, 'item_qa_auto_accepted', {
+          itemKey: item.item_key,
+          revision: item.revision,
+          jobId: item.job_id,
+          reason: 'qa_passed_migration',
+        })
+      }
+    }
   }
 
   recoverInterruptedJobs() {
@@ -1404,19 +1441,39 @@ export class TaskRepository {
         code: 'BATCH_ITEM_NOT_TERMINAL',
       })
     }
-    const humanReviewStatus = item.humanReviewStatus === 'approved' || item.humanReviewStatus === 'rejected'
+    const systemAutoApproval = item.humanReviewStatus === 'approved'
+      && item.humanReview?.actor === 'system'
+    const hasHumanDecision = item.humanReviewStatus === 'rejected'
+      || (item.humanReviewStatus === 'approved' && !systemAutoApproval)
+    const autoAccepted = review.qaStatus === 'passed'
+      && item.job.state === 'succeeded'
+      && !hasHumanDecision
+    const humanReviewStatus = hasHumanDecision
       ? item.humanReviewStatus
-      : item.job.state === 'succeeded'
-        ? 'pending'
-        : 'not_applicable'
+      : autoAccepted
+        ? 'approved'
+        : item.job.state === 'succeeded'
+          ? 'pending'
+          : 'not_applicable'
     const acceptanceStatus = humanReviewStatus === 'approved'
       ? 'accepted'
       : humanReviewStatus === 'rejected' || humanReviewStatus === 'not_applicable'
         ? 'rejected'
         : 'needs_review'
+    const humanReview = autoAccepted
+      ? {
+          actor: 'system',
+          decision: 'qa_passed_auto_accepted',
+          decidedAt: now(),
+          jobId: item.job.id,
+          revision: item.revision,
+      }
+      : systemAutoApproval
+        ? null
+        : item.humanReview || null
     this.db.prepare(`
       UPDATE batch_items
-      SET automation_state='done',qa_status=?,acceptance_status=?,human_review_status=?,failure_class=?,recovery_action=?,review_json=?
+      SET automation_state='done',qa_status=?,acceptance_status=?,human_review_status=?,failure_class=?,recovery_action=?,review_json=?,human_review_json=?
       WHERE batch_id=? AND item_key=?
     `).run(
       review.qaStatus,
@@ -1425,6 +1482,7 @@ export class TaskRepository {
       review.failureClass?.trim() || null,
       review.recoveryAction?.trim() || null,
       review.detail ? JSON.stringify(review.detail) : null,
+      humanReview ? JSON.stringify(humanReview) : null,
       id,
       itemKey,
     )
@@ -1435,6 +1493,8 @@ export class TaskRepository {
       jobId: item.job.id,
       qaStatus: review.qaStatus,
       acceptanceStatus,
+      humanReviewStatus,
+      ...(autoAccepted ? { decision: 'qa_passed_auto_accepted' } : {}),
       failureClass: review.failureClass || null,
       recoveryAction: review.recoveryAction || null,
     })

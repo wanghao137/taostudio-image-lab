@@ -121,7 +121,13 @@ function QaBadge({ status }: { status: ImageBatchV1['items'][number]['qaStatus']
   return <span className={`rounded px-2 py-1 text-[10px] font-medium ${style}`}>{label}</span>
 }
 
-function HumanReviewBadge({ status }: { status: ImageBatchV1['items'][number]['humanReviewStatus'] }) {
+function HumanReviewBadge({
+  status,
+  autoAccepted = false,
+}: {
+  status: ImageBatchV1['items'][number]['humanReviewStatus']
+  autoAccepted?: boolean
+}) {
   const style = status === 'approved'
     ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
     : status === 'rejected'
@@ -130,7 +136,7 @@ function HumanReviewBadge({ status }: { status: ImageBatchV1['items'][number]['h
         ? 'bg-stone-100 text-stone-500 dark:bg-white/[0.06] dark:text-stone-400'
       : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
   const label = status === 'approved'
-    ? '已确认交付'
+    ? autoAccepted ? 'QA 自动确认' : '人工已确认'
     : status === 'rejected'
       ? '已拒绝'
       : status === 'not_applicable'
@@ -152,7 +158,20 @@ function ReviewThumbnail({
 }) {
   const [url, setUrl] = useState<string | null>(null)
   const [visible, setVisible] = useState(false)
+  const [fullUrl, setFullUrl] = useState<string | null>(null)
+  const [fullState, setFullState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [lightboxOpen, setLightboxOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => () => {
+    if (fullUrl) URL.revokeObjectURL(fullUrl)
+  }, [fullUrl])
+
+  useEffect(() => {
+    setFullUrl(null)
+    setFullState('idle')
+    setLightboxOpen(false)
+  }, [assetId])
 
   useEffect(() => {
     if (!assetId) {
@@ -195,11 +214,63 @@ function ReviewThumbnail({
     }
   }, [assetId, config, visible])
 
+  const openFullPreview = async () => {
+    if (!assetId || fullState === 'loading') return
+    if (fullUrl) {
+      setLightboxOpen(true)
+      return
+    }
+    setFullState('loading')
+    try {
+      const blob = await getImageAssetBlob(config, assetId)
+      setFullUrl(URL.createObjectURL(blob))
+      setFullState('idle')
+      setLightboxOpen(true)
+    } catch {
+      setFullState('error')
+    }
+  }
+
   return (
-    <div ref={containerRef} className="flex h-full w-full items-center justify-center bg-stone-100 dark:bg-white/[0.04]">
-      {url
-        ? <img src={url} alt={label} className="h-full w-full object-cover" loading="lazy" />
-        : <span className="text-[10px] text-stone-400">{visible ? '无预览' : '加载预览'}</span>}
+    <div ref={containerRef} className="relative h-full w-full bg-stone-100 dark:bg-white/[0.04]">
+      <button
+        type="button"
+        onClick={() => void openFullPreview()}
+        disabled={!assetId || fullState === 'loading'}
+        className="group relative flex h-full w-full items-center justify-center overflow-hidden outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#356c82] disabled:cursor-wait"
+        aria-label={assetId ? `放大查看 ${label}` : label}
+        title={assetId ? '点击查看大图' : undefined}
+      >
+        {url
+          ? <img src={url} alt={label} className="h-full w-full object-cover" loading="lazy" />
+          : <span className="text-[10px] text-stone-400">{visible ? '无预览' : '加载预览'}</span>}
+        {url && fullState !== 'loading' && (
+          <span className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true">
+            <Maximize2 className="h-3.5 w-3.5" />
+          </span>
+        )}
+        {fullState === 'loading' && (
+          <span className="absolute inset-0 flex items-center justify-center bg-black/35 text-white" aria-live="polite">
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+          </span>
+        )}
+      </button>
+      {fullState === 'error' && (
+        <p className="absolute inset-x-1 bottom-1 rounded bg-red-900/80 px-1 py-0.5 text-center text-[9px] text-white" role="alert">
+          大图加载失败，点击重试
+        </p>
+      )}
+      {lightboxOpen && fullUrl && (
+        <EngineAssetLightbox
+          initialMode="final"
+          sourceUrl={null}
+          finalUrl={fullUrl}
+          onClose={() => {
+            setLightboxOpen(false)
+            setFullUrl(null)
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1407,8 +1478,10 @@ function BatchInspector({
 }) {
   const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'pending' | 'approved' | 'rejected'>('pending')
   const executionPercentage = batch.stats.total ? Math.round((batch.stats.terminal / batch.stats.total) * 100) : 0
-  const humanDone = batch.stats.humanReviewApproved + batch.stats.humanReviewRejected
-  const reviewPercentage = batch.stats.total ? Math.round((humanDone / batch.stats.total) * 100) : 0
+  const autoAcceptedCount = batch.items.filter((item) => item.humanReviewStatus === 'approved' && item.humanReview?.actor === 'system').length
+  const humanApprovedCount = Math.max(0, batch.stats.humanReviewApproved - autoAcceptedCount)
+  const deliveryDone = batch.stats.accepted + batch.stats.rejected
+  const deliveryPercentage = batch.stats.total ? Math.round((deliveryDone / batch.stats.total) * 100) : 0
   const reviewItems = batch.items.filter((item) => {
     if (reviewFilter === 'warnings') return item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'
     if (reviewFilter === 'pending') return item.humanReviewStatus === 'pending'
@@ -1452,11 +1525,11 @@ function BatchInspector({
           <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${executionPercentage}%` }} />
         </div>
         <div className="mt-4 flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
-          <span>人工确认进度</span>
-          <span className="font-mono">{humanDone}/{batch.stats.total} · {reviewPercentage}%</span>
+          <span>交付确认进度</span>
+          <span className="font-mono">{deliveryDone}/{batch.stats.total} · {deliveryPercentage}%</span>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
-          <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${reviewPercentage}%` }} />
+          <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${deliveryPercentage}%` }} />
         </div>
       </div>
       <dl className="mt-5 grid grid-cols-3 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
@@ -1471,10 +1544,10 @@ function BatchInspector({
         <div className="flex items-center justify-between gap-3">
           <div>
             <h3 className="text-xs font-semibold">人工交付验收</h3>
-            <p className="mt-1 text-[10px] leading-4 text-stone-400">QA 仅提供证据与提示；确认交付由人工决定。</p>
+            <p className="mt-1 text-[10px] leading-4 text-stone-400">QA 通过自动确认；仅 QA 告警/未运行需要人工复核。</p>
           </div>
           <span className="shrink-0 font-mono text-[10px] text-stone-400">
-            待确认 {batch.stats.humanReviewPending} / 已确认 {batch.stats.humanReviewApproved}
+            待复核 {batch.stats.humanReviewPending} / QA 自动确认 {autoAcceptedCount} / 人工已确认 {humanApprovedCount}
           </span>
         </div>
         <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="验收筛选">
@@ -1507,7 +1580,7 @@ function BatchInspector({
               <article
                 key={item.itemKey}
                 className={`overflow-hidden border text-xs ${
-                  item.qaStatus === 'needs_review' || item.qaStatus === 'failed'
+                  item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'
                     ? 'border-amber-300 bg-amber-50/30 dark:border-amber-400/30 dark:bg-amber-400/[0.04]'
                     : item.humanReviewStatus === 'approved'
                       ? 'border-emerald-200 bg-emerald-50/30 dark:border-emerald-400/20 dark:bg-emerald-400/[0.03]'
@@ -1530,7 +1603,10 @@ function BatchInspector({
                     <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-stone-600 dark:text-stone-300">{item.job.request.input.prompt || '图像编辑任务'}</p>
                     <div className="mt-2 flex flex-wrap gap-1">
                       <QaBadge status={item.qaStatus} />
-                      <HumanReviewBadge status={item.humanReviewStatus} />
+                      <HumanReviewBadge
+                        status={item.humanReviewStatus}
+                        autoAccepted={item.humanReview?.actor === 'system'}
+                      />
                     </div>
                   </div>
                 </div>
@@ -1752,6 +1828,7 @@ function EngineAssetLightbox({
   const [scale, setScale] = useState(1)
   const [position, setPosition] = useState({ x: 0, y: 0 })
   const [drag, setDrag] = useState<{ pointerId: number; x: number; y: number } | null>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const src = mode === 'source' ? sourceUrl : finalUrl
 
   const resetView = useCallback(() => {
@@ -1769,6 +1846,10 @@ function EngineAssetLightbox({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose, resetView])
+
+  useEffect(() => {
+    closeButtonRef.current?.focus()
+  }, [])
 
   const selectMode = (nextMode: 'source' | 'final') => {
     setMode(nextMode)
@@ -1835,7 +1916,7 @@ function EngineAssetLightbox({
             <Move className="h-3.5 w-3.5" />
             拖动查看
           </span>
-          <button type="button" onClick={onClose} className="ml-1 inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/10" title="关闭" aria-label="关闭预览">
+          <button ref={closeButtonRef} type="button" onClick={onClose} className="ml-1 inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70" title="关闭" aria-label="关闭预览">
             <X className="h-5 w-5" />
           </button>
         </div>

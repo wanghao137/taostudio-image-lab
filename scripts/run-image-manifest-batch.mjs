@@ -924,8 +924,8 @@ for (const entry of queuedEntries) {
       // 真正的生成 provider 5xx 仍由 providerRoutesUnavailable 检测并触发 BATCH_PAUSED。
       const qaPass = qa.status === 'completed' && qa.pass
       console.log(`QA index=${entry.index} revision=${revision} status=${qa.status} pass=${qaPass} notes=${qa.notes || qa.reason || ''}`)
-      // QA only records evidence. A succeeded, technically verified asset is
-      // ready for human review whether QA passes, warns, or is unavailable.
+      // QA pass auto-confirms a technically verified asset. Warnings and an
+      // unavailable QA evaluator remain explicitly pending human review.
       activeBatch = await callMcp('image_batch_item_qa', {
         batchId: activeBatch.id,
         itemKey: entry.itemKey,

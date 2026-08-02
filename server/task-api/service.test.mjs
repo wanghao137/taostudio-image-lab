@@ -125,6 +125,41 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     await rm(stateDir, { recursive: true, force: true })
   })
 
+  it('backfills QA-passed legacy batch items as system-approved delivery', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-qa-migration-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const firstRepository = new TaskRepository(databasePath)
+    const created = firstRepository.createOrGetBatch({
+      idempotencyKey: 'batch-qa-migration-001',
+      items: [{
+        itemKey: 'legacy-qa-pass',
+        request: request({ idempotencyKey: 'batch-qa-migration-job-001' }),
+      }],
+    }).batch
+    const item = created.items[0]
+    firstRepository.db.prepare("UPDATE jobs SET state='succeeded' WHERE id=?").run(item.job.id)
+    firstRepository.db.prepare(`
+      UPDATE batch_items
+      SET qa_status='passed',acceptance_status='needs_review',human_review_status='pending'
+      WHERE batch_id=? AND item_key=?
+    `).run(created.id, item.itemKey)
+    firstRepository.close()
+
+    const reopenedRepository = new TaskRepository(databasePath)
+    expect(reopenedRepository.getBatch(created.id)).toMatchObject({
+      acceptanceState: 'accepted',
+      stats: { accepted: 1, needsReview: 0, humanReviewPending: 0, humanReviewApproved: 1 },
+      items: [{
+        qaStatus: 'passed',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted', migrated: true },
+      }],
+    })
+    reopenedRepository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
   it('recovers interrupted batch automation claims after a service restart', async () => {
     const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-automation-restart-'))
     const databasePath = join(stateDir, 'jobs.sqlite')
@@ -704,15 +739,16 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     }).then((response) => response.json())
     expect(qaPassed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'needs_review',
-      stats: { succeeded: 1, accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
+      acceptanceState: 'accepted',
+      stats: { succeeded: 1, accepted: 1, needsReview: 0, qaPassed: 1, humanReviewPending: 0, humanReviewApproved: 1 },
       items: [{
         itemKey: 'reviewed-item',
         revision: 0,
         generationStatus: 'succeeded',
         qaStatus: 'passed',
-        acceptanceStatus: 'needs_review',
-        humanReviewStatus: 'pending',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted' },
         jobHistory: [{ revision: 0, reason: 'initial', job: { id: firstJob.id } }],
       }],
     })
@@ -762,7 +798,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
   })
 
-  it('expands multi-output prompts, records QA, and leaves delivery to human review', async () => {
+  it('expands multi-output prompts and auto-accepts QA-passed delivery', async () => {
     const evaluator = {
       rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
       qa: async () => ({
@@ -814,11 +850,12 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     )
     expect(completed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'needs_review',
-      stats: { total: 2, succeeded: 2, accepted: 0, needsReview: 2, qaPassed: 2, humanReviewPending: 2 },
+      acceptanceState: 'accepted',
+      stats: { total: 2, succeeded: 2, accepted: 2, needsReview: 0, qaPassed: 2, humanReviewPending: 0, humanReviewApproved: 2 },
     })
     expect(completed.items.every((item) => item.automationState === 'done')).toBe(true)
-    expect(completed.items.every((item) => item.humanReviewStatus === 'pending')).toBe(true)
+    expect(completed.items.every((item) => item.humanReviewStatus === 'approved')).toBe(true)
+    expect(completed.items.every((item) => item.humanReview?.decision === 'qa_passed_auto_accepted')).toBe(true)
     expect(completed.items.every((item) => item.job.request.input.prompt.includes('not a contact sheet'))).toBe(true)
   })
 
@@ -871,13 +908,14 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(rewrites).toBe(1)
     expect(completed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'needs_review',
-      stats: { total: 1, succeeded: 1, accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
+      acceptanceState: 'accepted',
+      stats: { total: 1, succeeded: 1, accepted: 1, needsReview: 0, qaPassed: 1, humanReviewPending: 0, humanReviewApproved: 1 },
       items: [{
         itemKey: 'policy',
         revision: 1,
-        acceptanceStatus: 'needs_review',
-        humanReviewStatus: 'pending',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted' },
         job: { request: { input: { prompt: 'A compliant documentary poster' } } },
         jobHistory: [
           { revision: 0, reason: 'initial', job: { state: 'failed' } },
@@ -941,12 +979,13 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(inspections).toBe(2)
     expect(completed).toMatchObject({
       state: 'completed',
-      stats: { accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
+      stats: { accepted: 1, needsReview: 0, qaPassed: 1, humanReviewPending: 0, humanReviewApproved: 1 },
       items: [{
         itemKey: 'qa',
         revision: 1,
-        acceptanceStatus: 'needs_review',
-        humanReviewStatus: 'pending',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted' },
         jobHistory: [
           { revision: 0, reason: 'initial' },
           { revision: 1, reason: 'recompose' },
@@ -1801,7 +1840,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(createHash('sha256').update(finalFile).digest('hex')).toBe(finalManifest.sha256)
   })
 
-  it('does not auto-accept items in automation-enabled batches', async () => {
+  it('auto-accepts QA-passed items in automation-enabled batches', async () => {
     const evaluator = {
       rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
       qa: async () => ({
@@ -1842,8 +1881,9 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       (batch) => batch.state === 'completed' && batch.stats.qaPassed === 1,
     )
     const item = completed.items[0]
-    expect(item.acceptanceStatus).toBe('needs_review')
-    expect(item.humanReviewStatus).toBe('pending')
+    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.humanReviewStatus).toBe('approved')
+    expect(item.humanReview).toMatchObject({ actor: 'system', decision: 'qa_passed_auto_accepted' })
     expect(item.review.autoAccepted).toBeUndefined()
   })
 })

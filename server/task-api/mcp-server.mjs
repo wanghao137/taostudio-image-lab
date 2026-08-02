@@ -303,7 +303,7 @@ server.registerTool('image_batch_retry_failed', {
 }, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' })).json()))
 
 server.registerTool('image_batch_item_qa', {
-  description: 'Record advisory visual QA for one terminal batch item. QA never confirms delivery or replaces an item by itself.',
+  description: 'Record visual QA for one terminal batch item. A passed QA result auto-confirms delivery; warnings remain pending human review.',
   inputSchema: {
     batchId: z.string().min(1),
     itemKey: z.string().min(1).max(200),

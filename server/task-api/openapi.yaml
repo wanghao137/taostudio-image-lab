@@ -312,7 +312,7 @@ paths:
   /v1/image-batches/{id}/items/{itemKey}/qa:
     post:
       operationId: recordImageBatchItemQa
-      description: Record advisory AI QA evidence. This never confirms delivery or changes the generated asset.
+      description: Record AI QA evidence. A passed result auto-confirms delivery; warnings remain pending human review and do not change the generated asset.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: itemKey, in: path, required: true, schema: { type: string } }
