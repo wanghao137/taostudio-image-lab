@@ -52,14 +52,18 @@ async function wait(url, id, timeoutMs = 8_000) {
 }
 
 async function waitBatch(url, id, timeoutMs = 8_000) {
+  return waitForBatch(url, id, (batch) => batch.state === 'completed', timeoutMs)
+}
+
+async function waitForBatch(url, id, predicate, timeoutMs = 8_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const response = await fetch(`${url}/v1/image-batches/${id}`, { headers: headers() })
     const batch = await response.json()
-    if (batch.state === 'completed') return batch
+    if (predicate(batch)) return batch
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 20))
   }
-  throw new Error(`batch ${id} did not finish`)
+  throw new Error(`batch ${id} did not reach the expected state`)
 }
 
 afterEach(async () => {
@@ -209,10 +213,11 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         batches: {
           qaStatuses: ['not_run', 'passed', 'failed', 'needs_review'],
           acceptanceStatuses: ['pending', 'accepted', 'needs_review', 'rejected'],
+          humanReviewStatuses: ['not_ready', 'pending', 'approved', 'rejected', 'not_applicable'],
           automation: {
             supported: true,
             maxRevisions: 3,
-            features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'automatic_acceptance'],
+            features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'human_review', 'optional_auto_revision'],
           },
         },
       },
@@ -649,7 +654,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(api.repository.countBatchResumeAttempts(created.id)).toBe(0)
   })
 
-  it('tracks batch QA, acceptance, and replacement job history independently from generation state', async () => {
+  it('keeps advisory QA, human approval, and replacement history independent from generation state', async () => {
     const { url, api } = await start({ concurrency: 0 })
     const created = await fetch(`${url}/v1/image-batches`, {
       method: 'POST',
@@ -671,35 +676,57 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     api.repository.transition(firstJob.id, 'finalizing')
     api.repository.transition(firstJob.id, 'succeeded')
 
-    // QA 仅作参考，不阻断验收：job succeeded 即可 accepted，qaStatus=failed 也允许（记为参考）。
-    const qaFailedButAccepted = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
+    const qaFailed = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/qa`, {
       method: 'POST',
       headers: headers({ 'content-type': 'application/json' }),
-      body: JSON.stringify({ qaStatus: 'failed', acceptanceStatus: 'accepted' }),
+      body: JSON.stringify({ qaStatus: 'failed', detail: { visualQa: 'failed' } }),
     })
-    expect(qaFailedButAccepted.status).toBe(200)
+    expect(qaFailed.status).toBe(200)
+    expect(await qaFailed.json()).toMatchObject({
+      state: 'completed',
+      acceptanceState: 'needs_review',
+      stats: { succeeded: 1, accepted: 0, needsReview: 1, qaFailed: 1, humanReviewPending: 1 },
+      items: [{
+        itemKey: 'reviewed-item',
+        qaStatus: 'failed',
+        acceptanceStatus: 'needs_review',
+        humanReviewStatus: 'pending',
+      }],
+    })
 
-    const reviewed = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
+    const qaPassed = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/qa`, {
       method: 'POST',
       headers: headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({
         qaStatus: 'passed',
-        acceptanceStatus: 'accepted',
         detail: { visualQa: 'passed', assetInvariant: 'passed' },
       }),
     }).then((response) => response.json())
-    expect(reviewed).toMatchObject({
+    expect(qaPassed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'accepted',
-      stats: { succeeded: 1, accepted: 1, qaPassed: 1, acceptancePending: 0 },
+      acceptanceState: 'needs_review',
+      stats: { succeeded: 1, accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
       items: [{
         itemKey: 'reviewed-item',
         revision: 0,
         generationStatus: 'succeeded',
         qaStatus: 'passed',
-        acceptanceStatus: 'accepted',
+        acceptanceStatus: 'needs_review',
+        humanReviewStatus: 'pending',
         jobHistory: [{ revision: 0, reason: 'initial', job: { id: firstJob.id } }],
       }],
+    })
+
+    const reviewed = await fetch(`${url}/v1/image-batches/${created.id}/items/reviewed-item/review`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ acceptanceStatus: 'accepted', detail: { actor: 'human', decision: 'approved_for_delivery' } }),
+    }).then((response) => response.json())
+    expect(reviewed).toMatchObject({
+      state: 'completed',
+      acceptanceState: 'accepted',
+      stats: { succeeded: 1, accepted: 1, qaPassed: 1, humanReviewApproved: 1 },
+      items: [{ humanReviewStatus: 'approved', acceptanceStatus: 'accepted' }],
     })
 
     const replacementRequest = request({
@@ -720,6 +747,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         revision: 1,
         qaStatus: 'not_run',
         acceptanceStatus: 'pending',
+        humanReviewStatus: 'not_ready',
         job: { request: { input: { prompt: 'revised after QA feedback' } } },
         jobHistory: [
           { revision: 0, job: { id: firstJob.id } },
@@ -734,7 +762,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
   })
 
-  it('expands multi-output prompts and automatically accepts every QA-passed item', async () => {
+  it('expands multi-output prompts, records QA, and leaves delivery to human review', async () => {
     const evaluator = {
       rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
       qa: async () => ({
@@ -755,6 +783,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         idempotencyKey: 'batch-automation-expand-001',
         automation: {
           enabled: true,
+          autoRevise: false,
           maxRevisions: 2,
           revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
         },
@@ -778,17 +807,22 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       ],
     })
 
-    const completed = await waitBatch(url, created.id)
+    const completed = await waitForBatch(
+      url,
+      created.id,
+      (batch) => batch.state === 'completed' && batch.stats.qaPassed === 2,
+    )
     expect(completed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'accepted',
-      stats: { total: 2, succeeded: 2, accepted: 2, qaPassed: 2, acceptancePending: 0 },
+      acceptanceState: 'needs_review',
+      stats: { total: 2, succeeded: 2, accepted: 0, needsReview: 2, qaPassed: 2, humanReviewPending: 2 },
     })
     expect(completed.items.every((item) => item.automationState === 'done')).toBe(true)
+    expect(completed.items.every((item) => item.humanReviewStatus === 'pending')).toBe(true)
     expect(completed.items.every((item) => item.job.request.input.prompt.includes('not a contact sheet'))).toBe(true)
   })
 
-  it('automatically rewrites a policy-rejected item and accepts the recovered revision', async () => {
+  it('only automatically rewrites a policy-rejected item when auto revision is explicit', async () => {
     let rewrites = 0
     const evaluator = {
       rewrite: async () => {
@@ -813,6 +847,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         idempotencyKey: 'batch-automation-policy-001',
         automation: {
           enabled: true,
+          autoRevise: true,
           maxRevisions: 2,
           revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
         },
@@ -828,16 +863,21 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       }),
     }).then((response) => response.json())
 
-    const completed = await waitBatch(url, created.id)
+    const completed = await waitForBatch(
+      url,
+      created.id,
+      (batch) => batch.state === 'completed' && batch.stats.qaPassed === 1,
+    )
     expect(rewrites).toBe(1)
     expect(completed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'accepted',
-      stats: { total: 1, succeeded: 1, accepted: 1, qaPassed: 1 },
+      acceptanceState: 'needs_review',
+      stats: { total: 1, succeeded: 1, accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
       items: [{
         itemKey: 'policy',
         revision: 1,
-        acceptanceStatus: 'accepted',
+        acceptanceStatus: 'needs_review',
+        humanReviewStatus: 'pending',
         job: { request: { input: { prompt: 'A compliant documentary poster' } } },
         jobHistory: [
           { revision: 0, reason: 'initial', job: { state: 'failed' } },
@@ -847,7 +887,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
   })
 
-  it('automatically revises a QA failure and preserves revision evidence', async () => {
+  it('only automatically revises a QA failure when auto revision is explicit', async () => {
     let inspections = 0
     const evaluator = {
       rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
@@ -882,6 +922,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         idempotencyKey: 'batch-automation-qa-001',
         automation: {
           enabled: true,
+          autoRevise: true,
           maxRevisions: 2,
           revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
         },
@@ -892,15 +933,20 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       }),
     }).then((response) => response.json())
 
-    const completed = await waitBatch(url, created.id)
+    const completed = await waitForBatch(
+      url,
+      created.id,
+      (batch) => batch.state === 'completed' && batch.stats.qaPassed === 1,
+    )
     expect(inspections).toBe(2)
     expect(completed).toMatchObject({
       state: 'completed',
-      stats: { accepted: 1, qaPassed: 1 },
+      stats: { accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
       items: [{
         itemKey: 'qa',
         revision: 1,
-        acceptanceStatus: 'accepted',
+        acceptanceStatus: 'needs_review',
+        humanReviewStatus: 'pending',
         jobHistory: [
           { revision: 0, reason: 'initial' },
           { revision: 1, reason: 'recompose' },
@@ -908,6 +954,62 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       }],
     })
     expect(completed.items[0].job.request.input.prompt).toContain('Keep a requested full-bleed background full-bleed')
+  })
+
+  it('keeps a QA warning on the original asset when automatic revision is disabled', async () => {
+    let inspections = 0
+    const evaluator = {
+      rewrite: async () => ({ prompt: 'should not be used', changes: '' }),
+      qa: async () => {
+        inspections += 1
+        return {
+          pass: false,
+          edgeClipping: true,
+          backgroundConflict: false,
+          missingCoreStructure: false,
+          blankOrBroken: false,
+          notes: 'title clipped',
+          model: 'mock-qa',
+        }
+      },
+    }
+    const { url } = await start({ batchAutomationEvaluator: evaluator })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-automation-advisory-qa-001',
+        automation: {
+          enabled: true,
+          autoRevise: false,
+          maxRevisions: 2,
+          revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
+        },
+        items: [{
+          itemKey: 'advisory-qa',
+          request: request({ idempotencyKey: 'batch-automation-advisory-qa-job-001' }),
+        }],
+      }),
+    }).then((response) => response.json())
+
+    const completed = await waitForBatch(
+      url,
+      created.id,
+      (batch) => batch.state === 'completed' && batch.stats.qaNeedsReview === 1,
+    )
+    expect(inspections).toBe(1)
+    expect(completed).toMatchObject({
+      state: 'completed',
+      acceptanceState: 'needs_review',
+      stats: { succeeded: 1, accepted: 0, needsReview: 1, qaNeedsReview: 1, humanReviewPending: 1 },
+      items: [{
+        itemKey: 'advisory-qa',
+        revision: 0,
+        qaStatus: 'needs_review',
+        acceptanceStatus: 'needs_review',
+        humanReviewStatus: 'pending',
+      }],
+    })
   })
 
   it('runs a mock job and stores traceable source/final PNG assets', async () => {
@@ -1625,7 +1727,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(sourceManifest.width * finalManifest.height).toBe(finalManifest.width * sourceManifest.height)
   })
 
-  it('auto-accepts non-automation batch items when a job succeeds', async () => {
+  it('puts successful non-automation batch items into human review without fabricating QA', async () => {
     const { url } = await start()
     const response = await fetch(`${url}/v1/image-batches`, {
       method: 'POST',
@@ -1645,11 +1747,11 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     const completed = await waitBatch(url, created.id)
     const item = completed.items[0]
     expect(item.generationStatus).toBe('succeeded')
-    expect(item.acceptanceStatus).toBe('accepted')
-    expect(item.qaStatus).toBe('passed')
+    expect(item.acceptanceStatus).toBe('needs_review')
+    expect(item.humanReviewStatus).toBe('pending')
+    expect(item.qaStatus).toBe('not_run')
     expect(item.automationState).toBe('done')
     expect(item.review).toMatchObject({
-      autoAccepted: true,
       jobId: item.job.id,
     })
     expect(item.review.sourceAssetPath).toContain('assets')
@@ -1678,17 +1780,14 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(response.status).toBe(201)
     expect(created.outputRoot).toBe(harvestDir)
 
-    // Poll until the item is accepted (auto-accept runs slightly after the
-    // job succeeds, so waitBatch may return before reviewBatchItem fires).
-    const deadline = Date.now() + 8_000
-    let batch = null
-    while (Date.now() < deadline) {
-      batch = await (await fetch(`${url}/v1/image-batches/${created.id}`, { headers: headers() })).json()
-      if (batch.items[0]?.acceptanceStatus === 'accepted') break
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
-    }
+    const batch = await waitForBatch(
+      url,
+      created.id,
+      (current) => current.state === 'completed' && Boolean(current.items[0]?.review?.harvestedFiles),
+    )
     const item = batch.items[0]
-    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.acceptanceStatus).toBe('needs_review')
+    expect(item.humanReviewStatus).toBe('pending')
     expect(item.outputPath).toBe(join(harvestDir, 'case-folder'))
     // Engine should have copied both PNGs to the outputPath directory
     const sourceFile = await readFile(join(item.outputPath, '\u539f\u56fe.png'))
@@ -1723,6 +1822,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
         idempotencyKey: 'batch-auto-accept-automation-001',
         automation: {
           enabled: true,
+          autoRevise: false,
           maxRevisions: 2,
           revisionRoute: { provider: 'mock', model: 'mock-qa', apiMode: 'responses' },
         },
@@ -1736,11 +1836,14 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(response.status).toBe(201)
     expect(created.automation).toMatchObject({ enabled: true })
 
-    const completed = await waitBatch(url, created.id)
+    const completed = await waitForBatch(
+      url,
+      created.id,
+      (batch) => batch.state === 'completed' && batch.stats.qaPassed === 1,
+    )
     const item = completed.items[0]
-    // Automation batch: acceptance is done by the automation pool, NOT the auto-accept hook.
-    // The item IS accepted (automation pool accepts it), but review.autoAccepted should NOT be present.
-    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.acceptanceStatus).toBe('needs_review')
+    expect(item.humanReviewStatus).toBe('pending')
     expect(item.review.autoAccepted).toBeUndefined()
   })
 })

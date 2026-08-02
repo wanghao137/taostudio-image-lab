@@ -34,6 +34,8 @@ const api = await createTaskApi({
   batchWatchdogPollIntervalMs: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_POLL_MS', '60000')),
   batchWatchdogCooldownMs: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_COOLDOWN_MS', '120000')),
   batchWatchdogMaxAttempts: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_MAX_ATTEMPTS', '5')),
+  batchAutomationConcurrency: Number(value('IMAGE_TASK_API_BATCH_AUTOMATION_CONCURRENCY', '1')),
+  batchAutomationTimeoutMs: Number(value('IMAGE_TASK_API_BATCH_AUTOMATION_TIMEOUT_MS', '180000')),
 })
 const address = await api.listen(Number(value('IMAGE_TASK_API_PORT', '9789')))
 console.log(`TaoStudio Image Task API listening at ${address.url}`)

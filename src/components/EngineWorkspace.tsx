@@ -35,17 +35,21 @@ import {
   controlImageBatch,
   getImageBatch,
   getImageAssetBlob,
+  getImageAssetThumbnailBlob,
   getImageJob,
   getImageTaskCapabilities,
   listImageBatches,
   listImageJobs,
+  replaceImageBatchItemJob,
   readLocalImageTaskApiConfig,
+  reviewImageBatchItem,
   retryImageJob,
   saveLocalImageTaskApiConfig,
   type ImageJobStateV1,
   type ImageJobListV1,
   type ImageJobV1,
   type ImageBatchV1,
+  type ImageBatchSummaryV1,
   type ImageTaskApiConfig,
   type ImageTaskCapabilitiesV1,
 } from '../lib/imageTaskApi'
@@ -107,21 +111,144 @@ function StatusBadge({ state }: { state: ImageJobStateV1 }) {
   )
 }
 
-function batchStateLabel(batch: ImageBatchV1) {
+function QaBadge({ status }: { status: ImageBatchV1['items'][number]['qaStatus'] }) {
+  const style = status === 'passed'
+    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+    : status === 'not_run'
+      ? 'bg-stone-100 text-stone-500 dark:bg-white/[0.06] dark:text-stone-400'
+      : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
+  const label = status === 'passed' ? 'QA 通过' : status === 'not_run' ? 'QA 未运行' : 'QA 告警'
+  return <span className={`rounded px-2 py-1 text-[10px] font-medium ${style}`}>{label}</span>
+}
+
+function HumanReviewBadge({ status }: { status: ImageBatchV1['items'][number]['humanReviewStatus'] }) {
+  const style = status === 'approved'
+    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
+    : status === 'rejected'
+      ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
+      : status === 'not_applicable'
+        ? 'bg-stone-100 text-stone-500 dark:bg-white/[0.06] dark:text-stone-400'
+      : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
+  const label = status === 'approved'
+    ? '已确认交付'
+    : status === 'rejected'
+      ? '已拒绝'
+      : status === 'not_applicable'
+        ? '无需人工确认'
+        : status === 'not_ready'
+          ? '等待生成'
+          : '待人工确认'
+  return <span className={`rounded px-2 py-1 text-[10px] font-medium ${style}`}>{label}</span>
+}
+
+function ReviewThumbnail({
+  config,
+  assetId,
+  label,
+}: {
+  config: ImageTaskApiConfig
+  assetId: string | null
+  label: string
+}) {
+  const [url, setUrl] = useState<string | null>(null)
+  const [visible, setVisible] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!assetId) {
+      setUrl(null)
+      setVisible(false)
+      return
+    }
+    setUrl(null)
+    const element = containerRef.current
+    if (!element || typeof IntersectionObserver === 'undefined') {
+      setVisible(true)
+      return
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setVisible(true)
+        observer.disconnect()
+      }
+    }, { rootMargin: '160px' })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [assetId])
+
+  useEffect(() => {
+    let active = true
+    let objectUrl: string | null = null
+    if (!assetId || !visible) return
+    void getImageAssetThumbnailBlob(config, assetId)
+      .then((blob) => {
+        if (!active) return
+        objectUrl = URL.createObjectURL(blob)
+        setUrl(objectUrl)
+      })
+      .catch(() => {
+        if (active) setUrl(null)
+      })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [assetId, config, visible])
+
+  return (
+    <div ref={containerRef} className="flex h-full w-full items-center justify-center bg-stone-100 dark:bg-white/[0.04]">
+      {url
+        ? <img src={url} alt={label} className="h-full w-full object-cover" loading="lazy" />
+        : <span className="text-[10px] text-stone-400">{visible ? '无预览' : '加载预览'}</span>}
+    </div>
+  )
+}
+
+function toBatchSummary(batch: ImageBatchV1): ImageBatchSummaryV1 {
+  const { items: _items, events: _events, ...summary } = batch
+  return summary
+}
+
+function batchHasActiveAutomation(batch: ImageBatchV1) {
+  return batch.automation.enabled && batch.items.some((item) => (
+    ['succeeded', 'failed', 'cancelled'].includes(item.job.state)
+    && item.automationState !== 'done'
+  ))
+}
+
+function batchHasPendingQa(batch: ImageBatchSummaryV1) {
+  return batch.automation.enabled
+    && batch.state === 'completed'
+    && batch.stats.acceptancePending > 0
+}
+
+function batchReviewNote(item: ImageBatchV1['items'][number]) {
+  const review = item.review || {}
+  const qa = (review.qa || review.qaReference) as { notes?: unknown; reason?: unknown } | undefined
+  if (typeof qa?.notes === 'string' && qa.notes.trim()) return qa.notes.trim()
+  if (typeof qa?.reason === 'string' && qa.reason.trim()) return qa.reason.trim()
+  if (item.failureClass) return item.failureClass
+  if (item.recoveryAction) return item.recoveryAction
+  return null
+}
+
+function batchStateLabel(batch: ImageBatchSummaryV1) {
   if (batch.state === 'running') {
     if (batch.runner?.active) return '接管中'
     return (batch.runner?.attempt || 0) > 0 ? '等待接管' : '执行中'
   }
   if (batch.state === 'paused') return batch.pauseReason === 'runner_disconnected' ? '等待接管' : '已暂停'
-  if (batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return '待复核'
+  if (batchHasPendingQa(batch)) return 'QA 处理中'
+  if (batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return '待人工复核'
   return '已归档'
 }
 
-function batchStateTone(batch: ImageBatchV1) {
+function batchStateTone(batch: ImageBatchSummaryV1) {
   if (batch.state === 'running') return (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
     ? 'text-amber-700 dark:text-amber-300'
     : 'text-sky-700 dark:text-sky-300'
   if (batch.state === 'paused' || batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return 'text-amber-700 dark:text-amber-300'
+  if (batchHasPendingQa(batch)) return 'text-sky-700 dark:text-sky-300'
   return 'text-stone-500 dark:text-stone-400'
 }
 
@@ -130,9 +257,9 @@ function BatchQueueRow({
   selected,
   onSelect,
 }: {
-  batch: ImageBatchV1
+  batch: ImageBatchSummaryV1
   selected: boolean
-  onSelect: (batch: ImageBatchV1) => void
+  onSelect: (batch: ImageBatchSummaryV1) => void
 }) {
   const issueCount = batch.stats.failed + batch.stats.cancelled + batch.stats.needsReview + batch.stats.rejected
   return (
@@ -147,7 +274,8 @@ function BatchQueueRow({
           <span>{batch.stats.succeeded}/{batch.stats.total} 完成</span>
           {batch.stats.failed > 0 && <span>{batch.stats.failed} 失败</span>}
           {batch.stats.cancelled > 0 && <span>{batch.stats.cancelled} 取消</span>}
-          {batch.stats.needsReview + batch.stats.rejected > 0 && <span>{batch.stats.needsReview + batch.stats.rejected} 待复核</span>}
+          {batch.stats.qaNeedsReview + batch.stats.qaFailed > 0 && <span>{batch.stats.qaNeedsReview + batch.stats.qaFailed} QA 告警</span>}
+          {batch.stats.needsReview > 0 && <span>{batch.stats.needsReview} 待人工确认</span>}
         </div>
       </div>
       <time className="hidden self-center whitespace-nowrap text-[10px] text-stone-400 sm:block">{formatTime(batch.updatedAt)}</time>
@@ -163,9 +291,9 @@ function BatchQueueSection({
   onSelect,
 }: {
   title: string
-  batches: ImageBatchV1[]
+  batches: ImageBatchSummaryV1[]
   selectedBatchId: string | undefined
-  onSelect: (batch: ImageBatchV1) => void
+  onSelect: (batch: ImageBatchSummaryV1) => void
 }) {
   if (!batches.length) return null
   return (
@@ -196,6 +324,7 @@ interface NewJobDraft {
   fallbackEnabled: boolean
   fallbackModel: string
   fallbackApiMode: 'images' | 'responses'
+  autoRevise: boolean
 }
 
 const DEFAULT_DRAFT: NewJobDraft = {
@@ -206,6 +335,7 @@ const DEFAULT_DRAFT: NewJobDraft = {
   fallbackEnabled: true,
   fallbackModel: 'gpt-5.6-sol',
   fallbackApiMode: 'responses',
+  autoRevise: false,
 }
 
 export default function EngineWorkspace() {
@@ -218,7 +348,7 @@ export default function EngineWorkspace() {
   const [capabilities, setCapabilities] = useState<ImageTaskCapabilitiesV1 | null>(null)
   const [jobs, setJobs] = useState<ImageJobV1[]>([])
   const [jobStats, setJobStats] = useState<ImageJobListV1['stats'] | null>(null)
-  const [batches, setBatches] = useState<ImageBatchV1[]>([])
+  const [batches, setBatches] = useState<ImageBatchSummaryV1[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [filter, setFilter] = useState<ImageJobStateV1 | 'all'>('all')
   const [selectedJob, setSelectedJob] = useState<ImageJobV1 | null>(null)
@@ -277,12 +407,12 @@ export default function EngineWorkspace() {
       .catch((error) => setWorkspaceError(errorMessage(error)))
   }, [beginInspectorSelection, config])
 
-  const handleSelectBatch = useCallback((batch: ImageBatchV1) => {
+  const handleSelectBatch = useCallback((batch: ImageBatchSummaryV1) => {
     const selectionVersion = beginInspectorSelection('batch', batch.id)
     setShowNewJob(false)
     setShowNewBatch(false)
     setSelectedJob(null)
-    setSelectedBatch(batch)
+    setSelectedBatch(null)
     if (!config) return
     void getImageBatch(config, batch.id)
       .then((detail) => {
@@ -369,18 +499,19 @@ export default function EngineWorkspace() {
     if (!targetConfig) return
     try {
       const result = await listImageBatches(targetConfig)
-      let next = result.items
+      const next = result.items
       if (selectedBatch?.id) {
-        const selectionVersion = inspectorSelectionRef.current.version
-        const detail = await getImageBatch(targetConfig, selectedBatch.id)
-        next = next.map((batch) => batch.id === detail.id ? detail : batch)
-        if (!next.some((batch) => batch.id === detail.id)) next = [detail, ...next]
-        const selection = inspectorSelectionRef.current
-        if (
-          selection.version === selectionVersion
-          && selection.kind === 'batch'
-          && selection.id === detail.id
-        ) setSelectedBatch(detail)
+        const currentSummary = next.find((batch) => batch.id === selectedBatch.id)
+        if (currentSummary && (currentSummary.state === 'running' || batchHasActiveAutomation(selectedBatch))) {
+          const selectionVersion = inspectorSelectionRef.current.version
+          const detail = await getImageBatch(targetConfig, selectedBatch.id)
+          const selection = inspectorSelectionRef.current
+          if (
+            selection.version === selectionVersion
+            && selection.kind === 'batch'
+            && selection.id === detail.id
+          ) setSelectedBatch(detail)
+        }
       }
       setBatches(next)
     } catch (error) {
@@ -388,15 +519,83 @@ export default function EngineWorkspace() {
     }
   }, [config, selectedBatch?.id])
 
+  // Polling must have one stable lifecycle. State arrays are updated on every
+  // response, so keeping them in the effect dependency list would tear down
+  // and restart the timer after every poll.
+  const pollingStateRef = useRef({ config, capabilities, jobs, batches, selectedBatch })
+  pollingStateRef.current = { config, capabilities, jobs, batches, selectedBatch }
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+  const refreshBatchesRef = useRef(refreshBatches)
+  refreshBatchesRef.current = refreshBatches
+
   useEffect(() => {
     if (!config || !capabilities) return
-    void refresh(config, null)
-    const interval = window.setInterval(() => {
-      void refresh(config, null)
-      void refreshBatches(config)
-    }, 3000)
-    return () => window.clearInterval(interval)
-  }, [capabilities, config, refresh, refreshBatches])
+    let timer: number | undefined
+    let disposed = false
+    let inFlight = false
+    let initialPoll = true
+    const hasActiveWork = () => {
+      const { jobs: currentJobs, batches: currentBatches, selectedBatch: currentSelectedBatch } = pollingStateRef.current
+      return currentJobs.some((job) => ACTIVE_STATES.has(job.state))
+        || currentBatches.some((batch) => batch.state === 'running')
+        || Boolean(currentSelectedBatch && batchHasActiveAutomation(currentSelectedBatch))
+    }
+    const schedule = () => {
+      if (disposed || timer !== undefined) return
+      const interval = initialPoll
+        ? 3_000
+        : document.visibilityState === 'hidden'
+          ? 60_000
+          : hasActiveWork()
+            ? 3_000
+            : 15_000
+      timer = window.setTimeout(() => {
+        timer = undefined
+        initialPoll = false
+        void run()
+      }, interval)
+    }
+    const run = async () => {
+      if (disposed || inFlight) return
+      inFlight = true
+      const targetConfig = pollingStateRef.current.config
+      if (!targetConfig) {
+        inFlight = false
+        return
+      }
+      try {
+        await Promise.all([
+          refreshRef.current(targetConfig, null),
+          refreshBatchesRef.current(targetConfig),
+        ])
+      } finally {
+        inFlight = false
+        schedule()
+      }
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+        timer = undefined
+      }
+      initialPoll = false
+      void run()
+    }
+    // `connect` already loaded the first snapshot. Scheduling here avoids a
+    // duplicate initial request under React StrictMode's development remount.
+    schedule()
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      disposed = true
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+        timer = undefined
+      }
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [capabilities, config])
 
   useEffect(() => {
     let finalObjectUrl: string | null = null
@@ -443,11 +642,12 @@ export default function EngineWorkspace() {
 
   const batchGroups = useMemo(() => {
     const filtered = batches.filter((batch) => !batchFilter || (batch.name || batch.id).toLowerCase().includes(batchFilter.toLowerCase()))
-    const runnerDisconnected = (batch: ImageBatchV1) => batch.state === 'running' && (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
+    const runnerDisconnected = (batch: ImageBatchSummaryV1) => batch.state === 'running' && (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
     const active = filtered.filter((batch) => batch.state === 'running' && !runnerDisconnected(batch))
     const needsAttention = filtered.filter((batch) => !active.includes(batch) && (
       runnerDisconnected(batch)
       || batch.state === 'paused'
+      || batchHasPendingQa(batch)
       || batch.acceptanceState === 'needs_review'
       || batch.acceptanceState === 'rejected'
       || batch.stats.failed > 0
@@ -586,8 +786,65 @@ export default function EngineWorkspace() {
     setBusy(true)
     try {
       const next = await controlImageBatch(config, selectedBatch.id, action)
-      setSelectedBatch(next)
-      setBatches((current) => current.map((batch) => batch.id === next.id ? next : batch))
+      applyBatchUpdate(next)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const applyBatchUpdate = useCallback((next: ImageBatchV1) => {
+    setSelectedBatch(next)
+    setBatches((current) => {
+      const summary = toBatchSummary(next)
+      const found = current.some((batch) => batch.id === next.id)
+      return found
+        ? current.map((batch) => batch.id === next.id ? summary : batch)
+        : [summary, ...current]
+    })
+  }, [])
+
+  const handleBatchItemReview = async (
+    itemKey: string,
+    acceptanceStatus: 'accepted' | 'rejected',
+  ) => {
+    if (!config || !selectedBatch) return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      const next = await reviewImageBatchItem(config, selectedBatch.id, itemKey, {
+        acceptanceStatus,
+        detail: {
+          actor: 'human',
+          decidedAt: new Date().toISOString(),
+          decision: acceptanceStatus === 'accepted' ? 'approved_for_delivery' : 'rejected_by_reviewer',
+        },
+      })
+      applyBatchUpdate(next)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleBatchItemRetry = async (item: ImageBatchV1['items'][number]) => {
+    if (!config || !selectedBatch || item.job.state !== 'succeeded') return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      const next = await replaceImageBatchItemJob(
+        config,
+        selectedBatch.id,
+        item.itemKey,
+        {
+          ...item.job.request,
+          idempotencyKey: `human-review-retry:${crypto.randomUUID()}`,
+        },
+        'human_review_retry',
+      )
+      applyBatchUpdate(next)
     } catch (error) {
       setWorkspaceError(errorMessage(error))
     } finally {
@@ -620,7 +877,7 @@ export default function EngineWorkspace() {
     setConnectionDraft((current) => ({ ...current, token: '' }))
   }
 
-  if (!capabilities) {
+  if (!capabilities || !config) {
     return (
       <main className="min-h-[calc(100vh-4rem)] bg-[#f4f1ec] px-4 py-8 dark:bg-[#11100e] sm:px-6 sm:py-12">
         <form onSubmit={handleConnect} className="mx-auto max-w-xl border-y border-stone-300 py-8 dark:border-white/10">
@@ -857,6 +1114,7 @@ export default function EngineWorkspace() {
                 busy={busy}
                 onChange={setBatchDraft}
                 onRatioChange={(ratio) => setDraft((current) => ({ ...current, ratio }))}
+                onAutoReviseChange={(autoRevise) => setDraft((current) => ({ ...current, autoRevise }))}
                 onClose={() => setShowNewBatch(false)}
                 onSubmit={handleCreateBatch}
               />
@@ -870,7 +1128,15 @@ export default function EngineWorkspace() {
                 onSubmit={handleCreate}
               />
             ) : selectedBatch ? (
-              <BatchInspector batch={selectedBatch} busy={busy} onControl={handleBatchControl} onClose={clearInspectorSelection} />
+              <BatchInspector
+                batch={selectedBatch}
+                config={config}
+                busy={busy}
+                onControl={handleBatchControl}
+                onReview={handleBatchItemReview}
+                onRetryItem={handleBatchItemRetry}
+                onClose={clearInspectorSelection}
+              />
             ) : selectedJob ? (
               <JobInspector
                 job={selectedJob}
@@ -1027,6 +1293,7 @@ function NewBatchForm({
   busy,
   onChange,
   onRatioChange,
+  onAutoReviseChange,
   onClose,
   onSubmit,
 }: {
@@ -1036,6 +1303,7 @@ function NewBatchForm({
   busy: boolean
   onChange: (draft: { name: string; prompts: string }) => void
   onRatioChange: (ratio: string) => void
+  onAutoReviseChange: (autoRevise: boolean) => void
   onClose: () => void
   onSubmit: (event: FormEvent) => void
 }) {
@@ -1092,10 +1360,22 @@ function NewBatchForm({
       <div className="mt-4 border-y border-stone-300 py-3 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
         <div className="flex justify-between gap-3"><span>主路由</span><span className="truncate font-mono">{draft.model} / {draft.apiMode}</span></div>
         <div className="mt-2 flex justify-between gap-3"><span>备用路由</span><span className="truncate font-mono">{draft.fallbackEnabled ? `${draft.fallbackModel} / ${draft.fallbackApiMode}` : '关闭'}</span></div>
-        <div className="mt-2 flex justify-between gap-3"><span>自动 QA / 修订</span><span className="truncate font-mono">{draft.fallbackModel} / responses</span></div>
+        <div className="mt-2 flex justify-between gap-3"><span>QA 检查模型</span><span className="truncate font-mono">{draft.fallbackModel} / responses</span></div>
         <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('2K', draft.ratio)}</span></div>
-        <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG</span></div>
+        <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG (Lanczos3)</span></div>
       </div>
+      <label className="mt-4 flex cursor-pointer items-start gap-3 border-l-2 border-amber-300 bg-amber-50/70 px-3 py-3 text-xs text-amber-900 dark:border-amber-400/50 dark:bg-amber-400/10 dark:text-amber-100">
+        <input
+          type="checkbox"
+          checked={draft.autoRevise}
+          onChange={(event) => onAutoReviseChange(event.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-[#356c82]"
+        />
+        <span>
+          <span className="block font-medium">高级：QA 告警后自动修订</span>
+          <span className="mt-1 block leading-5 opacity-80">默认仅标记告警并继续执行；开启后最多自动重生两次。</span>
+        </span>
+      </label>
       <button
         type="submit"
         disabled={busy || promptCount === 0 || !draft.model.trim() || !draft.fallbackModel.trim()}
@@ -1110,19 +1390,32 @@ function NewBatchForm({
 
 function BatchInspector({
   batch,
+  config,
   busy,
   onControl,
+  onReview,
+  onRetryItem,
   onClose,
 }: {
   batch: ImageBatchV1
+  config: ImageTaskApiConfig
   busy: boolean
   onControl: (action: 'pause' | 'resume' | 'retry-failed') => void
+  onReview: (itemKey: string, acceptanceStatus: 'accepted' | 'rejected') => void
+  onRetryItem: (item: ImageBatchV1['items'][number]) => void
   onClose: () => void
 }) {
-  const completed = batch.automation.enabled
-    ? batch.stats.accepted + batch.stats.needsReview + batch.stats.rejected
-    : batch.stats.terminal
-  const percentage = batch.stats.total ? Math.round((completed / batch.stats.total) * 100) : 0
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'pending' | 'approved' | 'rejected'>('pending')
+  const executionPercentage = batch.stats.total ? Math.round((batch.stats.terminal / batch.stats.total) * 100) : 0
+  const humanDone = batch.stats.humanReviewApproved + batch.stats.humanReviewRejected
+  const reviewPercentage = batch.stats.total ? Math.round((humanDone / batch.stats.total) * 100) : 0
+  const reviewItems = batch.items.filter((item) => {
+    if (reviewFilter === 'warnings') return item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'
+    if (reviewFilter === 'pending') return item.humanReviewStatus === 'pending'
+    if (reviewFilter === 'approved') return item.humanReviewStatus === 'approved'
+    if (reviewFilter === 'rejected') return item.humanReviewStatus === 'rejected'
+    return true
+  })
   return (
     <div>
       <div className="flex items-start justify-between gap-3">
@@ -1131,7 +1424,7 @@ function BatchInspector({
           <h2 className="mt-1 break-all font-mono text-sm font-semibold">{batch.name || batch.id}</h2>
           {batch.automation.enabled && (
             <div className="mt-2 text-[10px] font-medium text-[#356c82] dark:text-[#8ec5d7]">
-              自动恢复 · 视觉 QA · 自动验收
+              自动恢复 · 视觉 QA · 人工确认交付
             </div>
           )}
         </div>
@@ -1152,11 +1445,18 @@ function BatchInspector({
       </div>
       <div className="mt-5">
         <div className="flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
-          <span>{batch.automation.enabled ? '交付进度' : '批次进度'}</span>
-          <span className="font-mono">{completed}/{batch.stats.total} · {percentage}%</span>
+          <span>执行进度</span>
+          <span className="font-mono">{batch.stats.terminal}/{batch.stats.total} · {executionPercentage}%</span>
         </div>
         <div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
-          <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${percentage}%` }} />
+          <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${executionPercentage}%` }} />
+        </div>
+        <div className="mt-4 flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
+          <span>人工确认进度</span>
+          <span className="font-mono">{humanDone}/{batch.stats.total} · {reviewPercentage}%</span>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
+          <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${reviewPercentage}%` }} />
         </div>
       </div>
       <dl className="mt-5 grid grid-cols-3 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
@@ -1165,48 +1465,123 @@ function BatchInspector({
         <div><dt className="text-stone-400">已取消</dt><dd className="mt-1 font-mono text-stone-400">{batch.stats.cancelled}</dd></div>
         <div><dt className="text-stone-400">执行中</dt><dd className="mt-1 font-mono">{batch.stats.active}</dd></div>
         <div><dt className="text-stone-400">排队</dt><dd className="mt-1 font-mono">{batch.stats.queued}</dd></div>
-        <div><dt className="text-stone-400">验收进度</dt><dd className="mt-1 font-mono">{percentage}%</dd></div>
+        <div><dt className="text-stone-400">QA 告警</dt><dd className="mt-1 font-mono text-amber-700 dark:text-amber-300">{batch.stats.qaNeedsReview + batch.stats.qaFailed}</dd></div>
       </dl>
-      <div className="mt-5">
+      <section className="mt-5" aria-label="人工交付验收">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-xs font-semibold">交付验收</h3>
-          <span className="text-[10px] text-stone-400">
-            已验收 {batch.stats.accepted} / 待复核 {batch.stats.needsReview} / 拒绝 {batch.stats.rejected}
+          <div>
+            <h3 className="text-xs font-semibold">人工交付验收</h3>
+            <p className="mt-1 text-[10px] leading-4 text-stone-400">QA 仅提供证据与提示；确认交付由人工决定。</p>
+          </div>
+          <span className="shrink-0 font-mono text-[10px] text-stone-400">
+            待确认 {batch.stats.humanReviewPending} / 已确认 {batch.stats.humanReviewApproved}
           </span>
         </div>
-        <div className="mt-2 max-h-64 divide-y divide-stone-200 overflow-auto border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
-          {batch.items.map((item) => (
-            <div
-              key={item.itemKey}
-              className={`grid grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-2.5 text-xs ${item.job.state === 'cancelled' ? 'bg-stone-50 opacity-60 dark:bg-white/[0.02]' : ''}`}
+        <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="验收筛选">
+          {([
+            ['pending', `待确认 ${batch.stats.humanReviewPending}`],
+            ['warnings', `QA 告警 ${batch.stats.qaNeedsReview + batch.stats.qaFailed + batch.stats.qaNotRun}`],
+            ['all', `全部 ${batch.stats.total}`],
+            ['approved', `已确认 ${batch.stats.humanReviewApproved}`],
+            ['rejected', `已拒绝 ${batch.stats.humanReviewRejected}`],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setReviewFilter(value)}
+              className={`h-7 rounded-md border px-2 text-[10px] font-medium transition-colors ${
+                reviewFilter === value
+                  ? 'border-[#356c82] bg-[#356c82] text-white'
+                  : 'border-stone-300 text-stone-500 hover:bg-white dark:border-white/10 dark:text-stone-400 dark:hover:bg-white/[0.04]'
+              }`}
             >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 truncate">
-                  <span className="font-mono">{item.itemKey}</span>
-                  {item.job.state === 'cancelled' && (
-                    <span className="shrink-0 rounded bg-stone-200 px-1.5 py-0.5 text-[9px] font-medium text-stone-500 dark:bg-stone-700 dark:text-stone-400">已取消</span>
-                  )}
-                </div>
-                <div className="mt-1 text-[10px] text-stone-400">
-                  {item.outputCount > 1 ? `输出 ${item.outputIndex}/${item.outputCount} · ` : ''}
-                  Job 修订 {item.revision} · {item.job.state === 'cancelled' ? '已取消' : item.generationStatus}
-                  {batch.automation.enabled ? ` · 自动化 ${item.automationState}` : ''}
-                  {item.failureClass ? ` · ${item.failureClass}` : ''}
-                </div>
-              </div>
-              <span className={`self-center rounded px-2 py-1 text-[10px] font-medium ${
-                item.acceptanceStatus === 'accepted'
-                  ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
-                  : item.acceptanceStatus === 'rejected'
-                    ? 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300'
-                    : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
-              }`}>
-                {item.acceptanceStatus}
-              </span>
-            </div>
+              {label}
+            </button>
           ))}
         </div>
-      </div>
+        <div className="mt-3 grid max-h-[620px] grid-cols-1 gap-2 overflow-auto pr-1 sm:grid-cols-2">
+          {reviewItems.map((item) => {
+            const canDecide = item.job.state === 'succeeded' && item.humanReviewStatus === 'pending'
+            const qaNote = batchReviewNote(item)
+            return (
+              <article
+                key={item.itemKey}
+                className={`overflow-hidden border text-xs ${
+                  item.qaStatus === 'needs_review' || item.qaStatus === 'failed'
+                    ? 'border-amber-300 bg-amber-50/30 dark:border-amber-400/30 dark:bg-amber-400/[0.04]'
+                    : item.humanReviewStatus === 'approved'
+                      ? 'border-emerald-200 bg-emerald-50/30 dark:border-emerald-400/20 dark:bg-emerald-400/[0.03]'
+                      : 'border-stone-300 bg-white/45 dark:border-white/10 dark:bg-white/[0.02]'
+                }`}
+              >
+                <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-2 p-2">
+                  <div className="aspect-square overflow-hidden border border-stone-200 bg-stone-100 dark:border-white/10 dark:bg-white/[0.04]">
+                    <ReviewThumbnail
+                      config={config}
+                      assetId={item.job.finalAssetId || null}
+                      label={`${item.itemKey} 最终产物缩略图`}
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="truncate font-mono text-[10px] font-medium">{item.itemKey}</span>
+                      <StatusBadge state={item.job.state} />
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-stone-600 dark:text-stone-300">{item.job.request.input.prompt || '图像编辑任务'}</p>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      <QaBadge status={item.qaStatus} />
+                      <HumanReviewBadge status={item.humanReviewStatus} />
+                    </div>
+                  </div>
+                </div>
+                <div className="border-t border-stone-200 px-2 py-2 dark:border-white/[0.08]">
+                  <div className="min-h-4 truncate text-[10px] text-stone-400" title={qaNote || undefined}>
+                    {qaNote || (item.job.state === 'succeeded' ? '未发现额外 QA 提示' : '该条目没有可交付产物')}
+                  </div>
+                  <div className="mt-2 flex min-h-7 flex-wrap items-center gap-1.5">
+                    {canDecide && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onReview(item.itemKey, 'accepted')}
+                          disabled={busy}
+                          className="inline-flex h-7 items-center gap-1 rounded-md bg-emerald-600 px-2 text-[10px] font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+                        >
+                          <Check className="h-3 w-3" />确认交付
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRetryItem(item)}
+                          disabled={busy}
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-[#356c82]/40 px-2 text-[10px] font-medium text-[#356c82] hover:bg-[#356c82]/10 disabled:opacity-40 dark:border-[#8ec5d7]/30 dark:text-[#8ec5d7]"
+                        >
+                          <RefreshCw className="h-3 w-3" />重生
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onReview(item.itemKey, 'rejected')}
+                          disabled={busy}
+                          className="inline-flex h-7 items-center gap-1 rounded-md border border-red-300 px-2 text-[10px] font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-400/30 dark:text-red-300"
+                        >
+                          <Ban className="h-3 w-3" />拒绝
+                        </button>
+                      </>
+                    )}
+                    {!canDecide && item.job.state === 'succeeded' && item.humanReviewStatus === 'not_ready' && (
+                      <span className="text-[10px] text-stone-400">等待 QA 记录完成</span>
+                    )}
+                  </div>
+                </div>
+              </article>
+            )
+          })}
+          {!reviewItems.length && (
+            <div className="col-span-full border border-dashed border-stone-300 px-3 py-8 text-center text-xs text-stone-400 dark:border-white/10">
+              当前筛选下没有条目
+            </div>
+          )}
+        </div>
+      </section>
       <div className="mt-5 flex flex-wrap gap-2">
         {batch.state === 'running' && (
           <button type="button" onClick={() => onControl('pause')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-amber-300 px-3 text-xs font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-40 dark:border-amber-400/30 dark:text-amber-300">
@@ -1223,17 +1598,6 @@ function BatchInspector({
             {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}重试失败项
           </button>
         )}
-      </div>
-      <div className="mt-6">
-        <h3 className="text-xs font-semibold uppercase text-stone-400">条目</h3>
-        <ol className="mt-3 max-h-[360px] overflow-auto divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
-          {batch.items.map((item) => (
-            <li key={item.itemKey} className="flex items-center justify-between gap-3 py-2 text-xs">
-              <span className="min-w-0 truncate">{item.itemKey}</span>
-              <StatusBadge state={item.job.state} />
-            </li>
-          ))}
-        </ol>
       </div>
     </div>
   )

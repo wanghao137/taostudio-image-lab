@@ -880,11 +880,10 @@ for (const entry of queuedEntries) {
           replacementReason = 'safe_rewrite'
           continue
         }
-        activeBatch = await callMcp('image_batch_item_review', {
+        activeBatch = await callMcp('image_batch_item_qa', {
           batchId: activeBatch.id,
           itemKey: entry.itemKey,
           qaStatus: 'not_run',
-          acceptanceStatus: 'rejected',
           failureClass: policyFailure(job) ? 'content_policy' : (job.error?.failureClass || 'generation_failed'),
           recoveryAction: policyFailure(job) ? 'safe_rewrite' : (job.error?.recoveryAction || 'inspect_failure'),
           detail: { jobId: job.id, revision },
@@ -925,13 +924,12 @@ for (const entry of queuedEntries) {
       // 真正的生成 provider 5xx 仍由 providerRoutesUnavailable 检测并触发 BATCH_PAUSED。
       const qaPass = qa.status === 'completed' && qa.pass
       console.log(`QA index=${entry.index} revision=${revision} status=${qa.status} pass=${qaPass} notes=${qa.notes || qa.reason || ''}`)
-      // QA 仅作参考记录，不阻断 succeeded：生成成功 + 技术核验通过即可验收。
-      // QA 结果（含失败原因）保留在 accepted.visualQa 与 metadata 供人工复核。
-      activeBatch = await callMcp('image_batch_item_review', {
+      // QA only records evidence. A succeeded, technically verified asset is
+      // ready for human review whether QA passes, warns, or is unavailable.
+      activeBatch = await callMcp('image_batch_item_qa', {
         batchId: activeBatch.id,
         itemKey: entry.itemKey,
         qaStatus: qaPass ? 'passed' : (qa.status === 'completed' ? 'needs_review' : 'not_run'),
-        acceptanceStatus: 'accepted',
         ...(qaPass ? {} : {
           failureClass: qa.status === 'completed' ? 'qa_reference_only' : 'qa_unavailable',
           recoveryAction: 'manual_review',
@@ -953,11 +951,10 @@ for (const entry of queuedEntries) {
 
     if (!accepted) {
       if (!reviewRecorded) {
-        activeBatch = await callMcp('image_batch_item_review', {
+        activeBatch = await callMcp('image_batch_item_qa', {
           batchId: activeBatch.id,
           itemKey: entry.itemKey,
           qaStatus: 'needs_review',
-          acceptanceStatus: 'needs_review',
           failureClass: 'recovery_exhausted',
           recoveryAction: 'manual_review',
           detail: { revisions: revisions.length },
@@ -1023,11 +1020,10 @@ for (const entry of queuedEntries) {
     const runnerLeaseLost = error?.code === 'RUNNER_LEASE_LOST'
     if (activeBatch?.id && !runnerLeaseLost) {
       try {
-        activeBatch = await callMcp('image_batch_item_review', {
+        activeBatch = await callMcp('image_batch_item_qa', {
           batchId: activeBatch.id,
           itemKey: entry.itemKey,
           qaStatus: 'needs_review',
-          acceptanceStatus: 'needs_review',
           failureClass: error?.code === 'PROVIDER_UNAVAILABLE' ? 'provider_transient' : 'batch_error',
           recoveryAction: error?.code === 'PROVIDER_UNAVAILABLE' ? 'health_probe' : 'inspect_failure',
           detail: { message: error instanceof Error ? error.message : String(error) },

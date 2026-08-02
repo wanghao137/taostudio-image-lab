@@ -302,15 +302,31 @@ server.registerTool('image_batch_retry_failed', {
   inputSchema: { batchId: z.string().min(1) },
 }, async ({ batchId }) => textResult(await (await api(`/v1/image-batches/${encodeURIComponent(batchId)}/retry-failed`, { method: 'POST' })).json()))
 
-server.registerTool('image_batch_item_review', {
-  description: 'Record visual QA and final acceptance for one batch item. Accepted requires a succeeded job and passed QA.',
+server.registerTool('image_batch_item_qa', {
+  description: 'Record advisory visual QA for one terminal batch item. QA never confirms delivery or replaces an item by itself.',
   inputSchema: {
     batchId: z.string().min(1),
     itemKey: z.string().min(1).max(200),
     qaStatus: z.enum(['not_run', 'passed', 'failed', 'needs_review']),
-    acceptanceStatus: z.enum(['pending', 'accepted', 'needs_review', 'rejected']),
     failureClass: z.string().min(1).max(100).optional(),
     recoveryAction: z.string().min(1).max(100).optional(),
+    detail: z.record(z.string(), z.unknown()).optional(),
+  },
+}, async ({ batchId, itemKey, ...review }) => textResult(await (await api(
+  `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/qa`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(review),
+  },
+)).json()))
+
+server.registerTool('image_batch_item_review', {
+  description: 'Record a human delivery decision for one succeeded batch item.',
+  inputSchema: {
+    batchId: z.string().min(1),
+    itemKey: z.string().min(1).max(200),
+    acceptanceStatus: z.enum(['accepted', 'rejected']),
     detail: z.record(z.string(), z.unknown()).optional(),
   },
 }, async ({ batchId, itemKey, ...review }) => textResult(await (await api(

@@ -130,7 +130,7 @@ paths:
                 properties:
                   items:
                     type: array
-                    items: { $ref: '#/components/schemas/ImageBatch' }
+                    items: { $ref: '#/components/schemas/ImageBatchSummary' }
     post:
       operationId: createImageBatch
       requestBody:
@@ -292,7 +292,7 @@ paths:
   /v1/image-batches/{id}/items/{itemKey}/review:
     post:
       operationId: reviewImageBatchItem
-      description: Record visual QA and final acceptance for one batch item.
+      description: Record a human delivery decision for one succeeded batch item. AI QA uses the separate advisory endpoint.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
         - { name: itemKey, in: path, required: true, schema: { type: string } }
@@ -308,7 +308,26 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ImageBatch' }
         '404': { description: Batch item not found }
-        '409': { description: Accepted items require a succeeded job and passed QA }
+        '409': { description: Human review requires a succeeded job }
+  /v1/image-batches/{id}/items/{itemKey}/qa:
+    post:
+      operationId: recordImageBatchItemQa
+      description: Record advisory AI QA evidence. This never confirms delivery or changes the generated asset.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: itemKey, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImageBatchItemQa' }
+      responses:
+        '200':
+          description: Updated batch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { description: Batch item not found }
   /v1/image-batches/{id}/items/{itemKey}/job:
     post:
       operationId: replaceImageBatchItemJob
@@ -352,6 +371,21 @@ paths:
             application/json:
               schema:
                 $ref: ../../packages/image-job-core/schemas/image-asset-manifest-v1.schema.json
+        '404': { description: Asset not found }
+  /v1/assets/{id}/thumbnail:
+    get:
+      operationId: getImageAssetThumbnail
+      description: Return a resized WebP thumbnail for review grids.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: width
+          in: query
+          schema: { type: integer, minimum: 96, maximum: 768, default: 320 }
+      responses:
+        '200':
+          description: WebP thumbnail
+          content:
+            image/webp: { schema: { type: string, contentEncoding: binary } }
         '404': { description: Asset not found }
 components:
   securitySchemes:
@@ -472,6 +506,7 @@ components:
       required: [enabled]
       properties:
         enabled: { type: boolean }
+        autoRevise: { type: boolean, default: false, description: Enable automatic revision after QA or policy failure. Disabled by default. }
         maxRevisions: { type: integer, minimum: 0, maximum: 3, default: 2 }
         revisionRoute:
           type: object
@@ -503,7 +538,7 @@ components:
         acceptanceState: { type: string, enum: [pending, accepted, needs_review, rejected] }
         stats:
           type: object
-          required: [total, terminal, active, queued, succeeded, failed, cancelled, accepted, needsReview, rejected, acceptancePending, qaPassed, qaFailed, qaNeedsReview, qaNotRun]
+          required: [total, terminal, active, queued, succeeded, failed, cancelled, accepted, needsReview, rejected, acceptancePending, qaPassed, qaFailed, qaNeedsReview, qaNotRun, humanReviewPending, humanReviewApproved, humanReviewRejected]
           properties:
             total: { type: integer }
             terminal: { type: integer }
@@ -520,11 +555,14 @@ components:
             qaFailed: { type: integer }
             qaNeedsReview: { type: integer }
             qaNotRun: { type: integer }
+            humanReviewPending: { type: integer }
+            humanReviewApproved: { type: integer }
+            humanReviewRejected: { type: integer }
         items:
           type: array
           items:
             type: object
-            required: [itemKey, sourceItemKey, position, outputIndex, outputCount, revision, automationState, generationStatus, qaStatus, acceptanceStatus, job, jobHistory]
+            required: [itemKey, sourceItemKey, position, outputIndex, outputCount, revision, automationState, generationStatus, qaStatus, acceptanceStatus, humanReviewStatus, job, jobHistory]
             properties:
               itemKey: { type: string }
               sourceItemKey: { type: string }
@@ -539,6 +577,8 @@ components:
               failureClass: { type: [string, 'null'] }
               recoveryAction: { type: [string, 'null'] }
               review: { type: [object, 'null'], additionalProperties: true }
+              humanReviewStatus: { type: string, enum: [not_ready, pending, approved, rejected, not_applicable] }
+              humanReview: { type: [object, 'null'], additionalProperties: true }
               job: { $ref: '#/components/schemas/ImageJob' }
               jobHistory:
                 type: array
@@ -579,13 +619,44 @@ components:
         logicalKey: { type: string, minLength: 8, maxLength: 200 }
     ImageBatchItemReview:
       type: object
-      required: [qaStatus, acceptanceStatus]
+      required: [acceptanceStatus]
+      properties:
+        acceptanceStatus: { type: string, enum: [accepted, rejected] }
+        detail: { type: object, additionalProperties: true }
+    ImageBatchItemQa:
+      type: object
+      required: [qaStatus]
       properties:
         qaStatus: { type: string, enum: [not_run, passed, failed, needs_review] }
-        acceptanceStatus: { type: string, enum: [pending, accepted, needs_review, rejected] }
         failureClass: { type: string, minLength: 1, maxLength: 100 }
         recoveryAction: { type: string, minLength: 1, maxLength: 100 }
         detail: { type: object, additionalProperties: true }
+    ImageBatchSummary:
+      type: object
+      required: [id, state, controlState, automation, acceptanceState, stats, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: [string, 'null'] }
+        logicalKey: { type: [string, 'null'] }
+        outputRoot: { type: [string, 'null'] }
+        state: { type: string, enum: [running, paused, completed] }
+        controlState: { type: string, enum: [running, paused] }
+        pauseReason: { type: [string, 'null'] }
+        runner:
+          type: object
+          required: [active, owner, attempt, heartbeatAt, leaseExpiresAt]
+          properties:
+            active: { type: boolean }
+            owner: { type: [string, 'null'] }
+            attempt: { type: integer, minimum: 0 }
+            heartbeatAt: { type: [string, 'null'], format: date-time }
+            leaseExpiresAt: { type: [string, 'null'], format: date-time }
+        automation: { $ref: '#/components/schemas/ImageBatchAutomation' }
+        acceptanceState: { type: string, enum: [pending, accepted, needs_review, rejected] }
+        stats:
+          $ref: '#/components/schemas/ImageBatch/properties/stats'
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     UploadedImageAsset:
       type: object
       required: [assetId, manifest]
@@ -653,7 +724,7 @@ components:
                 maxListLimit: { type: integer }
             batches:
               type: object
-              required: [maxItems, states, qaStatuses, acceptanceStatuses, automation]
+              required: [maxItems, states, qaStatuses, acceptanceStatuses, humanReviewStatuses, automation]
               properties:
                 maxItems: { type: integer }
                 states:
@@ -665,6 +736,9 @@ components:
                 acceptanceStatuses:
                   type: array
                   items: { type: string, enum: [pending, accepted, needs_review, rejected] }
+                humanReviewStatuses:
+                  type: array
+                  items: { type: string, enum: [not_ready, pending, approved, rejected, not_applicable] }
                 automation:
                   type: object
                   required: [supported, maxRevisions, features]
@@ -673,7 +747,7 @@ components:
                     maxRevisions: { type: integer }
                     features:
                       type: array
-                      items: { type: string, enum: [multi_output_expansion, safe_rewrite, visual_qa, automatic_acceptance] }
+                      items: { type: string, enum: [multi_output_expansion, safe_rewrite, visual_qa, human_review, optional_auto_revision] }
             events:
               type: object
               required: [transport]

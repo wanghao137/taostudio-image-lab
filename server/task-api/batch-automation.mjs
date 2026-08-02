@@ -102,6 +102,9 @@ export function validateBatchAutomation(value) {
   if (value === undefined) return errors
   if (!value || typeof value !== 'object' || Array.isArray(value)) return ['automation must be an object']
   if (typeof value.enabled !== 'boolean') errors.push('automation.enabled must be a boolean')
+  if (value.autoRevise !== undefined && typeof value.autoRevise !== 'boolean') {
+    errors.push('automation.autoRevise must be a boolean when provided')
+  }
   if (value.maxRevisions !== undefined && (!Number.isInteger(value.maxRevisions) || value.maxRevisions < 0 || value.maxRevisions > 3)) {
     errors.push('automation.maxRevisions must be an integer from 0 to 3')
   }

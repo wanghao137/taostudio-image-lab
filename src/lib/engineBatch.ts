@@ -12,6 +12,7 @@ export interface EngineBatchGenerationDraft {
   fallbackEnabled: boolean
   fallbackModel: string
   fallbackApiMode: 'images' | 'responses'
+  autoRevise: boolean
 }
 
 export function parseEngineBatchPrompts(value: string) {
@@ -36,7 +37,10 @@ export function createEngineBatchRequest(options: {
     ...(name.trim() ? { name: name.trim() } : {}),
     automation: {
       enabled: true,
-      maxRevisions: 2,
+      // QA is advisory by default. A person decides whether a flagged asset
+      // should be retried, so the engine never silently replaces it.
+      autoRevise: draft.autoRevise,
+      maxRevisions: draft.autoRevise ? 2 : 0,
       revisionRoute: {
         provider: 'configured',
         model: draft.fallbackModel.trim(),

@@ -12,7 +12,7 @@ describe('Engine UI automated Batch requests', () => {
     expect(countEngineBatchOutputs(prompts)).toBe(4)
   })
 
-  it('enables recovery, QA, acceptance, and independent multi-output jobs', () => {
+  it('creates advisory-QA batch requests with human delivery confirmation by default', () => {
     let sequence = 0
     const request = createEngineBatchRequest({
       name: '  launch set  ',
@@ -26,6 +26,7 @@ describe('Engine UI automated Batch requests', () => {
         fallbackEnabled: true,
         fallbackModel: 'gpt-5.6-sol',
         fallbackApiMode: 'responses',
+        autoRevise: false,
       },
     })
 
@@ -34,7 +35,8 @@ describe('Engine UI automated Batch requests', () => {
       name: 'launch set',
       automation: {
         enabled: true,
-        maxRevisions: 2,
+        autoRevise: false,
+        maxRevisions: 0,
         revisionRoute: {
           provider: 'configured',
           model: 'gpt-5.6-sol',

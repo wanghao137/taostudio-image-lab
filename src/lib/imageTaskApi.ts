@@ -149,10 +149,11 @@ export interface ImageTaskCapabilitiesV1 {
       states: Array<'running' | 'paused' | 'completed'>
       qaStatuses: ImageBatchQaStatusV1[]
       acceptanceStatuses: ImageBatchAcceptanceStatusV1[]
+      humanReviewStatuses: Array<'not_ready' | 'pending' | 'approved' | 'rejected' | 'not_applicable'>
       automation: {
         supported: boolean
         maxRevisions: number
-        features: Array<'multi_output_expansion' | 'safe_rewrite' | 'visual_qa' | 'automatic_acceptance'>
+        features: Array<'multi_output_expansion' | 'safe_rewrite' | 'visual_qa' | 'human_review' | 'optional_auto_revision'>
       }
     }
     events: { transport: 'polling' }
@@ -210,6 +211,9 @@ export interface ImageBatchV1 {
     qaFailed: number
     qaNeedsReview: number
     qaNotRun: number
+    humanReviewPending: number
+    humanReviewApproved: number
+    humanReviewRejected: number
   }
   items: Array<{
     itemKey: string
@@ -225,6 +229,8 @@ export interface ImageBatchV1 {
     failureClass?: string | null
     recoveryAction?: string | null
     review?: Record<string, unknown> | null
+    humanReviewStatus: 'not_ready' | 'pending' | 'approved' | 'rejected' | 'not_applicable'
+    humanReview?: Record<string, unknown> | null
     job: ImageJobV1
     jobHistory: Array<{
       revision: number
@@ -240,6 +246,7 @@ export interface ImageBatchV1 {
 
 export interface ImageBatchAutomationV1 {
   enabled: boolean
+  autoRevise?: boolean
   maxRevisions?: number
   revisionRoute?: {
     provider: string
@@ -247,6 +254,8 @@ export interface ImageBatchAutomationV1 {
     apiMode: 'responses'
   }
 }
+
+export type ImageBatchSummaryV1 = Omit<ImageBatchV1, 'items' | 'events'>
 
 export interface ImageBatchCreateRequestV1 {
   idempotencyKey: string
@@ -358,7 +367,7 @@ export async function createImageBatch(config: ImageTaskApiConfig, request: Imag
 })).json()
 }
 
-export async function listImageBatches(config: ImageTaskApiConfig, limit = 30): Promise<{ items: ImageBatchV1[] }> {
+export async function listImageBatches(config: ImageTaskApiConfig, limit = 30): Promise<{ items: ImageBatchSummaryV1[] }> {
   return (await taskFetch(config, `/v1/image-batches?limit=${encodeURIComponent(String(limit))}`)).json()
 }
 
@@ -379,8 +388,27 @@ export async function reviewImageBatchItem(
   batchId: string,
   itemKey: string,
   review: {
+    acceptanceStatus: Extract<ImageBatchAcceptanceStatusV1, 'accepted' | 'rejected'>
+    detail?: Record<string, unknown>
+  },
+): Promise<ImageBatchV1> {
+  return (await taskFetch(
+    config,
+    `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/review`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(review),
+    },
+  )).json()
+}
+
+export async function recordImageBatchItemQa(
+  config: ImageTaskApiConfig,
+  batchId: string,
+  itemKey: string,
+  review: {
     qaStatus: ImageBatchQaStatusV1
-    acceptanceStatus: ImageBatchAcceptanceStatusV1
     failureClass?: string
     recoveryAction?: string
     detail?: Record<string, unknown>
@@ -388,7 +416,7 @@ export async function reviewImageBatchItem(
 ): Promise<ImageBatchV1> {
   return (await taskFetch(
     config,
-    `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/review`,
+    `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/qa`,
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -433,6 +461,17 @@ export async function waitForImageJob(
 
 export async function getImageAssetBlob(config: ImageTaskApiConfig, assetId: string): Promise<Blob> {
   return (await taskFetch(config, `/v1/assets/${encodeURIComponent(assetId)}`)).blob()
+}
+
+export async function getImageAssetThumbnailBlob(
+  config: ImageTaskApiConfig,
+  assetId: string,
+  width = 320,
+): Promise<Blob> {
+  return (await taskFetch(
+    config,
+    `/v1/assets/${encodeURIComponent(assetId)}/thumbnail?width=${encodeURIComponent(String(width))}`,
+  )).blob()
 }
 
 export async function getImageAssetManifest(config: ImageTaskApiConfig, assetId: string): Promise<ImageAssetManifestV1> {

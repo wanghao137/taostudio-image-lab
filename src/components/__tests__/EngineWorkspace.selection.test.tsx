@@ -83,6 +83,9 @@ const batch = {
     qaFailed: 0,
     qaNeedsReview: 0,
     qaNotRun: 0,
+    humanReviewPending: 0,
+    humanReviewApproved: 1,
+    humanReviewRejected: 0,
   },
   items: [],
   events: [],
@@ -121,10 +124,11 @@ const capabilities = {
       states: ['running', 'paused', 'completed'],
       qaStatuses: ['not_run', 'passed', 'failed', 'needs_review'],
       acceptanceStatuses: ['pending', 'accepted', 'needs_review', 'rejected'],
+      humanReviewStatuses: ['not_ready', 'pending', 'approved', 'rejected', 'not_applicable'],
       automation: {
         supported: true,
         maxRevisions: 3,
-        features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'automatic_acceptance'],
+        features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'human_review', 'optional_auto_revision'],
       },
     },
     events: { transport: 'polling' },
@@ -235,5 +239,19 @@ describe('EngineWorkspace inspector selection', () => {
     expect(within(activeSection).getByText('Active batch')).toBeTruthy()
     expect(within(attentionSection).getByText('Interrupted batch')).toBeTruthy()
     expect(within(historySection).getByText('Selection test batch')).toBeTruthy()
+  })
+
+  it('keeps one polling lifecycle while job and batch snapshots refresh', async () => {
+    const visibilityListenerSpy = vi.spyOn(document, 'addEventListener')
+    try {
+      render(<EngineWorkspace />)
+
+      await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 })
+      await waitFor(() => {
+        expect(visibilityListenerSpy.mock.calls.filter(([type]) => type === 'visibilitychange')).toHaveLength(1)
+      })
+    } finally {
+      visibilityListenerSpy.mockRestore()
+    }
   })
 })

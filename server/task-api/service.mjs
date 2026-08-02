@@ -52,6 +52,7 @@ const MAX_RUNNER_LEASE_MS = 5 * 60_000
 const ACCEPTED_ENHANCEMENTS = ['auto', 'none', 'lanczos3', 'real-esrgan', 'hat']
 const QA_STATUSES = ['not_run', 'passed', 'failed', 'needs_review']
 const ACCEPTANCE_STATUSES = ['pending', 'accepted', 'needs_review', 'rejected']
+const HUMAN_REVIEW_STATUSES = ['not_ready', 'pending', 'approved', 'rejected', 'not_applicable']
 const DEFAULT_ALLOWED_ORIGIN_PATTERNS = [
   /^https?:\/\/localhost(?::\d+)?$/,
   /^https?:\/\/127\.0\.0\.1(?::\d+)?$/,
@@ -126,16 +127,26 @@ function validateBatchRequest(value) {
   }
   return { valid: errors.length === 0, errors }
 }
-function validateBatchItemReview(value) {
+function validateBatchItemQa(value) {
   const errors = []
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['review must be an object'] }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['QA record must be an object'] }
   if (!QA_STATUSES.includes(value.qaStatus)) errors.push(`qaStatus must be one of ${QA_STATUSES.join(', ')}`)
-  if (!ACCEPTANCE_STATUSES.includes(value.acceptanceStatus)) errors.push(`acceptanceStatus must be one of ${ACCEPTANCE_STATUSES.join(', ')}`)
   if (value.failureClass !== undefined && (typeof value.failureClass !== 'string' || !value.failureClass.trim() || value.failureClass.length > 100)) {
     errors.push('failureClass must be a non-empty string up to 100 characters')
   }
   if (value.recoveryAction !== undefined && (typeof value.recoveryAction !== 'string' || !value.recoveryAction.trim() || value.recoveryAction.length > 100)) {
     errors.push('recoveryAction must be a non-empty string up to 100 characters')
+  }
+  if (value.detail !== undefined && (!value.detail || typeof value.detail !== 'object' || Array.isArray(value.detail))) {
+    errors.push('detail must be an object')
+  }
+  return { valid: errors.length === 0, errors }
+}
+function validateBatchItemReview(value) {
+  const errors = []
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { valid: false, errors: ['human review must be an object'] }
+  if (!['accepted', 'rejected'].includes(value.acceptanceStatus)) {
+    errors.push('acceptanceStatus must be accepted or rejected')
   }
   if (value.detail !== undefined && (!value.detail || typeof value.detail !== 'object' || Array.isArray(value.detail))) {
     errors.push('detail must be an object')
@@ -192,10 +203,11 @@ function taskApiCapabilities(providerConfig = {}) {
         states: ['running', 'paused', 'completed'],
         qaStatuses: QA_STATUSES,
         acceptanceStatuses: ACCEPTANCE_STATUSES,
+        humanReviewStatuses: HUMAN_REVIEW_STATUSES,
         automation: {
           supported: true,
           maxRevisions: 3,
-          features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'automatic_acceptance'],
+          features: ['multi_output_expansion', 'safe_rewrite', 'visual_qa', 'human_review', 'optional_auto_revision'],
         },
       },
       events: { transport: 'polling' },
@@ -511,6 +523,8 @@ export class TaskRepository {
         failure_class TEXT,
         recovery_action TEXT,
         review_json TEXT,
+        human_review_status TEXT NOT NULL DEFAULT 'not_ready',
+        human_review_json TEXT,
         output_path TEXT,
         PRIMARY KEY (batch_id,item_key),
         UNIQUE (batch_id,position),
@@ -568,6 +582,8 @@ export class TaskRepository {
     if (!batchColumns.has('runner_attempt')) this.db.exec('ALTER TABLE batches ADD COLUMN runner_attempt INTEGER NOT NULL DEFAULT 0')
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS batches_logical_key_unique ON batches(logical_key) WHERE logical_key IS NOT NULL')
     const batchItemColumns = new Set(this.db.prepare('PRAGMA table_info(batch_items)').all().map((column) => column.name))
+    const hasHumanReviewJson = batchItemColumns.has('human_review_json')
+    const hasHumanReviewStatus = batchItemColumns.has('human_review_status')
     if (!batchItemColumns.has('source_item_key')) this.db.exec("ALTER TABLE batch_items ADD COLUMN source_item_key TEXT NOT NULL DEFAULT ''")
     if (!batchItemColumns.has('output_index')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_index INTEGER NOT NULL DEFAULT 1')
     if (!batchItemColumns.has('output_count')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_count INTEGER NOT NULL DEFAULT 1')
@@ -578,9 +594,28 @@ export class TaskRepository {
     if (!batchItemColumns.has('failure_class')) this.db.exec('ALTER TABLE batch_items ADD COLUMN failure_class TEXT')
     if (!batchItemColumns.has('recovery_action')) this.db.exec('ALTER TABLE batch_items ADD COLUMN recovery_action TEXT')
     if (!batchItemColumns.has('review_json')) this.db.exec('ALTER TABLE batch_items ADD COLUMN review_json TEXT')
+    if (!hasHumanReviewStatus) this.db.exec("ALTER TABLE batch_items ADD COLUMN human_review_status TEXT NOT NULL DEFAULT 'not_ready'")
+    if (!hasHumanReviewJson) this.db.exec('ALTER TABLE batch_items ADD COLUMN human_review_json TEXT')
     if (!batchItemColumns.has('output_path')) this.db.exec('ALTER TABLE batch_items ADD COLUMN output_path TEXT')
     this.db.exec("UPDATE batch_items SET source_item_key=item_key WHERE source_item_key=''")
     this.db.exec("UPDATE batch_items SET automation_state='idle' WHERE automation_state='processing'")
+    if (!hasHumanReviewStatus) {
+      // Earlier versions had no durable human decision. Do not infer approval
+      // from an AI or runner write; make successful records reviewable again.
+      this.db.exec(`
+        UPDATE batch_items
+        SET human_review_status=CASE
+          WHEN (SELECT state FROM jobs WHERE jobs.id=batch_items.job_id)='succeeded' THEN 'pending'
+          WHEN (SELECT state FROM jobs WHERE jobs.id=batch_items.job_id) IN ('failed','cancelled') THEN 'not_applicable'
+          ELSE 'not_ready'
+        END,
+        acceptance_status=CASE
+          WHEN (SELECT state FROM jobs WHERE jobs.id=batch_items.job_id)='succeeded' THEN 'needs_review'
+          WHEN (SELECT state FROM jobs WHERE jobs.id=batch_items.job_id) IN ('failed','cancelled') THEN 'rejected'
+          ELSE 'pending'
+        END
+      `)
+    }
     this.db.exec(`
       INSERT OR IGNORE INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at)
       SELECT bi.batch_id,bi.item_key,bi.revision,bi.job_id,'legacy_backfill',b.created_at
@@ -984,7 +1019,101 @@ export class TaskRepository {
 
   listBatches(limit = DEFAULT_JOB_LIST_LIMIT) {
     const rows = this.db.prepare('SELECT * FROM batches ORDER BY created_at DESC,id DESC LIMIT ?').all(limit)
-    return rows.map((row) => this.getBatch(row.id))
+    return rows.map((row) => this.getBatchSummaryFromRow(row))
+  }
+
+  getBatchSummary(id) {
+    const row = this.db.prepare('SELECT * FROM batches WHERE id=?').get(id)
+    return row ? this.getBatchSummaryFromRow(row) : null
+  }
+
+  getBatchSummaryFromRow(row) {
+    const counters = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN j.state IN ('succeeded','failed','cancelled') THEN 1 ELSE 0 END) AS terminal,
+        SUM(CASE WHEN j.state='queued' THEN 1 ELSE 0 END) AS queued,
+        SUM(CASE WHEN j.state='succeeded' THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN j.state='failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN j.state='cancelled' THEN 1 ELSE 0 END) AS cancelled,
+        SUM(CASE WHEN bi.acceptance_status='accepted' THEN 1 ELSE 0 END) AS accepted,
+        SUM(CASE WHEN bi.acceptance_status='needs_review' THEN 1 ELSE 0 END) AS needs_review,
+        SUM(CASE WHEN bi.acceptance_status='rejected' THEN 1 ELSE 0 END) AS rejected,
+        SUM(CASE WHEN bi.acceptance_status='pending' THEN 1 ELSE 0 END) AS acceptance_pending,
+        SUM(CASE WHEN bi.human_review_status='pending' THEN 1 ELSE 0 END) AS human_review_pending,
+        SUM(CASE WHEN bi.human_review_status='approved' THEN 1 ELSE 0 END) AS human_review_approved,
+        SUM(CASE WHEN bi.human_review_status='rejected' THEN 1 ELSE 0 END) AS human_review_rejected,
+        SUM(CASE WHEN bi.qa_status='passed' THEN 1 ELSE 0 END) AS qa_passed,
+        SUM(CASE WHEN bi.qa_status='failed' THEN 1 ELSE 0 END) AS qa_failed,
+        SUM(CASE WHEN bi.qa_status='needs_review' THEN 1 ELSE 0 END) AS qa_needs_review,
+        SUM(CASE WHEN bi.qa_status='not_run' THEN 1 ELSE 0 END) AS qa_not_run,
+        MAX(j.updated_at) AS latest_job_update
+      FROM batch_items bi
+      JOIN jobs j ON j.id=bi.job_id
+      WHERE bi.batch_id=?
+    `).get(row.id)
+    const number = (value) => Number(value || 0)
+    const total = number(counters.total)
+    const terminal = number(counters.terminal)
+    const queued = number(counters.queued)
+    const accepted = number(counters.accepted)
+    const needsReview = number(counters.needs_review)
+    const rejected = number(counters.rejected)
+    const acceptancePending = number(counters.acceptance_pending)
+    const state = terminal === total
+      ? 'completed'
+      : row.control_state === 'paused'
+        ? 'paused'
+        : 'running'
+    const runnerLeaseExpiresAt = Number(row.runner_lease_expires_at || 0)
+    return {
+      id: row.id,
+      name: row.name,
+      logicalKey: row.logical_key || null,
+      automation: row.automation_json ? JSON.parse(row.automation_json) : { enabled: false },
+      outputRoot: row.output_root || null,
+      state,
+      controlState: row.control_state,
+      pauseReason: row.pause_reason || null,
+      runner: {
+        active: Boolean(row.runner_owner) && runnerLeaseExpiresAt > Date.now(),
+        owner: row.runner_owner || null,
+        attempt: Number(row.runner_attempt || 0),
+        heartbeatAt: row.runner_heartbeat_at || null,
+        leaseExpiresAt: runnerLeaseExpiresAt ? new Date(runnerLeaseExpiresAt).toISOString() : null,
+      },
+      acceptanceState: acceptancePending > 0
+        ? 'pending'
+        : needsReview > 0
+          ? 'needs_review'
+          : rejected > 0
+            ? 'rejected'
+            : 'accepted',
+      stats: {
+        total,
+        terminal,
+        active: total - terminal - queued,
+        queued,
+        succeeded: number(counters.succeeded),
+        failed: number(counters.failed),
+        cancelled: number(counters.cancelled),
+        accepted,
+        needsReview,
+        rejected,
+        acceptancePending,
+        humanReviewPending: number(counters.human_review_pending),
+        humanReviewApproved: number(counters.human_review_approved),
+        humanReviewRejected: number(counters.human_review_rejected),
+        qaPassed: number(counters.qa_passed),
+        qaFailed: number(counters.qa_failed),
+        qaNeedsReview: number(counters.qa_needs_review),
+        qaNotRun: number(counters.qa_not_run),
+      },
+      createdAt: row.created_at,
+      updatedAt: counters.latest_job_update && counters.latest_job_update > row.updated_at
+        ? counters.latest_job_update
+        : row.updated_at,
+    }
   }
 
   getBatch(id) {
@@ -994,7 +1123,7 @@ export class TaskRepository {
     const itemRows = this.db.prepare(`
       SELECT bi.item_key,bi.source_item_key,bi.position,bi.output_index,bi.output_count,
              bi.revision,bi.automation_state,bi.qa_status,bi.acceptance_status,
-             bi.failure_class,bi.recovery_action,bi.review_json,bi.output_path,j.*
+             bi.failure_class,bi.recovery_action,bi.review_json,bi.human_review_status,bi.human_review_json,bi.output_path,j.*
       FROM batch_items bi
       JOIN jobs j ON j.id=bi.job_id
       WHERE bi.batch_id=?
@@ -1020,11 +1149,6 @@ export class TaskRepository {
     }
     const items = itemRows.map((item) => {
       const job = this.jobFromRow(item)
-      const acceptanceStatus = !automation.enabled
-        && item.acceptance_status === 'pending'
-        && ['failed', 'cancelled'].includes(job.state)
-        ? 'rejected'
-        : item.acceptance_status
       return {
         itemKey: item.item_key,
         sourceItemKey: item.source_item_key || item.item_key,
@@ -1043,10 +1167,12 @@ export class TaskRepository {
                 ? 'running'
                 : 'pending',
         qaStatus: item.qa_status,
-        acceptanceStatus,
+        acceptanceStatus: item.acceptance_status,
         failureClass: item.failure_class || job.error?.failureClass || null,
         recoveryAction: item.recovery_action || job.error?.recoveryAction || null,
         review: item.review_json ? JSON.parse(item.review_json) : null,
+        humanReviewStatus: item.human_review_status,
+        humanReview: item.human_review_json ? JSON.parse(item.human_review_json) : null,
         outputPath: item.output_path || null,
         job,
         jobHistory: historyByItem.get(item.item_key) || [],
@@ -1061,8 +1187,7 @@ export class TaskRepository {
       acceptanceCounts[item.acceptanceStatus] += 1
       qaCounts[item.qaStatus] += 1
     })
-    const automationPending = Boolean(automation.enabled) && acceptanceCounts.pending > 0
-    const state = terminal === items.length && !automationPending
+    const state = terminal === items.length
       ? 'completed'
       : row.control_state === 'paused'
         ? 'paused'
@@ -1111,6 +1236,9 @@ export class TaskRepository {
         qaFailed: qaCounts.failed,
         qaNeedsReview: qaCounts.needs_review,
         qaNotRun: qaCounts.not_run,
+        humanReviewPending: items.filter((item) => item.humanReviewStatus === 'pending').length,
+        humanReviewApproved: items.filter((item) => item.humanReviewStatus === 'approved').length,
+        humanReviewRejected: items.filter((item) => item.humanReviewStatus === 'rejected').length,
       },
       items,
       events: this.batchEvents(id),
@@ -1145,8 +1273,8 @@ export class TaskRepository {
       this.retryJob(item.job.id)
       this.db.prepare(`
         UPDATE batch_items
-        SET automation_state='idle',qa_status='not_run',acceptance_status='pending',
-            failure_class=NULL,recovery_action=NULL,review_json=NULL
+        SET automation_state='idle',qa_status='not_run',acceptance_status='pending',human_review_status='not_ready',
+            failure_class=NULL,recovery_action=NULL,review_json=NULL,human_review_json=NULL
         WHERE batch_id=? AND item_key=?
       `).run(id, item.itemKey)
       retried += 1
@@ -1155,6 +1283,85 @@ export class TaskRepository {
       this.db.prepare("UPDATE batches SET control_state='running',pause_reason=NULL,updated_at=? WHERE id=?").run(now(), id)
       this.recordBatchEvent(id, 'retry_failed', { retried })
     }
+    return this.getBatch(id)
+  }
+
+  syncBatchItemExecutionProjection(jobId, job) {
+    const linked = this.db.prepare(`
+      SELECT bi.batch_id,bi.item_key,b.automation_json
+      FROM batch_items bi
+      JOIN batches b ON b.id=bi.batch_id
+      WHERE bi.job_id=?
+    `).get(jobId)
+    if (!linked) return
+
+    const automation = linked.automation_json ? JSON.parse(linked.automation_json) : { enabled: false }
+    if (job.state === 'queued' || ACTIVE_STATES.includes(job.state)) {
+      this.db.prepare(`
+        UPDATE batch_items
+        SET automation_state='idle',qa_status='not_run',acceptance_status='pending',human_review_status='not_ready',
+            failure_class=NULL,recovery_action=NULL,review_json=NULL,human_review_json=NULL
+        WHERE batch_id=? AND item_key=? AND job_id=?
+      `).run(linked.batch_id, linked.item_key, jobId)
+      return
+    }
+
+    if (automation.enabled) return
+    if (job.state === 'succeeded') {
+      this.db.prepare(`
+        UPDATE batch_items
+        SET automation_state='done',
+            acceptance_status=CASE
+              WHEN human_review_status='approved' THEN 'accepted'
+              WHEN human_review_status='rejected' THEN 'rejected'
+              ELSE 'needs_review'
+            END,
+            human_review_status=CASE
+              WHEN human_review_status IN ('approved','rejected') THEN human_review_status
+              ELSE 'pending'
+            END
+        WHERE batch_id=? AND item_key=? AND job_id=?
+      `).run(linked.batch_id, linked.item_key, jobId)
+      return
+    }
+
+    if (['failed', 'cancelled'].includes(job.state)) {
+      this.db.prepare(`
+        UPDATE batch_items
+        SET automation_state='done',qa_status='not_run',acceptance_status='rejected',human_review_status='not_applicable',
+            failure_class=COALESCE(failure_class,?),recovery_action=COALESCE(recovery_action,?)
+        WHERE batch_id=? AND item_key=? AND job_id=?
+      `).run(
+        job.error?.failureClass || (job.state === 'cancelled' ? 'cancelled' : 'generation_failed'),
+        job.error?.recoveryAction || (job.state === 'cancelled' ? 'manual_restart' : 'inspect_failure'),
+        linked.batch_id,
+        linked.item_key,
+        jobId,
+      )
+    }
+  }
+
+  recordBatchItemTechnicalReady(id, itemKey, detail) {
+    const batch = this.getBatch(id)
+    const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
+    if (!item) return null
+    if (item.job.state !== 'succeeded') {
+      throw Object.assign(new Error('technical ready records require a succeeded job'), {
+        statusCode: 409,
+        code: 'BATCH_ITEM_NOT_READY',
+      })
+    }
+    this.db.prepare(`
+      UPDATE batch_items
+      SET automation_state='done',review_json=?
+      WHERE batch_id=? AND item_key=? AND job_id=?
+    `).run(detail ? JSON.stringify(detail) : null, id, itemKey, item.job.id)
+    this.db.prepare('UPDATE batches SET updated_at=? WHERE id=?').run(now(), id)
+    this.recordBatchEvent(id, 'item_technical_ready', {
+      itemKey,
+      revision: item.revision,
+      jobId: item.job.id,
+    })
     return this.getBatch(id)
   }
 
@@ -1187,23 +1394,34 @@ export class TaskRepository {
     this.recordBatchEvent(batchId, 'auto_resume_attempt', { attempt })
   }
 
-  reviewBatchItem(id, itemKey, review) {
+  recordBatchItemQa(id, itemKey, review) {
     const batch = this.getBatch(id)
     const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
     if (!item) return null
-    if (review.acceptanceStatus === 'accepted' && item.job.state !== 'succeeded') {
-      throw Object.assign(new Error('accepted batch items require a succeeded job'), {
+    if (!TERMINAL_JOB_STATES.includes(item.job.state)) {
+      throw Object.assign(new Error('QA requires a terminal batch item job'), {
         statusCode: 409,
-        code: 'BATCH_ITEM_NOT_ACCEPTABLE',
+        code: 'BATCH_ITEM_NOT_TERMINAL',
       })
     }
+    const humanReviewStatus = item.humanReviewStatus === 'approved' || item.humanReviewStatus === 'rejected'
+      ? item.humanReviewStatus
+      : item.job.state === 'succeeded'
+        ? 'pending'
+        : 'not_applicable'
+    const acceptanceStatus = humanReviewStatus === 'approved'
+      ? 'accepted'
+      : humanReviewStatus === 'rejected' || humanReviewStatus === 'not_applicable'
+        ? 'rejected'
+        : 'needs_review'
     this.db.prepare(`
       UPDATE batch_items
-      SET automation_state='done',qa_status=?,acceptance_status=?,failure_class=?,recovery_action=?,review_json=?
+      SET automation_state='done',qa_status=?,acceptance_status=?,human_review_status=?,failure_class=?,recovery_action=?,review_json=?
       WHERE batch_id=? AND item_key=?
     `).run(
       review.qaStatus,
-      review.acceptanceStatus,
+      acceptanceStatus,
+      humanReviewStatus,
       review.failureClass?.trim() || null,
       review.recoveryAction?.trim() || null,
       review.detail ? JSON.stringify(review.detail) : null,
@@ -1211,14 +1429,51 @@ export class TaskRepository {
       itemKey,
     )
     this.db.prepare('UPDATE batches SET updated_at=? WHERE id=?').run(now(), id)
-    this.recordBatchEvent(id, 'item_reviewed', {
+    this.recordBatchEvent(id, 'item_qa_recorded', {
       itemKey,
       revision: item.revision,
       jobId: item.job.id,
       qaStatus: review.qaStatus,
-      acceptanceStatus: review.acceptanceStatus,
+      acceptanceStatus,
       failureClass: review.failureClass || null,
       recoveryAction: review.recoveryAction || null,
+    })
+    return this.getBatch(id)
+  }
+
+  reviewBatchItem(id, itemKey, review) {
+    const batch = this.getBatch(id)
+    const item = batch?.items.find((candidate) => candidate.itemKey === itemKey)
+    if (!item) return null
+    if (!['accepted', 'rejected'].includes(review.acceptanceStatus)) {
+      throw Object.assign(new Error('human review must accept or reject an item'), {
+        statusCode: 400,
+        code: 'INVALID_HUMAN_REVIEW_STATUS',
+      })
+    }
+    if (item.job.state !== 'succeeded') {
+      throw Object.assign(new Error('human review requires a succeeded job'), {
+        statusCode: 409,
+        code: 'BATCH_ITEM_NOT_ACCEPTABLE',
+      })
+    }
+    this.db.prepare(`
+      UPDATE batch_items
+      SET acceptance_status=?,human_review_status=?,human_review_json=?
+      WHERE batch_id=? AND item_key=?
+    `).run(
+      review.acceptanceStatus,
+      review.acceptanceStatus === 'accepted' ? 'approved' : 'rejected',
+      review.detail ? JSON.stringify(review.detail) : JSON.stringify({ actor: 'human' }),
+      id,
+      itemKey,
+    )
+    this.db.prepare('UPDATE batches SET updated_at=? WHERE id=?').run(now(), id)
+    this.recordBatchEvent(id, 'item_human_reviewed', {
+      itemKey,
+      revision: item.revision,
+      jobId: item.job.id,
+      acceptanceStatus: review.acceptanceStatus,
     })
     return this.getBatch(id)
   }
@@ -1239,8 +1494,8 @@ export class TaskRepository {
       const result = this.createOrGetJob(request)
       this.db.prepare(`
         UPDATE batch_items
-        SET job_id=?,revision=?,automation_state='idle',qa_status='not_run',acceptance_status='pending',
-            failure_class=NULL,recovery_action=NULL,review_json=NULL
+        SET job_id=?,revision=?,automation_state='idle',qa_status='not_run',acceptance_status='pending',human_review_status='not_ready',
+            failure_class=NULL,recovery_action=NULL,review_json=NULL,human_review_json=NULL
         WHERE batch_id=? AND item_key=?
       `).run(result.job.id, revision, id, itemKey)
       this.db.prepare('INSERT INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at) VALUES (?,?,?,?,?,?)')
@@ -1339,7 +1594,9 @@ export class TaskRepository {
     this.db.prepare(`UPDATE jobs SET state=?, attempts=CASE WHEN ? THEN 0 ELSE attempts END, route_index=COALESCE(?,route_index), route_attempts=CASE WHEN ? THEN 0 ELSE route_attempts END, cancel_requested=CASE WHEN ? THEN 0 ELSE cancel_requested END, source_asset_id=COALESCE(?,source_asset_id), final_asset_id=COALESCE(?,final_asset_id), error_json=?, result_json=COALESCE(?,result_json), available_at=?, updated_at=? WHERE id=?`)
       .run(nextState, mutation.resetAttempts === true ? 1 : 0, mutation.routeIndex ?? null, mutation.resetRouteAttempts === true ? 1 : 0, mutation.clearCancel === true ? 1 : 0, options.sourceAssetId ?? null, options.finalAssetId ?? null, options.error ? JSON.stringify(options.error) : null, options.result ? JSON.stringify(options.result) : null, options.availableAt ?? 0, timestamp, id)
     this.recordEvent(id, nextState, options.detail ?? null)
-    return this.getJob(id)
+    const next = this.getJob(id)
+    this.syncBatchItemExecutionProjection(id, next)
+    return next
   }
 
   requestCancel(id) {
@@ -1941,13 +2198,9 @@ export class TaskWorkerPool {
           actualRoute: this.repository.getJob(jobId).actualRoute,
         },
       })
-      // Auto-accept for non-automation batches: when a job succeeds and its
-      // batch has no automation_json, immediately set acceptance_status=
-      // 'accepted', qa_status='passed', record the engine-internal asset paths,
-      // and copy the source/final PNGs to the item's outputPath (if provided).
-      // This keeps batch UI state correct and images on disk even when the
-      // runner process has exited (e.g. watchdog resumed the batch after
-      // provider recovery).
+      // A successful non-automation item is technically ready, not human
+      // accepted. Preserve the asset evidence and send it to human review.
+      // This also keeps output files available after watchdog recovery.
       const batchItem = this.repository.getBatchItemByJobId(jobId)
       if (batchItem) {
         const batch = this.repository.getBatch(batchItem.batch_id)
@@ -1972,20 +2225,14 @@ export class TaskWorkerPool {
               /* output directory copy failure is non-fatal; assets remain in engine store */
             }
           }
-          this.repository.reviewBatchItem(batchItem.batch_id, batchItem.item_key, {
-            qaStatus: 'passed',
-            acceptanceStatus: 'accepted',
-            detail: {
-              jobId,
-              revision: batchItem.revision ?? 0,
-              automated: true,
-              autoAccepted: true,
-              sourceAssetId: succeededJob.sourceAssetId || null,
-              sourceAssetPath: sourceAsset?.filePath || null,
-              finalAssetId: succeededJob.finalAssetId || null,
-              finalAssetPath: finalAsset?.filePath || null,
-              ...(harvestedFiles ? { harvestedFiles } : {}),
-            },
+          this.repository.recordBatchItemTechnicalReady(batchItem.batch_id, batchItem.item_key, {
+            jobId,
+            revision: batchItem.revision ?? 0,
+            sourceAssetId: succeededJob.sourceAssetId || null,
+            sourceAssetPath: sourceAsset?.filePath || null,
+            finalAssetId: succeededJob.finalAssetId || null,
+            finalAssetPath: finalAsset?.filePath || null,
+            ...(harvestedFiles ? { harvestedFiles } : {}),
           })
         }
       }
@@ -2068,7 +2315,7 @@ export class TaskBatchAutomationPool {
     this.repository = options.repository
     this.evaluator = options.evaluator
     this.pollIntervalMs = options.pollIntervalMs ?? 50
-    this.concurrency = options.concurrency ?? 1
+    this.concurrency = Math.max(1, Math.min(4, options.concurrency ?? 1))
     this.running = false
     this.loops = []
   }
@@ -2098,12 +2345,12 @@ export class TaskBatchAutomationPool {
   async process({ batch, item }) {
     const route = batch.automation.revisionRoute
     const maxRevisions = batch.automation.maxRevisions ?? 2
+    const autoRevise = batch.automation.autoRevise === true
     const originalPrompt = item.jobHistory[0]?.job.request.input.prompt || item.job.request.input.prompt
     try {
       if (item.job.state === 'cancelled') {
-        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+        this.repository.recordBatchItemQa(batch.id, item.itemKey, {
           qaStatus: 'not_run',
-          acceptanceStatus: 'rejected',
           failureClass: 'cancelled',
           recoveryAction: 'manual_restart',
           detail: { jobId: item.job.id, revision: item.revision, automated: true },
@@ -2114,7 +2361,7 @@ export class TaskBatchAutomationPool {
       if (item.job.state === 'failed') {
         const contentPolicy = item.job.error?.failureClass === 'content_policy'
           || item.job.error?.recoveryAction === 'safe_rewrite'
-        if (contentPolicy && item.revision < maxRevisions) {
+        if (contentPolicy && autoRevise && item.revision < maxRevisions) {
           const rewrite = await this.evaluator.rewrite({
             prompt: originalPrompt,
             error: item.job.error,
@@ -2129,9 +2376,8 @@ export class TaskBatchAutomationPool {
           )
           return
         }
-        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+        this.repository.recordBatchItemQa(batch.id, item.itemKey, {
           qaStatus: 'not_run',
-          acceptanceStatus: 'rejected',
           failureClass: item.job.error?.failureClass || 'generation_failed',
           recoveryAction: contentPolicy ? 'manual_policy_review' : (item.job.error?.recoveryAction || 'inspect_failure'),
           detail: {
@@ -2157,9 +2403,8 @@ export class TaskBatchAutomationPool {
       })
       if (!this.repository.isCurrentBatchAutomationClaim(batch.id, item.itemKey, item.job.id)) return
       if (qa.pass) {
-        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+        this.repository.recordBatchItemQa(batch.id, item.itemKey, {
           qaStatus: 'passed',
-          acceptanceStatus: 'accepted',
           detail: {
             jobId: item.job.id,
             revision: item.revision,
@@ -2172,7 +2417,14 @@ export class TaskBatchAutomationPool {
       }
 
       const classification = classifyQaVerdict(qa)
-      if (item.revision < maxRevisions) {
+      if (autoRevise && item.revision < maxRevisions) {
+        this.repository.recordBatchEvent(batch.id, 'qa_auto_revision_requested', {
+          itemKey: item.itemKey,
+          revision: item.revision,
+          jobId: item.job.id,
+          qa,
+          ...classification,
+        })
         this.repository.replaceBatchItemJob(
           batch.id,
           item.itemKey,
@@ -2186,9 +2438,8 @@ export class TaskBatchAutomationPool {
         )
         return
       }
-      this.repository.reviewBatchItem(batch.id, item.itemKey, {
-        qaStatus: 'failed',
-        acceptanceStatus: 'needs_review',
+      this.repository.recordBatchItemQa(batch.id, item.itemKey, {
+        qaStatus: 'needs_review',
         ...classification,
         detail: {
           jobId: item.job.id,
@@ -2201,9 +2452,8 @@ export class TaskBatchAutomationPool {
     } catch (error) {
       if (!this.repository.isCurrentBatchAutomationClaim(batch.id, item.itemKey, item.job.id)) return
       try {
-        this.repository.reviewBatchItem(batch.id, item.itemKey, {
+        this.repository.recordBatchItemQa(batch.id, item.itemKey, {
           qaStatus: 'needs_review',
-          acceptanceStatus: 'needs_review',
           failureClass: error?.httpStatus >= 500 ? 'provider_transient' : 'qa_unavailable',
           recoveryAction: error?.httpStatus >= 500 ? 'health_probe' : 'manual_review',
           detail: {
@@ -2447,6 +2697,18 @@ export async function createTaskApi(options = {}) {
         const batch = repository.retryFailedBatchJobs(batchRetryMatch[1])
         return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
       }
+      const batchItemQaMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/items\/([^/]+)\/qa$/)
+      if (request.method === 'POST' && batchItemQaMatch) {
+        const body = JSON.parse((await readBody(request, 1024 * 1024)).toString('utf8'))
+        const validation = validateBatchItemQa(body)
+        if (!validation.valid) return void json(response, 400, { error: { code: 'INVALID_BATCH_ITEM_QA', details: validation.errors } })
+        const batch = repository.recordBatchItemQa(
+          batchItemQaMatch[1],
+          decodeURIComponent(batchItemQaMatch[2]),
+          body,
+        )
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
       const batchItemReviewMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/items\/([^/]+)\/review$/)
       if (request.method === 'POST' && batchItemReviewMatch) {
         const body = JSON.parse((await readBody(request, 1024 * 1024)).toString('utf8'))
@@ -2498,6 +2760,23 @@ export async function createTaskApi(options = {}) {
         if (url.searchParams.get('manifest') === '1') return void json(response, 200, asset.manifest)
         const buffer = await readFile(asset.filePath)
         response.writeHead(200, { 'content-type': 'image/png', 'content-length': buffer.length, 'cache-control': 'private, immutable', etag: `"${asset.manifest.sha256}"` })
+        return void response.end(buffer)
+      }
+      const thumbnailMatch = url.pathname.match(/^\/v1\/assets\/([^/]+)\/thumbnail$/)
+      if (request.method === 'GET' && thumbnailMatch) {
+        const asset = repository.getAsset(thumbnailMatch[1])
+        if (!asset) return void json(response, 404, { error: { code: 'NOT_FOUND' } })
+        const requestedWidth = Number(url.searchParams.get('width') || 320)
+        const width = Number.isInteger(requestedWidth) ? Math.max(96, Math.min(requestedWidth, 768)) : 320
+        const buffer = await sharp(asset.filePath)
+          .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 76 })
+          .toBuffer()
+        response.writeHead(200, {
+          'content-type': 'image/webp',
+          'content-length': buffer.length,
+          'cache-control': 'private, max-age=300',
+        })
         return void response.end(buffer)
       }
       json(response, 404, { error: { code: 'NOT_FOUND' } })
