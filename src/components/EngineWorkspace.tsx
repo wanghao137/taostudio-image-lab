@@ -621,19 +621,20 @@ export default function EngineWorkspace() {
         state: filter === 'all' ? undefined : filter,
       })
       setJobStats(result.stats)
-      setJobs((current) => {
-        if (cursor) {
-          const known = new Set(current.map((job) => job.id))
-          return [...current, ...result.items.filter((job) => !known.has(job.id))]
-        }
-        if (current.length <= result.items.length) return result.items
-        const refreshed = new Set(result.items.map((job) => job.id))
-        return [...result.items, ...current.filter((job) => !refreshed.has(job.id))].slice(0, current.length)
-      })
-      const loadedCount = cursor
-        ? jobs.length + result.items.length
-        : Math.max(jobs.length, result.items.length)
-      setNextCursor(loadedCount >= result.stats.matching ? null : result.nextCursor)
+      const hadLoadedPages = !cursor && jobs.length > result.items.length
+      const known = new Set(jobs.map((job) => job.id))
+      const refreshed = new Set(result.items.map((job) => job.id))
+      const nextJobs = cursor
+        ? [...jobs, ...result.items.filter((job) => !known.has(job.id))]
+        : hadLoadedPages
+          ? [...result.items, ...jobs.filter((job) => !refreshed.has(job.id))]
+          : result.items
+      setJobs(nextJobs)
+      setNextCursor(nextJobs.length >= result.stats.matching
+        ? null
+        : hadLoadedPages
+          ? nextCursor || result.nextCursor
+          : result.nextCursor)
       setWorkspaceError(null)
       if (selectedJobId) {
         const selectionVersion = inspectorSelectionRef.current.version
@@ -650,7 +651,7 @@ export default function EngineWorkspace() {
     } finally {
       setRefreshing(false)
     }
-  }, [config, filter, jobs.length, selectedJobId])
+  }, [config, filter, jobs, nextCursor, selectedJobId])
 
   const connect = useCallback(async (candidate: ImageTaskApiConfig, persist: boolean) => {
     setBusy(true)

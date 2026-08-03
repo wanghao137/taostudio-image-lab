@@ -265,4 +265,54 @@ describe('EngineWorkspace inspector selection', () => {
       visibilityListenerSpy.mockRestore()
     }
   })
+
+  it('preserves the next page cursor when an event refreshes the first page', async () => {
+    const secondJob = {
+      ...job,
+      id: 'job-selection-second',
+      request: {
+        ...job.request,
+        idempotencyKey: 'selection-test-second',
+        input: { prompt: 'Second page image' },
+      },
+    } satisfies ImageJobV1
+    const thirdJob = {
+      ...job,
+      id: 'job-selection-third',
+      request: {
+        ...job.request,
+        idempotencyKey: 'selection-test-third',
+        input: { prompt: 'Third page image' },
+      },
+    } satisfies ImageJobV1
+    const stats = { ...jobList.stats, total: 3, terminal: 3, succeeded: 3, matching: 3, byState: { ...jobList.stats.byState, succeeded: 3 } }
+    apiMocks.getImageTaskCapabilities.mockResolvedValue({
+      ...capabilities,
+      capabilities: { ...capabilities.capabilities, events: { transport: 'sse' } },
+    })
+    apiMocks.listImageJobs.mockImplementation((_config, options = {}) => {
+      if (options.cursor === 'cursor-2') return Promise.resolve({ items: [thirdJob], nextCursor: null, stats })
+      if (options.cursor === 'cursor-1') return Promise.resolve({ items: [secondJob], nextCursor: 'cursor-2', stats })
+      return Promise.resolve({ items: [job], nextCursor: 'cursor-1', stats })
+    })
+    let announceChange: (() => void) | undefined
+    apiMocks.subscribeImageTaskEvents.mockImplementation((_config, options) => new Promise((_resolve, reject) => {
+      announceChange = options.onChange
+      options.onOpen?.()
+      options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
+
+    render(<EngineWorkspace />)
+    fireEvent.click(await screen.findByRole('button', { name: '加载更早任务' }, { timeout: 10_000 }))
+    expect(await screen.findByText('Second page image')).toBeTruthy()
+
+    announceChange?.()
+    await waitFor(() => {
+      expect(apiMocks.listImageJobs.mock.calls.filter(([, options]) => !options?.cursor)).toHaveLength(2)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '加载更早任务' }))
+    expect(await screen.findByText('Third page image')).toBeTruthy()
+    expect(apiMocks.listImageJobs.mock.calls.some(([, options]) => options?.cursor === 'cursor-2')).toBe(true)
+  })
 })
