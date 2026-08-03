@@ -339,6 +339,64 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect((await conflict.json()).error.code).toBe('BATCH_IDEMPOTENCY_CONFLICT')
   })
 
+  it('serves lightweight batch summary, paginated items, and paginated events', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-pages-001',
+        items: [
+          { itemKey: 'first', request: request({ idempotencyKey: 'batch-pages-job-001' }) },
+          { itemKey: 'second', request: request({ idempotencyKey: 'batch-pages-job-002' }) },
+        ],
+      }),
+    }).then((response) => response.json())
+
+    const summaryResponse = await fetch(`${url}/v1/image-batches/${created.id}/summary`, { headers: headers() })
+    const summary = await summaryResponse.json()
+    expect(summaryResponse.status).toBe(200)
+    expect(summary).not.toHaveProperty('items')
+    expect(summary).not.toHaveProperty('events')
+
+    const firstPage = await fetch(`${url}/v1/image-batches/${created.id}/items?limit=1`, { headers: headers() }).then((response) => response.json())
+    expect(firstPage).toMatchObject({ total: 2, items: [{ itemKey: 'first' }] })
+    expect(firstPage.nextCursor).not.toBeNull()
+    const secondPage = await fetch(`${url}/v1/image-batches/${created.id}/items?limit=1&cursor=${firstPage.nextCursor}`, { headers: headers() }).then((response) => response.json())
+    expect(secondPage).toMatchObject({ total: 2, nextCursor: null, items: [{ itemKey: 'second' }] })
+
+    const eventPage = await fetch(`${url}/v1/image-batches/${created.id}/events?limit=1`, { headers: headers() }).then((response) => response.json())
+    expect(eventPage.total).toBeGreaterThan(0)
+    expect(eventPage.items).toHaveLength(1)
+  })
+
+  it('streams authenticated change notifications over SSE', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const controller = new AbortController()
+    const response = await fetch(`${url}/v1/events`, { headers: headers({ accept: 'text/event-stream' }), signal: controller.signal })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let stream = ''
+    while (!stream.includes('event: ready')) {
+      const chunk = await reader.read()
+      stream += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
+    }
+
+    await fetch(`${url}/v1/image-jobs`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(request({ idempotencyKey: 'sse-change-job-001' })),
+    })
+    while (!stream.includes('event: change')) {
+      const chunk = await reader.read()
+      stream += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
+    }
+    expect(stream).toContain('"kind":"job"')
+    controller.abort()
+  })
+
   it('reuses one durable logical batch across runner restarts', async () => {
     const { url } = await start({ concurrency: 0 })
     const firstPayload = {
@@ -560,6 +618,27 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
     expect(retried.events.at(-1)).toMatchObject({ event: 'retry_failed', detail: { retried: 1 } })
     expect(api.repository.events(claimed.id).some((event) => event.detail?.reason === 'manual_retry')).toBe(true)
+  })
+
+  it('recreates cancelled batch jobs while preserving replacement history', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-cancel-recovery-001',
+        items: [{ itemKey: 'cancelled-item', request: request({ idempotencyKey: 'batch-cancel-recovery-job-001' }) }],
+      }),
+    }).then((response) => response.json())
+    await fetch(`${url}/v1/image-jobs/${created.items[0].job.id}/cancel`, { method: 'POST', headers: headers() })
+
+    const recoveredResponse = await fetch(`${url}/v1/image-batches/${created.id}/retry-cancelled`, { method: 'POST', headers: headers() })
+    const recovered = await recoveredResponse.json()
+    expect(recoveredResponse.status).toBe(200)
+    expect(recovered).toMatchObject({ state: 'running', stats: { queued: 1, cancelled: 0 } })
+    expect(recovered.items[0].job.id).not.toBe(created.items[0].job.id)
+    expect(recovered.items[0].jobHistory.at(-1)).toMatchObject({ reason: 'cancelled_recovery' })
+    expect(recovered.events.at(-1)).toMatchObject({ event: 'retry_cancelled', detail: { retried: 1 } })
   })
 
   it('auto-resumes a paused batch after the cooldown window when there are no recent provider failures', async () => {

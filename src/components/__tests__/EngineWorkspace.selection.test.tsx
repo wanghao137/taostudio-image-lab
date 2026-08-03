@@ -15,6 +15,10 @@ const apiMocks = vi.hoisted(() => ({
   listImageBatches: vi.fn(),
   getImageJob: vi.fn(),
   getImageBatch: vi.fn(),
+  getImageBatchSummary: vi.fn(),
+  listImageBatchItems: vi.fn(),
+  listImageBatchEvents: vi.fn(),
+  subscribeImageTaskEvents: vi.fn(),
   getImageAssetBlob: vi.fn(),
   readLocalImageTaskApiConfig: vi.fn(),
 }))
@@ -173,6 +177,13 @@ describe('EngineWorkspace inspector selection', () => {
     apiMocks.listImageBatches.mockResolvedValue({ items: [batch] })
     apiMocks.getImageJob.mockResolvedValue(job)
     apiMocks.getImageBatch.mockResolvedValue(batch)
+    apiMocks.getImageBatchSummary.mockResolvedValue((({ items: _items, events: _events, ...summary }) => summary)(batch))
+    apiMocks.listImageBatchItems.mockResolvedValue({ items: batch.items, nextCursor: null, total: batch.stats.total })
+    apiMocks.listImageBatchEvents.mockResolvedValue({ items: batch.events, nextCursor: null, total: batch.events.length })
+    apiMocks.subscribeImageTaskEvents.mockImplementation((_config, options) => new Promise((_resolve, reject) => {
+      options.onOpen?.()
+      options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
   })
 
   afterEach(() => cleanup())
@@ -191,7 +202,7 @@ describe('EngineWorkspace inspector selection', () => {
 
   it('ignores a stale batch detail response after a job is selected', async () => {
     let resolveBatch!: (value: ImageBatchV1) => void
-    apiMocks.getImageBatch.mockImplementationOnce(() => new Promise((resolve) => {
+    apiMocks.getImageBatchSummary.mockImplementationOnce(() => new Promise((resolve) => {
       resolveBatch = resolve
     }))
     render(<EngineWorkspace />)
@@ -200,7 +211,7 @@ describe('EngineWorkspace inspector selection', () => {
     fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
     expect(await screen.findByText('Job detail')).toBeTruthy()
 
-    resolveBatch(batch)
+    resolveBatch((({ items: _items, events: _events, ...summary }) => summary)(batch) as ImageBatchV1)
 
     await waitFor(() => {
       expect(screen.queryByText('Batch detail')).toBeNull()
@@ -235,7 +246,7 @@ describe('EngineWorkspace inspector selection', () => {
 
     const activeSection = await screen.findByLabelText('执行中')
     const attentionSection = screen.getByLabelText('待处理')
-    const historySection = screen.getByLabelText('历史记录')
+    const historySection = screen.getByLabelText('已归档')
     expect(within(activeSection).getByText('Active batch')).toBeTruthy()
     expect(within(attentionSection).getByText('Interrupted batch')).toBeTruthy()
     expect(within(historySection).getByText('Selection test batch')).toBeTruthy()

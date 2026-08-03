@@ -156,7 +156,7 @@ export interface ImageTaskCapabilitiesV1 {
         features: Array<'multi_output_expansion' | 'safe_rewrite' | 'visual_qa' | 'human_review' | 'optional_auto_revision'>
       }
     }
-    events: { transport: 'polling' }
+    events: { transport: 'polling' | 'sse' }
   }
 }
 
@@ -179,6 +179,37 @@ export interface ImageJobListV1 {
 export type ImageBatchQaStatusV1 = 'not_run' | 'passed' | 'failed' | 'needs_review'
 export type ImageBatchAcceptanceStatusV1 = 'pending' | 'accepted' | 'needs_review' | 'rejected'
 
+export interface ImageBatchItemV1 {
+  itemKey: string
+  sourceItemKey: string
+  position: number
+  outputIndex: number
+  outputCount: number
+  revision: number
+  automationState: 'idle' | 'processing' | 'done'
+  generationStatus: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+  qaStatus: ImageBatchQaStatusV1
+  acceptanceStatus: ImageBatchAcceptanceStatusV1
+  failureClass?: string | null
+  recoveryAction?: string | null
+  review?: Record<string, unknown> | null
+  humanReviewStatus: 'not_ready' | 'pending' | 'approved' | 'rejected' | 'not_applicable'
+  humanReview?: Record<string, unknown> | null
+  job: ImageJobV1
+  jobHistory: Array<{
+    revision: number
+    reason: string
+    createdAt: string
+    job: ImageJobV1
+  }>
+}
+
+export interface ImageBatchEventV1 {
+  event: string
+  detail: Record<string, unknown> | null
+  createdAt: string
+}
+
 export interface ImageBatchV1 {
   id: string
   name?: string | null
@@ -195,6 +226,11 @@ export interface ImageBatchV1 {
   }
   automation: ImageBatchAutomationV1
   acceptanceState: 'pending' | 'accepted' | 'needs_review' | 'rejected'
+  facets?: {
+    models: string[]
+    dimensions: string[]
+    failureClasses: string[]
+  }
   stats: {
     total: number
     terminal: number
@@ -215,31 +251,8 @@ export interface ImageBatchV1 {
     humanReviewApproved: number
     humanReviewRejected: number
   }
-  items: Array<{
-    itemKey: string
-    sourceItemKey: string
-    position: number
-    outputIndex: number
-    outputCount: number
-    revision: number
-    automationState: 'idle' | 'processing' | 'done'
-    generationStatus: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
-    qaStatus: ImageBatchQaStatusV1
-    acceptanceStatus: ImageBatchAcceptanceStatusV1
-    failureClass?: string | null
-    recoveryAction?: string | null
-    review?: Record<string, unknown> | null
-    humanReviewStatus: 'not_ready' | 'pending' | 'approved' | 'rejected' | 'not_applicable'
-    humanReview?: Record<string, unknown> | null
-    job: ImageJobV1
-    jobHistory: Array<{
-      revision: number
-      reason: string
-      createdAt: string
-      job: ImageJobV1
-    }>
-  }>
-  events: Array<{ event: string; detail: Record<string, unknown> | null; createdAt: string }>
+  items: ImageBatchItemV1[]
+  events: ImageBatchEventV1[]
   createdAt: string
   updatedAt: string
 }
@@ -256,6 +269,18 @@ export interface ImageBatchAutomationV1 {
 }
 
 export type ImageBatchSummaryV1 = Omit<ImageBatchV1, 'items' | 'events'>
+
+export interface ImageBatchItemListV1 {
+  items: ImageBatchItemV1[]
+  nextCursor: string | null
+  total: number
+}
+
+export interface ImageBatchEventListV1 {
+  items: ImageBatchEventV1[]
+  nextCursor: string | null
+  total: number
+}
 
 export interface ImageBatchCreateRequestV1 {
   idempotencyKey: string
@@ -375,12 +400,65 @@ export async function getImageBatch(config: ImageTaskApiConfig, id: string): Pro
   return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}`)).json()
 }
 
+export async function getImageBatchSummary(config: ImageTaskApiConfig, id: string): Promise<ImageBatchSummaryV1> {
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/summary`)).json()
+}
+
+export async function listImageBatchItems(
+  config: ImageTaskApiConfig,
+  id: string,
+  options: { limit?: number; cursor?: string } = {},
+): Promise<ImageBatchItemListV1> {
+  const search = new URLSearchParams()
+  if (options.limit !== undefined) search.set('limit', String(options.limit))
+  if (options.cursor) search.set('cursor', options.cursor)
+  const query = search.size ? `?${search.toString()}` : ''
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/items${query}`)).json()
+}
+
+export async function listImageBatchEvents(
+  config: ImageTaskApiConfig,
+  id: string,
+  options: { limit?: number; cursor?: string } = {},
+): Promise<ImageBatchEventListV1> {
+  const search = new URLSearchParams()
+  if (options.limit !== undefined) search.set('limit', String(options.limit))
+  if (options.cursor) search.set('cursor', options.cursor)
+  const query = search.size ? `?${search.toString()}` : ''
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/events${query}`)).json()
+}
+
 export async function controlImageBatch(
   config: ImageTaskApiConfig,
   id: string,
-  action: 'pause' | 'resume' | 'retry-failed',
+  action: 'pause' | 'resume' | 'retry-failed' | 'retry-cancelled',
 ): Promise<ImageBatchV1> {
   return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/${action}`, { method: 'POST' })).json()
+}
+
+export async function subscribeImageTaskEvents(
+  config: ImageTaskApiConfig,
+  options: { signal: AbortSignal; onChange: () => void; onOpen?: () => void },
+): Promise<void> {
+  const response = await taskFetch(config, '/v1/events', {
+    headers: { accept: 'text/event-stream' },
+    signal: options.signal,
+  })
+  if (!response.body) throw new Error('Image Task API event stream is unavailable')
+  options.onOpen?.()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return
+    buffer += decoder.decode(value, { stream: true })
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() || ''
+    for (const frame of frames) {
+      if (frame.split('\n').some((line) => line.startsWith('event: change'))) options.onChange()
+    }
+  }
 }
 
 export async function reviewImageBatchItem(

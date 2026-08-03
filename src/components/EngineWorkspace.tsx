@@ -34,17 +34,23 @@ import {
   createImageBatch,
   controlImageBatch,
   getImageBatch,
+  getImageBatchSummary,
   getImageAssetBlob,
   getImageAssetThumbnailBlob,
   getImageJob,
   getImageTaskCapabilities,
   listImageBatches,
+  listImageBatchEvents,
+  listImageBatchItems,
   listImageJobs,
   replaceImageBatchItemJob,
   readLocalImageTaskApiConfig,
   reviewImageBatchItem,
   retryImageJob,
   saveLocalImageTaskApiConfig,
+  subscribeImageTaskEvents,
+  type ImageBatchEventV1,
+  type ImageBatchItemV1,
   type ImageJobStateV1,
   type ImageJobListV1,
   type ImageJobV1,
@@ -52,6 +58,7 @@ import {
   type ImageBatchSummaryV1,
   type ImageTaskApiConfig,
   type ImageTaskCapabilitiesV1,
+  ImageTaskApiError,
 } from '../lib/imageTaskApi'
 
 const ACTIVE_STATES = new Set<ImageJobStateV1>([
@@ -151,10 +158,12 @@ function ReviewThumbnail({
   config,
   assetId,
   label,
+  interactive = true,
 }: {
   config: ImageTaskApiConfig
   assetId: string | null
   label: string
+  interactive?: boolean
 }) {
   const [url, setUrl] = useState<string | null>(null)
   const [visible, setVisible] = useState(false)
@@ -233,28 +242,36 @@ function ReviewThumbnail({
 
   return (
     <div ref={containerRef} className="relative h-full w-full bg-stone-100 dark:bg-white/[0.04]">
-      <button
-        type="button"
-        onClick={() => void openFullPreview()}
-        disabled={!assetId || fullState === 'loading'}
-        className="group relative flex h-full w-full items-center justify-center overflow-hidden outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#356c82] disabled:cursor-wait"
-        aria-label={assetId ? `放大查看 ${label}` : label}
-        title={assetId ? '点击查看大图' : undefined}
-      >
-        {url
-          ? <img src={url} alt={label} className="h-full w-full object-cover" loading="lazy" />
-          : <span className="text-[10px] text-stone-400">{visible ? '无预览' : '加载预览'}</span>}
-        {url && fullState !== 'loading' && (
-          <span className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true">
-            <Maximize2 className="h-3.5 w-3.5" />
-          </span>
-        )}
-        {fullState === 'loading' && (
-          <span className="absolute inset-0 flex items-center justify-center bg-black/35 text-white" aria-live="polite">
-            <LoaderCircle className="h-4 w-4 animate-spin" />
-          </span>
-        )}
-      </button>
+      {interactive ? (
+        <button
+          type="button"
+          onClick={() => void openFullPreview()}
+          disabled={!assetId || fullState === 'loading'}
+          className="group relative flex h-full w-full items-center justify-center overflow-hidden outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#356c82] disabled:cursor-wait"
+          aria-label={assetId ? `放大查看 ${label}` : label}
+          title={assetId ? '点击查看大图' : undefined}
+        >
+          {url
+            ? <img src={url} alt={label} className="h-full w-full object-cover" loading="lazy" />
+            : <span className="text-[10px] text-stone-400">{visible ? '无预览' : '加载预览'}</span>}
+          {url && fullState !== 'loading' && (
+            <span className="absolute right-1.5 top-1.5 inline-flex h-6 w-6 items-center justify-center rounded bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true">
+              <Maximize2 className="h-3.5 w-3.5" />
+            </span>
+          )}
+          {fullState === 'loading' && (
+            <span className="absolute inset-0 flex items-center justify-center bg-black/35 text-white" aria-live="polite">
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            </span>
+          )}
+        </button>
+      ) : (
+        <div className="flex h-full w-full items-center justify-center overflow-hidden" aria-hidden="true">
+          {url
+            ? <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" />
+            : <span className="text-[9px] text-stone-400">{visible ? '无预览' : '加载'}</span>}
+        </div>
+      )}
       {fullState === 'error' && (
         <p className="absolute inset-x-1 bottom-1 rounded bg-red-900/80 px-1 py-0.5 text-center text-[9px] text-white" role="alert">
           大图加载失败，点击重试
@@ -304,23 +321,77 @@ function batchReviewNote(item: ImageBatchV1['items'][number]) {
 }
 
 function batchStateLabel(batch: ImageBatchSummaryV1) {
-  if (batch.state === 'running') {
+  const state = batchPresentationState(batch)
+  if (state === 'running') {
     if (batch.runner?.active) return '接管中'
     return (batch.runner?.attempt || 0) > 0 ? '等待接管' : '执行中'
   }
-  if (batch.state === 'paused') return batch.pauseReason === 'runner_disconnected' ? '等待接管' : '已暂停'
-  if (batchHasPendingQa(batch)) return 'QA 处理中'
-  if (batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return '待人工复核'
+  if (state === 'paused') return batch.pauseReason === 'runner_disconnected' ? '等待接管' : '已暂停'
+  if (state === 'waiting_qa') return '待 QA'
+  if (state === 'waiting_human') return '待人审'
+  if (state === 'partial_failure') return '部分失败'
+  if (state === 'rejected') return '已拒绝'
+  if (state === 'delivery_ready') return '可交付'
   return '已归档'
 }
 
+function formatDuration(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours) return `${hours}时 ${minutes}分`
+  if (minutes) return `${minutes}分 ${seconds}秒`
+  return `${seconds}秒`
+}
+
 function batchStateTone(batch: ImageBatchSummaryV1) {
-  if (batch.state === 'running') return (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
+  const state = batchPresentationState(batch)
+  if (state === 'running') return (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
     ? 'text-amber-700 dark:text-amber-300'
     : 'text-sky-700 dark:text-sky-300'
-  if (batch.state === 'paused' || batch.acceptanceState === 'needs_review' || batch.acceptanceState === 'rejected') return 'text-amber-700 dark:text-amber-300'
-  if (batchHasPendingQa(batch)) return 'text-sky-700 dark:text-sky-300'
+  if (state === 'waiting_qa') return 'text-sky-700 dark:text-sky-300'
+  if (state === 'waiting_human' || state === 'paused' || state === 'partial_failure') return 'text-amber-700 dark:text-amber-300'
+  if (state === 'rejected') return 'text-red-600 dark:text-red-300'
+  if (state === 'delivery_ready') return 'text-emerald-700 dark:text-emerald-300'
   return 'text-stone-500 dark:text-stone-400'
+}
+
+type BatchPresentationState = 'running' | 'paused' | 'waiting_qa' | 'waiting_human' | 'partial_failure' | 'rejected' | 'delivery_ready' | 'archived'
+
+function batchPresentationState(batch: ImageBatchSummaryV1): BatchPresentationState {
+  if (batch.state === 'running') return 'running'
+  if (batch.state === 'paused') return 'paused'
+  if (batch.stats.humanReviewPending > 0 || batch.acceptanceState === 'needs_review') return 'waiting_human'
+  if (batchHasPendingQa(batch)) return 'waiting_qa'
+  if (batch.stats.failed > 0 || batch.stats.cancelled > 0) return 'partial_failure'
+  if (batch.acceptanceState === 'rejected' || batch.stats.rejected > 0) return 'rejected'
+  if (batch.stats.accepted > 0 && batch.stats.accepted === batch.stats.total) return 'delivery_ready'
+  return 'archived'
+}
+
+function batchPrimaryAction(batch: ImageBatchSummaryV1) {
+  if (batch.stats.humanReviewPending > 0) return `复核 ${batch.stats.humanReviewPending} 项`
+  if (batch.stats.failed > 0) return `重试 ${batch.stats.failed} 项`
+  if (batch.stats.cancelled > 0) return `继续 ${batch.stats.cancelled} 项`
+  if (batch.state === 'paused') return '恢复执行'
+  if (batch.state === 'running') return '查看运行进度'
+  if (batch.stats.accepted > 0) return `查看 ${batch.stats.accepted} 个合格结果`
+  return '查看批次'
+}
+
+function shortTaskTitle(prompt?: string) {
+  const normalized = (prompt || '图像编辑任务').replace(/\s+/g, ' ').trim()
+  const sentence = normalized.split(/[。！？.!?\n]/)[0] || normalized
+  return sentence.length > 42 ? `${sentence.slice(0, 42)}…` : sentence
+}
+
+function displayBatchName(batch: ImageBatchSummaryV1) {
+  const raw = batch.name || batch.id
+  const timestampMatch = raw.match(/(\d{8}T\d{6})$/)
+  if (!timestampMatch) return raw
+  const base = timestampMatch ? raw.slice(0, -timestampMatch[1].length).replace(/[-_\s]+$/, '') : raw
+  return `${base || '图像批次'} · ${formatTime(batch.createdAt)} · ${batch.stats.total} 项`
 }
 
 function BatchQueueRow({
@@ -340,7 +411,7 @@ function BatchQueueRow({
       className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 border-l-2 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:px-3 ${selected ? 'border-l-[#356c82] bg-white dark:bg-white/[0.04]' : batch.state === 'running' ? 'border-l-sky-400/70' : issueCount ? 'border-l-amber-400/70' : 'border-l-transparent'}`}
     >
       <div className="min-w-0">
-        <div className="truncate text-sm font-medium">{batch.name || batch.id}</div>
+        <div className="truncate text-sm font-medium" title={batch.name || batch.id}>{displayBatchName(batch)}</div>
         <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-stone-400">
           <span>{batch.stats.succeeded}/{batch.stats.total} 完成</span>
           {batch.stats.failed > 0 && <span>{batch.stats.failed} 失败</span>}
@@ -350,7 +421,10 @@ function BatchQueueRow({
         </div>
       </div>
       <time className="hidden self-center whitespace-nowrap text-[10px] text-stone-400 sm:block">{formatTime(batch.updatedAt)}</time>
-      <span className={`self-center whitespace-nowrap text-[11px] font-medium ${batchStateTone(batch)}`}>{batchStateLabel(batch)}</span>
+      <span className="self-center text-right">
+        <span className={`block whitespace-nowrap text-[11px] font-medium ${batchStateTone(batch)}`}>{batchStateLabel(batch)}</span>
+        <span className="mt-1 block whitespace-nowrap text-[10px] text-stone-400">{batchPrimaryAction(batch)}</span>
+      </span>
     </button>
   )
 }
@@ -424,6 +498,12 @@ export default function EngineWorkspace() {
   const [filter, setFilter] = useState<ImageJobStateV1 | 'all'>('all')
   const [selectedJob, setSelectedJob] = useState<ImageJobV1 | null>(null)
   const [selectedBatch, setSelectedBatch] = useState<ImageBatchV1 | null>(null)
+  const [batchItemsCursor, setBatchItemsCursor] = useState<string | null>(null)
+  const [batchEventsCursor, setBatchEventsCursor] = useState<string | null>(null)
+  const [batchItemsTotal, setBatchItemsTotal] = useState(0)
+  const [batchEventsTotal, setBatchEventsTotal] = useState(0)
+  const [eventTransport, setEventTransport] = useState<'sse' | 'polling'>('polling')
+  const [statusAnnouncement, setStatusAnnouncement] = useState('')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [sourcePreviewUrl, setSourcePreviewUrl] = useState<string | null>(null)
   const [assetLightbox, setAssetLightbox] = useState<'source' | 'final' | null>(null)
@@ -434,9 +514,12 @@ export default function EngineWorkspace() {
   const [showNewJob, setShowNewJob] = useState(false)
   const [showNewBatch, setShowNewBatch] = useState(false)
   const [batchFilter, setBatchFilter] = useState('')
+  const [batchFacet, setBatchFacet] = useState<'all' | 'review' | 'failed' | 'cancelled' | 'qa' | 'delivery' | 'low_success' | 'recent'>('all')
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
   const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
   const selectedJobId = selectedJob?.id
+  const inspectorOpen = showNewJob || showNewBatch || Boolean(selectedJob || selectedBatch)
+  const inspectorRef = useRef<HTMLElement>(null)
   const inspectorSelectionRef = useRef<{
     version: number
     kind: 'none' | 'job' | 'batch'
@@ -483,18 +566,49 @@ export default function EngineWorkspace() {
     setShowNewJob(false)
     setShowNewBatch(false)
     setSelectedJob(null)
-    setSelectedBatch(null)
+    setSelectedBatch({ ...batch, items: [], events: [] })
+    setBatchItemsCursor(null)
+    setBatchEventsCursor(null)
+    setBatchItemsTotal(batch.stats.total)
+    setBatchEventsTotal(0)
     if (!config) return
-    void getImageBatch(config, batch.id)
-      .then((detail) => {
+    void Promise.all([
+      getImageBatchSummary(config, batch.id),
+      listImageBatchItems(config, batch.id, { limit: 50 }),
+      listImageBatchEvents(config, batch.id, { limit: 30 }),
+    ])
+      .then(([summary, itemPage, eventPage]) => {
         const selection = inspectorSelectionRef.current
         if (
           selection.version === selectionVersion
           && selection.kind === 'batch'
           && selection.id === batch.id
-        ) setSelectedBatch(detail)
+        ) {
+          setSelectedBatch({ ...summary, items: itemPage.items, events: eventPage.items })
+          setBatchItemsCursor(itemPage.nextCursor)
+          setBatchEventsCursor(eventPage.nextCursor)
+          setBatchItemsTotal(itemPage.total)
+          setBatchEventsTotal(eventPage.total)
+        }
       })
-      .catch((error) => setWorkspaceError(errorMessage(error)))
+      .catch(async (error) => {
+        if (error instanceof ImageTaskApiError && error.status === 404) {
+          try {
+            const detail = await getImageBatch(config, batch.id)
+            const selection = inspectorSelectionRef.current
+            if (selection.version === selectionVersion && selection.kind === 'batch' && selection.id === batch.id) {
+              setSelectedBatch(detail)
+              setBatchItemsTotal(detail.items.length)
+              setBatchEventsTotal(detail.events.length)
+            }
+            return
+          } catch (fallbackError) {
+            setWorkspaceError(errorMessage(fallbackError))
+            return
+          }
+        }
+        setWorkspaceError(errorMessage(error))
+      })
   }, [beginInspectorSelection, config])
 
   const refresh = useCallback(async (targetConfig = config, cursor?: string | null) => {
@@ -573,15 +687,17 @@ export default function EngineWorkspace() {
       const next = result.items
       if (selectedBatch?.id) {
         const currentSummary = next.find((batch) => batch.id === selectedBatch.id)
-        if (currentSummary && (currentSummary.state === 'running' || batchHasActiveAutomation(selectedBatch))) {
+        if (currentSummary) {
           const selectionVersion = inspectorSelectionRef.current.version
-          const detail = await getImageBatch(targetConfig, selectedBatch.id)
+          const summary = await getImageBatchSummary(targetConfig, selectedBatch.id)
           const selection = inspectorSelectionRef.current
           if (
             selection.version === selectionVersion
             && selection.kind === 'batch'
-            && selection.id === detail.id
-          ) setSelectedBatch(detail)
+            && selection.id === summary.id
+          ) {
+            setSelectedBatch((current) => current?.id === summary.id ? { ...summary, items: current.items, events: current.events } : current)
+          }
         }
       }
       setBatches(next)
@@ -602,6 +718,48 @@ export default function EngineWorkspace() {
 
   useEffect(() => {
     if (!config || !capabilities) return
+    if (capabilities.capabilities.events.transport === 'sse') {
+      const controller = new AbortController()
+      let refreshTimer: number | undefined
+      let fallbackTimer: number | undefined
+      let fallbackDisposed = false
+      const queueRefresh = () => {
+        if (refreshTimer !== undefined) return
+        refreshTimer = window.setTimeout(() => {
+          refreshTimer = undefined
+          void Promise.all([refreshRef.current(config, null), refreshBatchesRef.current(config)])
+        }, 250)
+      }
+      const runFallbackPoll = async () => {
+        if (fallbackDisposed) return
+        const targetConfig = pollingStateRef.current.config
+        if (targetConfig) {
+          await Promise.all([
+            refreshRef.current(targetConfig, null),
+            refreshBatchesRef.current(targetConfig),
+          ]).catch(() => undefined)
+        }
+        if (!fallbackDisposed) {
+          fallbackTimer = window.setTimeout(runFallbackPoll, document.visibilityState === 'hidden' ? 60_000 : 30_000)
+        }
+      }
+      void subscribeImageTaskEvents(config, {
+        signal: controller.signal,
+        onOpen: () => setEventTransport('sse'),
+        onChange: queueRefresh,
+      }).catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        setEventTransport('polling')
+        void runFallbackPoll()
+      })
+      return () => {
+        fallbackDisposed = true
+        controller.abort()
+        if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+        if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer)
+      }
+    }
+    setEventTransport('polling')
     let timer: number | undefined
     let disposed = false
     let inFlight = false
@@ -712,7 +870,26 @@ export default function EngineWorkspace() {
   }), [jobStats, jobs])
 
   const batchGroups = useMemo(() => {
-    const filtered = batches.filter((batch) => !batchFilter || (batch.name || batch.id).toLowerCase().includes(batchFilter.toLowerCase()))
+    const filtered = batches.filter((batch) => {
+      const haystack = [
+        batch.name,
+        batch.id,
+        batch.createdAt.slice(0, 10),
+        ...(batch.facets?.models || []),
+        ...(batch.facets?.dimensions || []),
+        ...(batch.facets?.failureClasses || []),
+      ].filter(Boolean).join(' ').toLowerCase()
+      const matchesText = !batchFilter || haystack.includes(batchFilter.toLowerCase())
+      const matchesFacet = batchFacet === 'all'
+        || (batchFacet === 'review' && batch.stats.humanReviewPending > 0)
+        || (batchFacet === 'failed' && batch.stats.failed > 0)
+        || (batchFacet === 'cancelled' && batch.stats.cancelled > 0)
+        || (batchFacet === 'qa' && batch.stats.qaFailed + batch.stats.qaNeedsReview > 0)
+        || (batchFacet === 'delivery' && batchPresentationState(batch) === 'delivery_ready')
+        || (batchFacet === 'low_success' && batch.stats.total > 0 && batch.stats.succeeded / batch.stats.total < 0.9)
+        || (batchFacet === 'recent' && Date.now() - new Date(batch.createdAt).getTime() < 7 * 24 * 60 * 60 * 1000)
+      return matchesText && matchesFacet
+    })
     const runnerDisconnected = (batch: ImageBatchSummaryV1) => batch.state === 'running' && (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
     const active = filtered.filter((batch) => batch.state === 'running' && !runnerDisconnected(batch))
     const needsAttention = filtered.filter((batch) => !active.includes(batch) && (
@@ -720,43 +897,20 @@ export default function EngineWorkspace() {
       || batch.state === 'paused'
       || batchHasPendingQa(batch)
       || batch.acceptanceState === 'needs_review'
-      || batch.acceptanceState === 'rejected'
-      || batch.stats.failed > 0
-      || batch.stats.cancelled > 0
+      || batch.stats.humanReviewPending > 0
     ))
     const activeIds = new Set(active.map((batch) => batch.id))
     const attentionIds = new Set(needsAttention.map((batch) => batch.id))
-    const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id))
-    return { filtered, active, needsAttention, history }
-  }, [batches, batchFilter])
-
-  const loadAllJobs = useCallback(async () => {
-    if (!config) return
-    setRefreshing(true)
-    try {
-      const MAX_LOAD = 500
-      const all: ImageJobV1[] = []
-      let cursor: string | undefined
-      do {
-        const page = await listImageJobs(config, {
-          limit: 100,
-          cursor,
-          state: filter === 'all' ? undefined : filter,
-        })
-        all.push(...page.items)
-        setJobStats(page.stats)
-        cursor = page.nextCursor || undefined
-        if (all.length >= MAX_LOAD) break
-      } while (cursor)
-      setJobs(all)
-      setNextCursor(null)
-      setWorkspaceError(null)
-    } catch (error) {
-      setWorkspaceError(errorMessage(error))
-    } finally {
-      setRefreshing(false)
-    }
-  }, [config, filter])
+    const incomplete = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && (
+      batch.stats.failed > 0
+      || batch.stats.cancelled > 0
+      || batch.acceptanceState === 'rejected'
+      || batch.stats.rejected > 0
+    ))
+    const incompleteIds = new Set(incomplete.map((batch) => batch.id))
+    const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id))
+    return { filtered, active, needsAttention, incomplete, history }
+  }, [batches, batchFacet, batchFilter])
 
   const handleConnect = async (event: FormEvent) => {
     event.preventDefault()
@@ -852,12 +1006,13 @@ export default function EngineWorkspace() {
     }
   }
 
-  const handleBatchControl = async (action: 'pause' | 'resume' | 'retry-failed') => {
+  const handleBatchControl = async (action: 'pause' | 'resume' | 'retry-failed' | 'retry-cancelled') => {
     if (!config || !selectedBatch) return
     setBusy(true)
     try {
       const next = await controlImageBatch(config, selectedBatch.id, action)
       applyBatchUpdate(next)
+      setStatusAnnouncement(action === 'retry-cancelled' ? `已重新执行 ${selectedBatch.stats.cancelled} 个取消项` : action === 'retry-failed' ? `已重试 ${selectedBatch.stats.failed} 个失败项` : action === 'pause' ? '批次已暂停' : '批次已恢复')
     } catch (error) {
       setWorkspaceError(errorMessage(error))
     } finally {
@@ -876,6 +1031,47 @@ export default function EngineWorkspace() {
     })
   }, [])
 
+  useEffect(() => {
+    if (inspectorOpen) window.requestAnimationFrame(() => inspectorRef.current?.focus())
+  }, [inspectorOpen, selectedBatch?.id, selectedJob?.id])
+
+  const loadMoreBatchItems = useCallback(async () => {
+    if (!config || !selectedBatch || !batchItemsCursor) return
+    const page = await listImageBatchItems(config, selectedBatch.id, { limit: 50, cursor: batchItemsCursor })
+    setSelectedBatch((current) => current?.id === selectedBatch.id
+      ? { ...current, items: [...current.items, ...page.items] }
+      : current)
+    setBatchItemsCursor(page.nextCursor)
+    setBatchItemsTotal(page.total)
+  }, [batchItemsCursor, config, selectedBatch])
+
+  const loadMoreBatchEvents = useCallback(async () => {
+    if (!config || !selectedBatch || !batchEventsCursor) return
+    const page = await listImageBatchEvents(config, selectedBatch.id, { limit: 30, cursor: batchEventsCursor })
+    setSelectedBatch((current) => current?.id === selectedBatch.id
+      ? { ...current, events: [...current.events, ...page.items] }
+      : current)
+    setBatchEventsCursor(page.nextCursor)
+    setBatchEventsTotal(page.total)
+  }, [batchEventsCursor, config, selectedBatch])
+
+  const refreshSelectedBatchPages = useCallback(async () => {
+    if (!config || !selectedBatch) return
+    try {
+      const [itemPage, eventPage] = await Promise.all([
+        listImageBatchItems(config, selectedBatch.id, { limit: Math.min(Math.max(selectedBatch.items.length, 50), 100) }),
+        listImageBatchEvents(config, selectedBatch.id, { limit: Math.min(Math.max(selectedBatch.events.length, 30), 100) }),
+      ])
+      setSelectedBatch((current) => current?.id === selectedBatch.id ? { ...current, items: itemPage.items, events: eventPage.items } : current)
+      setBatchItemsCursor(itemPage.nextCursor)
+      setBatchEventsCursor(eventPage.nextCursor)
+      setBatchItemsTotal(itemPage.total)
+      setBatchEventsTotal(eventPage.total)
+    } catch (error) {
+      if (!(error instanceof ImageTaskApiError && error.status === 404)) setWorkspaceError(errorMessage(error))
+    }
+  }, [config, selectedBatch])
+
   const handleBatchItemReview = async (
     itemKey: string,
     acceptanceStatus: 'accepted' | 'rejected',
@@ -893,6 +1089,8 @@ export default function EngineWorkspace() {
         },
       })
       applyBatchUpdate(next)
+      await refreshSelectedBatchPages()
+      setStatusAnnouncement(acceptanceStatus === 'accepted' ? '已确认该产物可交付' : '已拒绝该产物')
     } catch (error) {
       setWorkspaceError(errorMessage(error))
     } finally {
@@ -916,6 +1114,8 @@ export default function EngineWorkspace() {
         'human_review_retry',
       )
       applyBatchUpdate(next)
+      await refreshSelectedBatchPages()
+      setStatusAnnouncement('已提交该条目重新生成')
     } catch (error) {
       setWorkspaceError(errorMessage(error))
     } finally {
@@ -1001,6 +1201,7 @@ export default function EngineWorkspace() {
 
   return (
     <main className="h-[calc(100vh-4rem)] overflow-hidden bg-[#f4f1ec] text-stone-900 dark:bg-[#11100e] dark:text-stone-100">
+      <p className="sr-only" aria-live="polite">{statusAnnouncement}</p>
       <div data-selectable-text="" className="mx-auto flex h-full max-w-[1500px] flex-col px-3 py-4 sm:px-6 sm:py-6">
         <header className="flex flex-col gap-4 border-b border-stone-300 pb-5 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
           <div>
@@ -1059,7 +1260,7 @@ export default function EngineWorkspace() {
           </div>
         </header>
 
-        <section className="grid grid-cols-4 border-b border-stone-300 dark:border-white/10">
+        <section className="hidden grid-cols-4 border-b border-stone-300 dark:border-white/10 sm:grid">
           {[
             ['任务总数', stats.total],
             ['执行中', stats.active],
@@ -1081,25 +1282,38 @@ export default function EngineWorkspace() {
         )}
 
         <div className="grid flex-1 overflow-hidden lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
-          <section className="order-2 overflow-auto border-b border-stone-300 py-4 dark:border-white/10 lg:order-1 lg:border-b-0 lg:border-r lg:pr-5">
+          <section className={`${inspectorOpen ? 'hidden lg:block' : 'order-1'} overflow-auto border-b border-stone-300 py-4 dark:border-white/10 lg:order-1 lg:border-b-0 lg:border-r lg:pr-5`}>
             <div className="mb-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">批次队列</h2>
-                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.history.length} 历史</span>
+                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.incomplete.length} 异常结束 · {batchGroups.history.length} 归档</span>
               </div>
               {batches.length > 3 && (
-                <input
-                  type="text"
-                  placeholder="筛选批次…"
-                  value={batchFilter}
-                  onChange={(e) => setBatchFilter(e.target.value)}
-                  className="mb-2 w-full rounded-md border border-stone-300 bg-transparent px-2 py-1 text-xs dark:border-white/10"
-                />
+                <div className="mb-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <input
+                    type="search"
+                    placeholder="搜索名称、日期、模型、尺寸、失败类型…"
+                    value={batchFilter}
+                    onChange={(e) => setBatchFilter(e.target.value)}
+                    className="h-8 w-full rounded-md border border-stone-300 bg-transparent px-2 text-xs dark:border-white/10"
+                  />
+                  <select value={batchFacet} onChange={(event) => setBatchFacet(event.target.value as typeof batchFacet)} className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs dark:border-white/10 dark:bg-[#191714]" aria-label="批次问题筛选">
+                    <option value="all">全部批次</option>
+                    <option value="review">待人审</option>
+                    <option value="failed">有失败</option>
+                    <option value="cancelled">有取消</option>
+                    <option value="qa">QA 告警</option>
+                    <option value="delivery">可交付</option>
+                    <option value="low_success">成功率低于 90%</option>
+                    <option value="recent">最近 7 天</option>
+                  </select>
+                </div>
               )}
               <div id="batch-queue-list" className="border-y border-stone-300 dark:border-white/10">
                 <BatchQueueSection title="执行中" batches={batchGroups.active} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
                 <BatchQueueSection title="待处理" batches={batchGroups.needsAttention} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
-                <BatchQueueSection title="历史记录" batches={batchGroups.history} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                <BatchQueueSection title="已结束但不完整" batches={batchGroups.incomplete} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                <BatchQueueSection title="已归档" batches={batchGroups.history} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
                 {!batchGroups.filtered.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有匹配的批次</div>}
               </div>
             </div>
@@ -1109,16 +1323,6 @@ export default function EngineWorkspace() {
                 <span className="font-mono text-[10px] text-stone-400">
                   已加载 {jobs.length} / {jobStats?.matching ?? jobs.length}
                 </span>
-                {nextCursor && (
-                  <button
-                    type="button"
-                    onClick={() => void loadAllJobs()}
-                    disabled={refreshing}
-                    className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs font-medium text-stone-600 hover:text-stone-950 disabled:opacity-40 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300"
-                  >
-                    加载全部（最多 500 条）
-                  </button>
-                )}
                 <select
                 value={filter}
                 onChange={(event) => {
@@ -1144,11 +1348,14 @@ export default function EngineWorkspace() {
                   type="button"
                   key={job.id}
                   onClick={() => handleSelectJob(job)}
-                  className={`grid w-full grid-cols-[minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === job.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
+                  className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors [content-visibility:auto] [contain-intrinsic-size:68px] hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === job.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
                 >
+                  <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
+                    <ReviewThumbnail config={config} assetId={job.finalAssetId || null} label={`${shortTaskTitle(job.request.input.prompt)} 缩略图`} interactive={false} />
+                  </div>
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{job.request.input.prompt || '图像编辑任务'}</div>
-                    <div className="mt-1 truncate font-mono text-[10px] text-stone-400">{job.id}</div>
+                    <div className="truncate text-sm font-medium" title={job.request.input.prompt}>{shortTaskTitle(job.request.input.prompt)}</div>
+                    <div className="mt-1 truncate font-mono text-[10px] text-stone-400">{job.error?.message || job.id}</div>
                   </div>
                   <div className="hidden self-center text-xs text-stone-500 dark:text-stone-400 sm:block">
                     {job.request.composition.ratio} · {job.request.output.dimensions || '继承'}
@@ -1176,7 +1383,7 @@ export default function EngineWorkspace() {
             )}
           </section>
 
-          <aside className="order-1 overflow-auto border-b border-stone-300 py-4 lg:order-2 lg:border-b-0 lg:pb-4 lg:pl-5" style={{scrollbarWidth:'thin'}}>
+          <aside ref={inspectorRef} tabIndex={-1} aria-label="流水线详情" className={`${inspectorOpen ? 'order-1 block' : 'hidden lg:block'} overflow-auto border-b border-stone-300 py-4 outline-none lg:order-2 lg:border-b-0 lg:pb-4 lg:pl-5`} style={{scrollbarWidth:'thin'}}>
             {showNewBatch ? (
               <NewBatchForm
                 capabilities={capabilities}
@@ -1206,6 +1413,10 @@ export default function EngineWorkspace() {
                 onControl={handleBatchControl}
                 onReview={handleBatchItemReview}
                 onRetryItem={handleBatchItemRetry}
+                onLoadMoreItems={() => void loadMoreBatchItems()}
+                onLoadMoreEvents={() => void loadMoreBatchEvents()}
+                itemPage={{ loaded: selectedBatch.items.length, total: batchItemsTotal, hasMore: Boolean(batchItemsCursor) }}
+                eventPage={{ loaded: selectedBatch.events.length, total: batchEventsTotal, hasMore: Boolean(batchEventsCursor) }}
                 onClose={clearInspectorSelection}
               />
             ) : selectedJob ? (
@@ -1219,10 +1430,18 @@ export default function EngineWorkspace() {
                 onClose={clearInspectorSelection}
               />
             ) : (
-              <div className="flex min-h-[360px] flex-col items-center justify-center border-y border-stone-300 text-center dark:border-white/10">
-                <Cpu className="h-8 w-8 text-stone-300 dark:text-stone-600" />
-                <p className="mt-3 text-sm font-medium">选择任务查看执行轨迹</p>
-                <p className="mt-1 text-xs text-stone-400">事件、错误和产物都以服务端记录为准</p>
+              <div className="border-y border-stone-300 py-6 dark:border-white/10">
+                <div className="flex items-center gap-2 text-xs font-medium text-stone-500 dark:text-stone-300">
+                  <Cpu className="h-4 w-4 text-[#356c82]" />流水线摘要
+                  <span className="ml-auto font-mono text-[10px] text-stone-400">{eventTransport === 'sse' ? '实时推送' : '轮询同步'}</span>
+                </div>
+                <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
+                  <div><dt className="text-stone-400">待处理批次</dt><dd className="mt-1 font-mono text-lg">{batchGroups.needsAttention.length}</dd></div>
+                  <div><dt className="text-stone-400">异常结束</dt><dd className="mt-1 font-mono text-lg">{batchGroups.incomplete.length}</dd></div>
+                  <div><dt className="text-stone-400">当前成功率</dt><dd className="mt-1 font-mono text-lg">{stats.total ? Math.round((stats.succeeded / stats.total) * 100) : 0}%</dd></div>
+                  <div><dt className="text-stone-400">失败任务</dt><dd className="mt-1 font-mono text-lg text-red-500">{stats.failed}</dd></div>
+                </dl>
+                <p className="mt-5 text-xs leading-5 text-stone-400">优先处理待人审、失败和取消项；选择批次后查看质量漏斗与建议动作。</p>
               </div>
             )}
           </aside>
@@ -1381,6 +1600,10 @@ function NewBatchForm({
   const prompts = parseEngineBatchPrompts(batchDraft.prompts)
   const promptCount = prompts.length
   const outputCount = countEngineBatchOutputs(prompts)
+  const finalDimensions = calculateImageSize('4K', draft.ratio) || ''
+  const [width, height] = finalDimensions.split('x').map(Number)
+  const estimatedStorageMb = width && height ? Math.max(1, Math.round((width * height * 4 * outputCount * 0.45) / 1024 / 1024)) : 0
+  const estimatedMinutes = Math.max(1, Math.ceil(outputCount * 1.5))
   return (
     <form data-engine-editor onSubmit={onSubmit}>
       <div className="flex items-center justify-between">
@@ -1429,6 +1652,13 @@ function NewBatchForm({
         </div>
       </div>
       <div className="mt-4 border-y border-stone-300 py-3 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
+        <div className="mb-3 text-[10px] font-semibold uppercase text-stone-400">提交前检查</div>
+        <div className="flex justify-between"><span>总任务 / 预计请求</span><span className="font-mono">{outputCount} / {outputCount}</span></div>
+        <div className="mt-2 flex justify-between"><span>预计耗时</span><span className="font-mono">约 {estimatedMinutes} 分钟</span></div>
+        <div className="mt-2 flex justify-between"><span>预计存储</span><span className="font-mono">约 {estimatedStorageMb} MB</span></div>
+        <div className="mt-2 flex justify-between"><span>失败策略</span><span className="font-mono">最多 {capabilities.capabilities.retry.maxAttempts} 次 / 路由</span></div>
+        <div className="mt-2 flex justify-between"><span>视觉 QA</span><span className="font-mono">启用</span></div>
+        <div className="my-3 border-t border-stone-200 dark:border-white/[0.08]" />
         <div className="flex justify-between gap-3"><span>主路由</span><span className="truncate font-mono">{draft.model} / {draft.apiMode}</span></div>
         <div className="mt-2 flex justify-between gap-3"><span>备用路由</span><span className="truncate font-mono">{draft.fallbackEnabled ? `${draft.fallbackModel} / ${draft.fallbackApiMode}` : '关闭'}</span></div>
         <div className="mt-2 flex justify-between gap-3"><span>QA 检查模型</span><span className="truncate font-mono">{draft.fallbackModel} / responses</span></div>
@@ -1466,27 +1696,49 @@ function BatchInspector({
   onControl,
   onReview,
   onRetryItem,
+  onLoadMoreItems,
+  onLoadMoreEvents,
+  itemPage,
+  eventPage,
   onClose,
 }: {
   batch: ImageBatchV1
   config: ImageTaskApiConfig
   busy: boolean
-  onControl: (action: 'pause' | 'resume' | 'retry-failed') => void
+  onControl: (action: 'pause' | 'resume' | 'retry-failed' | 'retry-cancelled') => void
   onReview: (itemKey: string, acceptanceStatus: 'accepted' | 'rejected') => void
-  onRetryItem: (item: ImageBatchV1['items'][number]) => void
+  onRetryItem: (item: ImageBatchItemV1) => void
+  onLoadMoreItems: () => void
+  onLoadMoreEvents: () => void
+  itemPage: { loaded: number; total: number; hasMore: boolean }
+  eventPage: { loaded: number; total: number; hasMore: boolean }
   onClose: () => void
 }) {
-  const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'pending' | 'approved' | 'rejected'>('pending')
-  const executionPercentage = batch.stats.total ? Math.round((batch.stats.terminal / batch.stats.total) * 100) : 0
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'not_run' | 'pending' | 'approved' | 'rejected' | 'failed' | 'cancelled'>('pending')
   const autoAcceptedCount = batch.items.filter((item) => item.humanReviewStatus === 'approved' && item.humanReview?.actor === 'system').length
   const humanApprovedCount = Math.max(0, batch.stats.humanReviewApproved - autoAcceptedCount)
-  const deliveryDone = batch.stats.accepted + batch.stats.rejected
-  const deliveryPercentage = batch.stats.total ? Math.round((deliveryDone / batch.stats.total) * 100) : 0
+  const funnel = [
+    { label: '执行完成', value: batch.stats.terminal, tone: 'bg-sky-500' },
+    { label: '成功产出', value: batch.stats.succeeded, tone: 'bg-cyan-500' },
+    { label: 'QA 通过', value: batch.stats.qaPassed, tone: 'bg-teal-500' },
+    { label: '人工验收', value: humanApprovedCount, tone: 'bg-emerald-500' },
+    { label: '最终可交付', value: batch.stats.accepted, tone: 'bg-green-600' },
+  ]
+  const elapsedMs = Math.max(0, Date.now() - new Date(batch.createdAt).getTime())
+  const completedForRate = Math.max(batch.stats.terminal, 1)
+  const averageMs = elapsedMs / completedForRate
+  const remaining = Math.max(0, batch.stats.total - batch.stats.terminal)
+  const etaMs = remaining * averageMs
+  const throughput = elapsedMs > 0 ? batch.stats.terminal / (elapsedMs / 60_000) : 0
+  const retryCount = batch.items.reduce((sum, item) => sum + Math.max(0, item.job.attempts - 1), 0)
   const reviewItems = batch.items.filter((item) => {
-    if (reviewFilter === 'warnings') return item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'
+    if (reviewFilter === 'warnings') return item.qaStatus === 'needs_review' || item.qaStatus === 'failed'
+    if (reviewFilter === 'not_run') return item.qaStatus === 'not_run'
     if (reviewFilter === 'pending') return item.humanReviewStatus === 'pending'
     if (reviewFilter === 'approved') return item.humanReviewStatus === 'approved'
     if (reviewFilter === 'rejected') return item.humanReviewStatus === 'rejected'
+    if (reviewFilter === 'failed') return item.job.state === 'failed'
+    if (reviewFilter === 'cancelled') return item.job.state === 'cancelled'
     return true
   })
   return (
@@ -1516,20 +1768,27 @@ function BatchInspector({
           </button>
         </div>
       </div>
-      <div className="mt-5">
-        <div className="flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
-          <span>执行进度</span>
-          <span className="font-mono">{batch.stats.terminal}/{batch.stats.total} · {executionPercentage}%</span>
+      <div className="mt-5" aria-label="批次质量漏斗">
+        <div className="grid grid-cols-5 gap-1.5">
+          {funnel.map((stage) => {
+            const percentage = batch.stats.total ? Math.round((stage.value / batch.stats.total) * 100) : 0
+            return (
+              <div key={stage.label} className="min-w-0 border-t border-stone-300 pt-2 dark:border-white/10">
+                <div className="truncate text-[9px] font-medium text-stone-400 sm:text-[10px]">{stage.label}</div>
+                <div className="mt-1 font-mono text-sm font-semibold">{stage.value}<span className="text-[9px] font-normal text-stone-400">/{batch.stats.total}</span></div>
+                <div className="mt-2 h-1.5 overflow-hidden bg-stone-200 dark:bg-white/10">
+                  <div className={`h-full ${stage.tone}`} style={{ width: `${percentage}%` }} />
+                </div>
+                <div className="mt-1 font-mono text-[9px] text-stone-400">{percentage}%</div>
+              </div>
+            )
+          })}
         </div>
-        <div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
-          <div className="h-full rounded-full bg-[#356c82] transition-[width]" style={{ width: `${executionPercentage}%` }} />
-        </div>
-        <div className="mt-4 flex items-center justify-between text-xs text-stone-500 dark:text-stone-400">
-          <span>交付确认进度</span>
-          <span className="font-mono">{deliveryDone}/{batch.stats.total} · {deliveryPercentage}%</span>
-        </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-white/10">
-          <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${deliveryPercentage}%` }} />
+        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-stone-500 dark:text-stone-400">
+          <span className="text-red-600 dark:text-red-300">失败 {batch.stats.failed}</span>
+          <span>取消 {batch.stats.cancelled}</span>
+          <span className="text-amber-700 dark:text-amber-300">QA 告警 {batch.stats.qaNeedsReview + batch.stats.qaFailed}</span>
+          <span>QA 未运行 {batch.stats.qaNotRun}</span>
         </div>
       </div>
       <dl className="mt-5 grid grid-cols-3 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">
@@ -1540,6 +1799,16 @@ function BatchInspector({
         <div><dt className="text-stone-400">排队</dt><dd className="mt-1 font-mono">{batch.stats.queued}</dd></div>
         <div><dt className="text-stone-400">QA 告警</dt><dd className="mt-1 font-mono text-amber-700 dark:text-amber-300">{batch.stats.qaNeedsReview + batch.stats.qaFailed}</dd></div>
       </dl>
+      {(batch.state === 'running' || batch.state === 'paused') && (
+        <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 border-b border-stone-300 pb-4 text-xs dark:border-white/10 sm:grid-cols-3">
+          <div><dt className="text-stone-400">已耗时</dt><dd className="mt-1 font-mono">{formatDuration(elapsedMs)}</dd></div>
+          <div><dt className="text-stone-400">预计剩余</dt><dd className="mt-1 font-mono">{batch.stats.terminal ? formatDuration(etaMs) : '计算中'}</dd></div>
+          <div><dt className="text-stone-400">当前吞吐</dt><dd className="mt-1 font-mono">{throughput.toFixed(1)} 图/分</dd></div>
+          <div><dt className="text-stone-400">平均单图</dt><dd className="mt-1 font-mono">{batch.stats.terminal ? formatDuration(averageMs) : '计算中'}</dd></div>
+          <div><dt className="text-stone-400">可见重试</dt><dd className="mt-1 font-mono">{retryCount}</dd></div>
+          <div><dt className="text-stone-400">异常比例</dt><dd className="mt-1 font-mono">{batch.stats.total ? Math.round(((batch.stats.failed + batch.stats.cancelled) / batch.stats.total) * 100) : 0}%</dd></div>
+        </dl>
+      )}
       <section className="mt-5" aria-label="人工交付验收">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -1553,7 +1822,10 @@ function BatchInspector({
         <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="验收筛选">
           {([
             ['pending', `待确认 ${batch.stats.humanReviewPending}`],
-            ['warnings', `QA 告警 ${batch.stats.qaNeedsReview + batch.stats.qaFailed + batch.stats.qaNotRun}`],
+            ['warnings', `QA 告警 ${batch.stats.qaNeedsReview + batch.stats.qaFailed}`],
+            ['not_run', `QA 未运行 ${batch.stats.qaNotRun}`],
+            ['failed', `失败 ${batch.stats.failed}`],
+            ['cancelled', `取消 ${batch.stats.cancelled}`],
             ['all', `全部 ${batch.stats.total}`],
             ['approved', `已确认 ${batch.stats.humanReviewApproved}`],
             ['rejected', `已拒绝 ${batch.stats.humanReviewRejected}`],
@@ -1657,6 +1929,10 @@ function BatchInspector({
             </div>
           )}
         </div>
+        <div className="mt-2 flex items-center justify-between text-[10px] text-stone-400">
+          <span>已加载 {itemPage.loaded} / {itemPage.total}</span>
+          {itemPage.hasMore && <button type="button" onClick={onLoadMoreItems} className="rounded-md border border-stone-300 px-2 py-1 font-medium hover:text-stone-700 dark:border-white/10">加载更多条目</button>}
+        </div>
       </section>
       <div className="mt-5 flex flex-wrap gap-2">
         {batch.state === 'running' && (
@@ -1674,7 +1950,19 @@ function BatchInspector({
             {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}重试失败项
           </button>
         )}
+        {batch.stats.cancelled > 0 && (
+          <button type="button" onClick={() => onControl('retry-cancelled')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-[#356c82]/35 px-3 text-xs font-medium text-[#356c82] hover:bg-[#356c82]/10 disabled:opacity-40 dark:border-[#8ec5d7]/30 dark:text-[#8ec5d7]">
+            {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}继续 {batch.stats.cancelled} 个取消项
+          </button>
+        )}
       </div>
+      <details className="mt-5 border-t border-stone-300 pt-4 dark:border-white/10">
+        <summary className="cursor-pointer text-xs font-semibold">批次事件 · {eventPage.total}</summary>
+        <ol className="mt-3 space-y-2 text-[10px] text-stone-500 dark:text-stone-400">
+          {batch.events.map((event: ImageBatchEventV1, index) => <li key={`${event.createdAt}-${index}`} className="flex justify-between gap-3"><span>{event.event}</span><time className="font-mono">{formatTime(event.createdAt)}</time></li>)}
+        </ol>
+        {eventPage.hasMore && <button type="button" onClick={onLoadMoreEvents} className="mt-3 rounded-md border border-stone-300 px-2 py-1 text-[10px] font-medium dark:border-white/10">加载更多事件</button>}
+      </details>
     </div>
   )
 }
