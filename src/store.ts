@@ -301,8 +301,8 @@ export function getPersistedState(state: AppState) {
   return createPersistedState(state, agentConversationMigrationPending && !agentConversationPersistenceReady)
 }
 
-async function replaceStoredAgentConversations(conversations: AgentConversation[]) {
-  await replaceAgentConversations(conversations.map(getPersistableAgentConversation))
+async function replaceStoredAgentConversations(conversations: AgentConversation[], expectedGeneration = taskStorageGeneration) {
+  await replaceAgentConversations(conversations.map(getPersistableAgentConversation), expectedGeneration)
 }
 
 function getPersistableAgentConversation(conversation: AgentConversation): AgentConversation {
@@ -1051,13 +1051,18 @@ async function flushAgentConversationsToIndexedDB() {
     agentConversationPersistQueued = true
     return
   }
+  // A clear operation owns the current task generation. Do not let a queued
+  // conversation snapshot from before the clear repopulate IndexedDB.
+  if (tasksCleared) return
 
   agentConversationPersistRunning = true
   try {
     do {
       agentConversationPersistQueued = false
+      if (tasksCleared) return
       const conversations = useStore.getState().agentConversations
-      await replaceStoredAgentConversations(conversations)
+      const generation = taskStorageGeneration
+      await replaceStoredAgentConversations(conversations, generation)
       lastStoredAgentConversations = conversations
     } while (agentConversationPersistQueued || useStore.getState().agentConversations !== lastStoredAgentConversations)
   } finally {
@@ -2302,17 +2307,21 @@ function scrubAgentOutputPayloadsForDeletedTasks(deletedTasks: TaskRecord[]) {
   return { updatedTasks, updatedConversations }
 }
 
-async function persistTaskDeletionCleanup(deletedTaskIds: string[], cleanup: ReturnType<typeof scrubAgentOutputPayloadsForDeletedTasks>) {
-  const tasks = cleanup.updatedTasks.map(getPersistableTask)
+async function persistTaskDeletionCleanup(
+  deletedTaskIds: string[],
+  cleanup: ReturnType<typeof scrubAgentOutputPayloadsForDeletedTasks>,
+  expectedGeneration: number,
+) {
+  const tasks = cleanup.updatedTasks.map((task) => getPersistableTask({ ...task, storageGeneration: expectedGeneration }))
   const conversations = cleanup.updatedConversations.map(getPersistableAgentConversation)
   try {
-    await commitTaskDeletion(deletedTaskIds, tasks, conversations)
+    await commitTaskDeletion(deletedTaskIds, tasks, conversations, expectedGeneration)
   } catch (err) {
     console.warn('原子清理任务关联数据失败，改用逐项持久化', err)
     await Promise.all([
-      ...deletedTaskIds.map((taskId) => dbDeleteTask(taskId)),
-      ...tasks.map((task) => dbPutTask(task)),
-      ...conversations.map((conversation) => dbPutAgentConversation(conversation)),
+      ...deletedTaskIds.map((taskId) => dbDeleteTask(taskId, expectedGeneration)),
+      ...tasks.map((task) => dbPutTask(task, expectedGeneration)),
+      ...conversations.map((conversation) => dbPutAgentConversation(conversation, expectedGeneration)),
     ])
   }
 }
@@ -2692,6 +2701,7 @@ async function executeAgentRound(
   requestedParams: TaskParams = params,
 ) {
   const startedAt = Date.now()
+  const roundTaskStorageGeneration = taskStorageGeneration
   const controller = new AbortController()
   const controllerKey = getAgentRoundControllerKey(conversationId, roundId)
   agentRoundControllers.set(controllerKey, controller)
@@ -2792,7 +2802,7 @@ async function executeAgentRound(
 
       const task: TaskRecord = {
         id: genId(),
-        storageGeneration: taskStorageGeneration,
+        storageGeneration: roundTaskStorageGeneration,
         prompt: taskPrompt,
         params: options.taskParams ?? finalImageParams,
         targetAspectPromptHint: createTargetAspectPromptHint((options.taskParams ?? finalImageParams).size) ?? undefined,
@@ -2823,7 +2833,7 @@ async function executeAgentRound(
       taskByToolCallId.set(toolCallId, task)
       // 数据已被用户清除：不把新生成的 Agent 任务加入内存或写回 IndexedDB。
       // 仍返回 task.id 以保持回调签名，但 putTask 会因 tasksCleared 成为空操作。
-      if (!tasksCleared) {
+      if (!tasksCleared && roundTaskStorageGeneration === taskStorageGeneration) {
         useStore.getState().setTasks([task, ...useStore.getState().tasks])
         attachTaskToAgentRound(task.id)
       }
@@ -3471,9 +3481,10 @@ async function executeAgentRound(
           ) ?? {}),
           n: 1,
         }
-        const task: TaskRecord = {
-          id: genId(),
-          prompt: image.revisedPrompt ?? round?.prompt ?? userMessage.content,
+      const task: TaskRecord = {
+        id: genId(),
+        storageGeneration: roundTaskStorageGeneration,
+        prompt: image.revisedPrompt ?? round?.prompt ?? userMessage.content,
           params: finalImageParams,
           targetAspectPromptHint: createTargetAspectPromptHint(finalImageParams.size) ?? undefined,
           apiProvider: imageProfile.provider,
@@ -3504,8 +3515,10 @@ async function executeAgentRound(
           agentToolCallId: image.toolCallId,
           agentToolAction: image.action,
         }
-        useStore.getState().setTasks([task, ...useStore.getState().tasks])
-        attachTaskToAgentRound(task.id)
+        if (!tasksCleared && roundTaskStorageGeneration === taskStorageGeneration) {
+          useStore.getState().setTasks([task, ...useStore.getState().tasks])
+          attachTaskToAgentRound(task.id)
+        }
         await putTask(task)
       }
 
@@ -3751,7 +3764,7 @@ async function executeAgentRound(
     try {
       const cleanup = scrubAgentOutputPayloadsForDeletedTasks(deletedTasks)
       if (cleanup.updatedTasks.length > 0 || cleanup.updatedConversations.length > 0) {
-        await persistTaskDeletionCleanup([], cleanup)
+        await persistTaskDeletionCleanup([], cleanup, roundTaskStorageGeneration)
       }
     } catch (err) {
       console.warn('清理已删除 Agent 任务的响应失败', err)
@@ -4703,6 +4716,11 @@ async function deleteAgentAssistantMessageAndTasks(conversationId: string, messa
 type TaskDeletionStateUpdater = (state: AppState, taskIds: Set<string>) => Partial<AppState> | null
 
 async function removeTasks(taskIds: string[], updateState?: TaskDeletionStateUpdater) {
+  // Capture the generation before taking the in-memory deletion snapshot. If
+  // clearData advances the generation while cleanup is in flight, every
+  // persistence path below becomes a no-op instead of reviving old tasks.
+  if (tasksCleared) return 0
+  const deletionGeneration = taskStorageGeneration
   const toDelete = new Set(taskIds)
   let deletedTasks: TaskRecord[] = []
   useStore.setState((state) => {
@@ -4752,7 +4770,7 @@ async function removeTasks(taskIds: string[], updateState?: TaskDeletionStateUpd
   await persistTaskDeletionCleanup(deletedTasks.map((task) => task.id), {
     ...cleanup,
     updatedConversations: [...updatedConversations.values()],
-  })
+  }, deletionGeneration)
   await deleteUnreferencedImageIds(deletedImageIds)
   return deletedTasks.length
 }
@@ -4848,7 +4866,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     }
 
     try {
-      await dbClearAgentConversations()
+      await dbClearAgentConversations(taskStorageGeneration)
       useStore.setState({ agentConversations: [], activeAgentConversationId: null })
       const remaining = await getAllAgentConversations()
       if (remaining.length > 0) {
@@ -4880,10 +4898,8 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     clearInputImages()
     clearMaskDraft()
 
-    // 若清除失败，撤销标志，避免误拦后续正常写入（保留的数据仍可使用）。
-    if (clearTasksFailed || clearAgentConversationsFailed || clearImagesFailed) {
-      tasksCleared = false
-    }
+    // Keep the task-clear tombstone until an explicit reload or new task
+    // generation; secondary-store failures must not reopen stale writers.
   }
 
   if (options.clearConfig) {
@@ -5064,6 +5080,7 @@ export async function importData(input: File | File[], options: ImportOptions = 
   try {
     // 导入数据：重置清除标志，使导入的任务能正常写入。
     tasksCleared = false
+    await refreshTaskStorageGeneration()
     const state = useStore.getState()
     if (options.importTasks && hasActiveDataOperations(state.tasks, state.agentConversations)) throw new Error('当前有任务正在进行，请完成或停止后再导入。')
     const files = Array.isArray(input) ? input : [input]

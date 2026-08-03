@@ -8,6 +8,7 @@ import {
   clearImages,
   clearTasks,
   clearTasksAndAdvanceGeneration,
+  commitTaskDeletion,
   getTaskGeneration,
   getAllAgentConversations,
   getAllImageIds,
@@ -178,5 +179,22 @@ describe('db — real IndexedDB transaction semantics (fake-indexeddb)', () => {
 
     await putTask(sampleTask({ id: 'fresh', storageGeneration: newGeneration }), newGeneration)
     expect((await getAllTasks()).map((task) => task.id)).toEqual(['fresh'])
+  })
+
+  it('rejects a delayed task deletion commit from the cleared generation', async () => {
+    const oldGeneration = await getTaskGeneration()
+    await putTask(sampleTask({ id: 'deleted-late', storageGeneration: oldGeneration }), oldGeneration)
+
+    const newGeneration = await clearTasksAndAdvanceGeneration()
+    expect(newGeneration).toBe(oldGeneration + 1)
+
+    await commitTaskDeletion(
+      ['deleted-late'],
+      [sampleTask({ id: 'resurrected-by-cleanup', storageGeneration: oldGeneration })],
+      [],
+      oldGeneration,
+    )
+
+    expect(await getAllTasks()).toEqual([])
   })
 })

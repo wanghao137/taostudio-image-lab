@@ -36,10 +36,12 @@ vi.mock('./lib/db', () => {
       tasks.clear()
       return taskGeneration
     }),
-    deleteTask: vi.fn(async (id: string) => {
+    deleteTask: vi.fn(async (id: string, expectedGeneration?: number) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== taskGeneration) return
       tasks.delete(id)
     }),
-    commitTaskDeletion: vi.fn(async (deletedTaskIds: string[], updatedTasks: TaskRecord[], updatedConversations: AgentConversation[]) => {
+    commitTaskDeletion: vi.fn(async (deletedTaskIds: string[], updatedTasks: TaskRecord[], updatedConversations: AgentConversation[], expectedGeneration?: number) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== taskGeneration) return
       for (const id of deletedTaskIds) tasks.delete(id)
       for (const task of updatedTasks) tasks.set(task.id, task)
       for (const conversation of updatedConversations) agentConversations.set(conversation.id, conversation)
@@ -48,17 +50,20 @@ vi.mock('./lib/db', () => {
       tasks.clear()
     }),
     getAllAgentConversations: async () => [...agentConversations.values()],
-    putAgentConversation: async (conversation: AgentConversation) => {
+    putAgentConversation: async (conversation: AgentConversation, expectedGeneration?: number) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== taskGeneration) return conversation.id
       agentConversations.set(conversation.id, conversation)
       return conversation.id
     },
     deleteAgentConversation: async (id: string) => {
       agentConversations.delete(id)
     },
-    clearAgentConversations: vi.fn(async () => {
+    clearAgentConversations: vi.fn(async (expectedGeneration?: number) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== taskGeneration) return
       agentConversations.clear()
     }),
-    replaceAgentConversations: async (conversations: AgentConversation[]) => {
+    replaceAgentConversations: async (conversations: AgentConversation[], expectedGeneration?: number) => {
+      if (expectedGeneration !== undefined && expectedGeneration !== taskGeneration) return
       agentConversations.clear()
       for (const conversation of conversations) agentConversations.set(conversation.id, conversation)
     },
@@ -3808,6 +3813,7 @@ describe('agent context for removed outputs', () => {
 
 describe('task deletion', () => {
   beforeEach(async () => {
+    __resetTasksClearedForTests()
     await clearTasks()
     await clearImages()
     await clearAgentConversations()
@@ -3850,6 +3856,75 @@ describe('task deletion', () => {
     expect(state.selectedTaskIds).toEqual([remaining.id])
     expect((await getAllTasks()).map((item) => item.id)).toEqual([remaining.id])
     expect(state.showToast).toHaveBeenCalledWith('任务已删除', 'success')
+  })
+
+  it('does not resurrect scrubbed Agent tasks when clearData wins the race', async () => {
+    await initStore()
+    const deleted = task({
+      id: 'task-deleted-late',
+      sourceMode: 'agent',
+      agentConversationId: 'conversation-race',
+      agentRoundId: 'round-race',
+      agentToolCallId: 'deleted-call',
+    })
+    const remaining = task({
+      id: 'task-remaining-late',
+      sourceMode: 'agent',
+      agentConversationId: 'conversation-race',
+      agentRoundId: 'round-race',
+      agentToolCallId: 'remaining-call',
+      rawResponsePayload: JSON.stringify({
+        output: [
+          { type: 'image_generation_call', id: 'deleted-call', result: 'deleted' },
+          { type: 'image_generation_call', id: 'remaining-call', result: 'remaining' },
+        ],
+      }),
+    })
+    const conversation = agentConversation({
+      id: 'conversation-race',
+      rounds: [{
+        id: 'round-race',
+        index: 1,
+        userMessageId: 'message-race',
+        prompt: 'race',
+        inputImageIds: [],
+        outputTaskIds: [deleted.id, remaining.id],
+        responseOutput: [
+          { type: 'image_generation_call', id: 'deleted-call', result: 'deleted' },
+          { type: 'image_generation_call', id: 'remaining-call', result: 'remaining' },
+        ],
+        status: 'done',
+        error: null,
+        createdAt: 1,
+        finishedAt: 2,
+      }],
+    })
+    await putDbTask(deleted)
+    await putDbTask(remaining)
+    await putAgentConversation(conversation)
+    useStore.setState({ tasks: [deleted, remaining], agentConversations: [conversation] })
+
+    const commitStarted = deferred<void>()
+    const releaseCommit = deferred<void>()
+    const cleanupWarning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.mocked(commitTaskDeletion).mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      commitStarted.resolve()
+      void releaseCommit.promise.then(() => {
+        reject(new Error('delayed commit failed'))
+      })
+    }))
+
+    const deletion = removeTask(deleted)
+    await commitStarted.promise
+    await clearData({ clearTasks: true, clearConfig: false })
+    releaseCommit.resolve()
+    await deletion
+
+    expect(useStore.getState().tasks).toEqual([])
+    expect(await getAllTasks()).toEqual([])
+    expect(await getAllAgentConversations()).toEqual([])
+    expect(cleanupWarning).toHaveBeenCalled()
+    cleanupWarning.mockRestore()
   })
 
   it('still deletes the target DB record when sibling payload persistence fails', async () => {

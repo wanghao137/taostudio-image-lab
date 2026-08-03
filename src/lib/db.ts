@@ -147,20 +147,63 @@ export function clearTasksAndAdvanceGeneration(): Promise<number> {
   )
 }
 
-export function deleteTask(id: string): Promise<undefined> {
-  return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
-}
+export function deleteTask(id: string, expectedGeneration?: number): Promise<undefined> {
+  if (expectedGeneration === undefined) {
+    return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.delete(id))
+  }
 
-export function commitTaskDeletion(deletedTaskIds: string[], updatedTasks: TaskRecord[], updatedConversations: AgentConversation[]): Promise<undefined> {
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_TASKS, STORE_AGENT_CONVERSATIONS], 'readwrite')
+        const tx = db.transaction([STORE_TASKS, STORE_META], 'readwrite')
+        const taskStore = tx.objectStore(STORE_TASKS)
+        const metaStore = tx.objectStore(STORE_META)
+        const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+        generationRequest.onsuccess = () => {
+          const currentGeneration = Number(generationRequest.result?.value ?? 0)
+          if (currentGeneration !== expectedGeneration) return
+          taskStore.delete(id)
+        }
+        generationRequest.onerror = () => reject(generationRequest.error)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
+/** Atomically removes deleted tasks and persists scrubbed siblings for one task generation. */
+export function commitTaskDeletion(
+  deletedTaskIds: string[],
+  updatedTasks: TaskRecord[],
+  updatedConversations: AgentConversation[],
+  expectedGeneration?: number,
+): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const storeNames = expectedGeneration === undefined
+          ? [STORE_TASKS, STORE_AGENT_CONVERSATIONS]
+          : [STORE_TASKS, STORE_AGENT_CONVERSATIONS, STORE_META]
+        const tx = db.transaction(storeNames, 'readwrite')
         const taskStore = tx.objectStore(STORE_TASKS)
         const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
-        for (const id of deletedTaskIds) taskStore.delete(id)
-        for (const task of updatedTasks) taskStore.put(task)
-        for (const conversation of updatedConversations) conversationStore.put(conversation)
+        const commit = () => {
+          for (const id of deletedTaskIds) taskStore.delete(id)
+          for (const task of updatedTasks) taskStore.put(task)
+          for (const conversation of updatedConversations) conversationStore.put(conversation)
+        }
+        if (expectedGeneration === undefined) {
+          commit()
+        } else {
+          const metaStore = tx.objectStore(STORE_META)
+          const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+          generationRequest.onsuccess = () => {
+            const currentGeneration = Number(generationRequest.result?.value ?? 0)
+            if (currentGeneration === expectedGeneration) commit()
+          }
+          generationRequest.onerror = () => reject(generationRequest.error)
+        }
         tx.oncomplete = () => resolve(undefined)
         tx.onerror = () => reject(tx.error)
         tx.onabort = () => reject(tx.error)
@@ -178,22 +221,80 @@ export function getAllAgentConversations(): Promise<AgentConversation[]> {
   return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readonly', (s) => s.getAll())
 }
 
-export function putAgentConversation(conversation: AgentConversation): Promise<IDBValidKey> {
-  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
-}
+export function putAgentConversation(conversation: AgentConversation, expectedGeneration?: number): Promise<IDBValidKey> {
+  if (expectedGeneration === undefined) {
+    return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.put(conversation))
+  }
 
-export function clearAgentConversations(): Promise<undefined> {
-  return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.clear())
-}
-
-export function replaceAgentConversations(conversations: AgentConversation[]): Promise<undefined> {
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_AGENT_CONVERSATIONS, 'readwrite')
+        const tx = db.transaction([STORE_AGENT_CONVERSATIONS, STORE_META], 'readwrite')
+        const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+        const metaStore = tx.objectStore(STORE_META)
+        const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+        generationRequest.onsuccess = () => {
+          const currentGeneration = Number(generationRequest.result?.value ?? 0)
+          if (currentGeneration !== expectedGeneration) return
+          conversationStore.put(conversation)
+        }
+        generationRequest.onerror = () => reject(generationRequest.error)
+        tx.oncomplete = () => resolve(conversation.id)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
+export function clearAgentConversations(expectedGeneration?: number): Promise<undefined> {
+  if (expectedGeneration === undefined) {
+    return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.clear())
+  }
+
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_AGENT_CONVERSATIONS, STORE_META], 'readwrite')
+        const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+        const metaStore = tx.objectStore(STORE_META)
+        const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+        generationRequest.onsuccess = () => {
+          const currentGeneration = Number(generationRequest.result?.value ?? 0)
+          if (currentGeneration !== expectedGeneration) return
+          conversationStore.clear()
+        }
+        generationRequest.onerror = () => reject(generationRequest.error)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
+export function replaceAgentConversations(conversations: AgentConversation[], expectedGeneration?: number): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const storeNames = expectedGeneration === undefined
+          ? [STORE_AGENT_CONVERSATIONS]
+          : [STORE_AGENT_CONVERSATIONS, STORE_META]
+        const tx = db.transaction(storeNames, 'readwrite')
         const store = tx.objectStore(STORE_AGENT_CONVERSATIONS)
-        store.clear()
-        for (const conversation of conversations) store.put(conversation)
+        const replace = () => {
+          store.clear()
+          for (const conversation of conversations) store.put(conversation)
+        }
+        if (expectedGeneration === undefined) {
+          replace()
+        } else {
+          const metaStore = tx.objectStore(STORE_META)
+          const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+          generationRequest.onsuccess = () => {
+            const currentGeneration = Number(generationRequest.result?.value ?? 0)
+            if (currentGeneration === expectedGeneration) replace()
+          }
+          generationRequest.onerror = () => reject(generationRequest.error)
+        }
         tx.oncomplete = () => resolve(undefined)
         tx.onerror = () => reject(tx.error)
         tx.onabort = () => reject(tx.error)
