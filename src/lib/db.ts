@@ -10,6 +10,7 @@ const STORE_LOCAL_AUTO_SAVE = 'localAutoSave'
 const STORE_META = 'meta'
 const LOCAL_AUTO_SAVE_DIRECTORY_KEY = 'directory'
 const TASK_GENERATION_KEY = 'taskGeneration'
+const ENGINE_DELIVERY_PREFIX = 'engineDelivery:'
 const THUMBNAIL_MAX_SIZE = 720
 const THUMBNAIL_QUALITY = 0.9
 const THUMBNAIL_VERSION = 2
@@ -319,6 +320,37 @@ export function putLocalAutoSaveDirectoryHandle(handle: FileSystemDirectoryHandl
 
 export function clearLocalAutoSaveDirectoryHandle(): Promise<undefined> {
   return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(LOCAL_AUTO_SAVE_DIRECTORY_KEY))
+}
+
+export interface EngineDeliveryRecord {
+  id: string
+  kind: 'job' | 'batch'
+  entityId: string
+  revision: string
+  status: 'pending' | 'saving' | 'saved' | 'partial' | 'failed' | 'needs_permission' | 'unsupported'
+  folderName?: string | null
+  files?: string[]
+  savedItems?: string[]
+  savedCount?: number
+  totalCount?: number
+  error?: string | null
+  updatedAt: number
+}
+
+function engineDeliveryKey(kind: EngineDeliveryRecord['kind'], entityId: string) {
+  return `${ENGINE_DELIVERY_PREFIX}${kind}:${entityId}`
+}
+
+export function getEngineDeliveryRecord(kind: EngineDeliveryRecord['kind'], entityId: string): Promise<EngineDeliveryRecord | undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readonly', (s) => s.get(engineDeliveryKey(kind, entityId)))
+}
+
+export function putEngineDeliveryRecord(record: EngineDeliveryRecord): Promise<IDBValidKey> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.put(record))
+}
+
+export function deleteEngineDeliveryRecord(kind: EngineDeliveryRecord['kind'], entityId: string): Promise<undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(engineDeliveryKey(kind, entityId)))
 }
 
 // ===== Images =====

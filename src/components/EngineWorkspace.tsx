@@ -6,6 +6,9 @@ import {
   ChevronRight,
   CircleAlert,
   Cpu,
+  Download,
+  FolderOpen,
+  HardDrive,
   LoaderCircle,
   Layers,
   Maximize2,
@@ -60,6 +63,16 @@ import {
   type ImageTaskCapabilitiesV1,
   ImageTaskApiError,
 } from '../lib/imageTaskApi'
+import {
+  chooseEngineLocalDeliveryDirectory,
+  downloadEngineBatch,
+  downloadEngineJob,
+  getEngineLocalDeliveryDirectory,
+  isEngineLocalDeliverySupported,
+  saveEngineBatchLocally,
+  saveEngineJobLocally,
+} from '../lib/engineLocalDelivery'
+import { getEngineDeliveryRecord, type EngineDeliveryRecord } from '../lib/db'
 
 const ACTIVE_STATES = new Set<ImageJobStateV1>([
   'queued',
@@ -335,6 +348,37 @@ function batchStateLabel(batch: ImageBatchSummaryV1) {
   return '已归档'
 }
 
+function DeliveryStatus({ record, supported = true }: { record?: EngineDeliveryRecord; supported?: boolean }) {
+  if (!record && !supported) return <span className="text-[10px] text-amber-700 dark:text-amber-300">请下载</span>
+  if (!record) return <span className="text-[10px] text-stone-400">未保存</span>
+  if (!supported && record.status !== 'saved') return <span className="text-[10px] text-amber-700 dark:text-amber-300" title={record.error || undefined}>请下载</span>
+  const label = record.status === 'saved'
+    ? record.kind === 'batch' && record.savedCount !== record.totalCount
+      ? `已保存 ${record.savedCount || 0}/${record.totalCount || 0}`
+      : '已保存到本地'
+    : record.status === 'partial'
+      ? `部分保存 ${record.savedCount || 0}/${record.totalCount || 0}`
+    : record.status === 'saving'
+      ? `保存中 ${record.savedCount || 0}/${record.totalCount || 1}`
+      : record.status === 'needs_permission'
+        ? '需要重新授权'
+        : record.status === 'pending'
+          ? '等待本地目录'
+          : record.status === 'unsupported'
+            ? '请下载'
+            : '保存失败'
+  const tone = record.status === 'saved'
+    ? 'text-emerald-700 dark:text-emerald-300'
+    : record.status === 'partial'
+      ? 'text-amber-700 dark:text-amber-300'
+    : record.status === 'saving'
+      ? 'text-sky-700 dark:text-sky-300'
+      : record.status === 'failed' || record.status === 'needs_permission'
+        ? 'text-red-600 dark:text-red-300'
+        : 'text-amber-700 dark:text-amber-300'
+  return <span className={`text-[10px] ${tone}`} title={record.error || undefined}>{label}</span>
+}
+
 function formatDuration(milliseconds: number) {
   const totalSeconds = Math.max(0, Math.round(milliseconds / 1000))
   const hours = Math.floor(totalSeconds / 3600)
@@ -517,6 +561,16 @@ export default function EngineWorkspace() {
   const [batchFacet, setBatchFacet] = useState<'all' | 'review' | 'failed' | 'cancelled' | 'qa' | 'delivery' | 'low_success' | 'recent'>('all')
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
   const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
+  const [deliveryDirectoryName, setDeliveryDirectoryName] = useState<string | null>(null)
+  const [deliveryRecords, setDeliveryRecords] = useState<Record<string, EngineDeliveryRecord>>({})
+  const [deliveryBusy, setDeliveryBusy] = useState(false)
+  const [deliveryDirectoryRevision, setDeliveryDirectoryRevision] = useState(0)
+  const deliveryBusyCountRef = useRef(0)
+  const deliveryDirectoryRevisionRef = useRef(0)
+  const deliveryAutoSaveStartedAtRef = useRef<number | null>(null)
+  const deliveryResyncRevisionRef = useRef<number | null>(null)
+  const deliveryAttemptedRef = useRef(new Set<string>())
+  const deliveryRunningRef = useRef(new Set<string>())
   const selectedJobId = selectedJob?.id
   const inspectorOpen = showNewJob || showNewBatch || Boolean(selectedJob || selectedBatch)
   const inspectorRef = useRef<HTMLElement>(null)
@@ -525,6 +579,90 @@ export default function EngineWorkspace() {
     kind: 'none' | 'job' | 'batch'
     id: string | null
   }>({ version: 0, kind: 'none', id: null })
+
+  const setDeliveryRecord = useCallback((record: EngineDeliveryRecord) => {
+    setDeliveryRecords((current) => ({ ...current, [`${record.kind}:${record.entityId}`]: record }))
+  }, [])
+
+  const beginDeliveryOperation = useCallback(() => {
+    deliveryBusyCountRef.current += 1
+    setDeliveryBusy(true)
+  }, [])
+
+  const endDeliveryOperation = useCallback(() => {
+    deliveryBusyCountRef.current = Math.max(0, deliveryBusyCountRef.current - 1)
+    setDeliveryBusy(deliveryBusyCountRef.current > 0)
+  }, [])
+
+  const refreshDeliveryRecord = useCallback(async (kind: EngineDeliveryRecord['kind'], entityId: string) => {
+    try {
+      const record = await getEngineDeliveryRecord(kind, entityId)
+      if (record) setDeliveryRecord(record)
+      return record
+    } catch {
+      return undefined
+    }
+  }, [setDeliveryRecord])
+
+  const handleChooseDeliveryDirectory = useCallback(async () => {
+    beginDeliveryOperation()
+    try {
+      const directory = await chooseEngineLocalDeliveryDirectory()
+      setDeliveryDirectoryName(directory.name)
+      const nextRevision = deliveryDirectoryRevisionRef.current + 1
+      deliveryDirectoryRevisionRef.current = nextRevision
+      deliveryResyncRevisionRef.current = nextRevision
+      setDeliveryDirectoryRevision(nextRevision)
+      deliveryAutoSaveStartedAtRef.current = Date.now()
+      deliveryAttemptedRef.current.clear()
+      setStatusAnnouncement(`本地交付目录已设置为 ${directory.name}`)
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) setWorkspaceError(errorMessage(error))
+    } finally {
+      endDeliveryOperation()
+    }
+  }, [beginDeliveryOperation, endDeliveryOperation])
+
+  const saveJobDelivery = useCallback(async (job: ImageJobV1, force = false) => {
+    if (!job.finalAssetId || job.state !== 'succeeded') return
+    const key = `job:${job.id}:${job.sourceAssetId || ''}:${job.finalAssetId}`
+    if (!force && deliveryAttemptedRef.current.has(key)) return
+    if (deliveryRunningRef.current.has(`job:${job.id}`)) return
+    deliveryAttemptedRef.current.add(key)
+    deliveryRunningRef.current.add(`job:${job.id}`)
+    beginDeliveryOperation()
+    try {
+      const result = await saveEngineJobLocally(config!, job, (progress) => {
+        setStatusAnnouncement(`任务 ${job.id} 本地交付：${progress.status === 'saving' ? '保存中' : progress.status === 'saved' ? '已保存' : progress.error || progress.status}`)
+      }, force)
+      setDeliveryRecord(result.record)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      deliveryRunningRef.current.delete(`job:${job.id}`)
+      endDeliveryOperation()
+    }
+  }, [beginDeliveryOperation, config, endDeliveryOperation, setDeliveryRecord])
+
+  const saveBatchDelivery = useCallback(async (batch: ImageBatchV1 | ImageBatchSummaryV1, force = false, resetSavedItems = false) => {
+    const key = `batch:${batch.id}:${batch.state}:${batch.stats.succeeded}:${batch.stats.failed}:${batch.stats.cancelled}:dir${deliveryDirectoryRevision}`
+    if (!force && deliveryAttemptedRef.current.has(key)) return
+    if (deliveryRunningRef.current.has(`batch:${batch.id}`)) return
+    deliveryAttemptedRef.current.add(key)
+    deliveryRunningRef.current.add(`batch:${batch.id}`)
+    beginDeliveryOperation()
+    try {
+      const result = await saveEngineBatchLocally(config!, batch, (progress) => {
+        setStatusAnnouncement(`批次 ${batch.name || batch.id} 本地交付：${progress.savedCount}/${progress.totalCount} · ${progress.status === 'saving' ? '保存中' : progress.status === 'saved' ? '已保存' : progress.error || progress.status}`)
+      }, force, resetSavedItems)
+      setDeliveryRecord(result.record)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      deliveryRunningRef.current.delete(`batch:${batch.id}`)
+      endDeliveryOperation()
+    }
+  }, [beginDeliveryOperation, config, endDeliveryOperation, setDeliveryRecord])
 
   const beginInspectorSelection = useCallback((kind: 'none' | 'job' | 'batch', id: string | null) => {
     const next = {
@@ -548,6 +686,7 @@ export default function EngineWorkspace() {
     setShowNewBatch(false)
     setSelectedBatch(null)
     setSelectedJob(job)
+    void refreshDeliveryRecord('job', job.id)
     if (!config) return
     void getImageJob(config, job.id)
       .then((detail) => {
@@ -567,6 +706,7 @@ export default function EngineWorkspace() {
     setShowNewBatch(false)
     setSelectedJob(null)
     setSelectedBatch({ ...batch, items: [], events: [] })
+    void refreshDeliveryRecord('batch', batch.id)
     setBatchItemsCursor(null)
     setBatchEventsCursor(null)
     setBatchItemsTotal(batch.stats.total)
@@ -609,7 +749,7 @@ export default function EngineWorkspace() {
         }
         setWorkspaceError(errorMessage(error))
       })
-  }, [beginInspectorSelection, config])
+  }, [beginInspectorSelection, config, refreshDeliveryRecord])
 
   const refresh = useCallback(async (targetConfig = config, cursor?: string | null) => {
     if (!targetConfig) return
@@ -680,6 +820,30 @@ export default function EngineWorkspace() {
   useEffect(() => {
     if (initialConfig) void connect(initialConfig, false)
   }, [connect, initialConfig])
+
+  useEffect(() => {
+    void getEngineLocalDeliveryDirectory()
+      .then((directory) => {
+        setDeliveryDirectoryName(directory?.name || null)
+        if (directory && deliveryAutoSaveStartedAtRef.current === null) {
+          deliveryAutoSaveStartedAtRef.current = Date.now()
+        }
+      })
+      .catch(() => setDeliveryDirectoryName(null))
+  }, [])
+
+  useEffect(() => {
+    if (!config || !deliveryDirectoryName || deliveryAutoSaveStartedAtRef.current === null) return
+    const autoSaveStartedAt = deliveryAutoSaveStartedAtRef.current
+    const resyncDirectory = deliveryResyncRevisionRef.current === deliveryDirectoryRevision
+    for (const job of jobs) {
+      if (job.state === 'succeeded' && job.finalAssetId && (resyncDirectory || new Date(job.updatedAt).getTime() >= autoSaveStartedAt)) void saveJobDelivery(job, resyncDirectory)
+    }
+    for (const batch of batches) {
+      if (batch.state === 'completed' && (resyncDirectory || new Date(batch.updatedAt).getTime() >= autoSaveStartedAt)) void saveBatchDelivery(batch, resyncDirectory, resyncDirectory)
+    }
+    if (resyncDirectory) deliveryResyncRevisionRef.current = null
+  }, [batches, config, deliveryDirectoryName, deliveryDirectoryRevision, jobs, saveBatchDelivery, saveJobDelivery])
 
   const refreshBatches = useCallback(async (targetConfig = config) => {
     if (!targetConfig) return
@@ -1218,6 +1382,16 @@ export default function EngineWorkspace() {
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => void handleChooseDeliveryDirectory()}
+              disabled={deliveryBusy || !isEngineLocalDeliverySupported()}
+              className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium ${deliveryDirectoryName ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-400/30 dark:text-emerald-300 dark:hover:bg-emerald-500/10' : 'border-amber-300 text-amber-700 hover:bg-amber-50 dark:border-amber-400/30 dark:text-amber-300 dark:hover:bg-amber-500/10'} disabled:opacity-40`}
+              title={isEngineLocalDeliverySupported() ? '选择生成结果自动保存的本地目录' : '当前浏览器不支持目录自动写入'}
+            >
+              {deliveryBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+              {deliveryDirectoryName ? `交付：${deliveryDirectoryName}` : '设置本地交付'}
+            </button>
+            <button
+              type="button"
               onClick={() => void refresh(config, null)}
               className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-stone-300 bg-white text-stone-600 hover:text-stone-950 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-300"
               title="刷新"
@@ -1391,6 +1565,9 @@ export default function EngineWorkspace() {
                 draft={draft}
                 batchDraft={batchDraft}
                 busy={busy}
+                deliveryDirectoryName={deliveryDirectoryName}
+                deliverySupported={isEngineLocalDeliverySupported()}
+                onChooseDeliveryDirectory={() => void handleChooseDeliveryDirectory()}
                 onChange={setBatchDraft}
                 onRatioChange={(ratio) => setDraft((current) => ({ ...current, ratio }))}
                 onAutoReviseChange={(autoRevise) => setDraft((current) => ({ ...current, autoRevise }))}
@@ -1402,6 +1579,9 @@ export default function EngineWorkspace() {
                 capabilities={capabilities}
                 draft={draft}
                 busy={busy}
+                deliveryDirectoryName={deliveryDirectoryName}
+                deliverySupported={isEngineLocalDeliverySupported()}
+                onChooseDeliveryDirectory={() => void handleChooseDeliveryDirectory()}
                 onChange={setDraft}
                 onClose={() => setShowNewJob(false)}
                 onSubmit={handleCreate}
@@ -1411,7 +1591,11 @@ export default function EngineWorkspace() {
                 batch={selectedBatch}
                 config={config}
                 busy={busy}
+                delivery={deliveryRecords[`batch:${selectedBatch.id}`]}
+                deliveryBusy={deliveryBusy}
                 onControl={handleBatchControl}
+                onSaveDelivery={() => void saveBatchDelivery(selectedBatch, true)}
+                onDownloadDelivery={() => void downloadEngineBatch(config, selectedBatch).catch((error) => setWorkspaceError(errorMessage(error)))}
                 onReview={handleBatchItemReview}
                 onRetryItem={handleBatchItemRetry}
                 onLoadMoreItems={() => void loadMoreBatchItems()}
@@ -1425,7 +1609,11 @@ export default function EngineWorkspace() {
                 job={selectedJob}
                 previewUrl={previewUrl}
                 busy={busy}
+                delivery={deliveryRecords[`job:${selectedJob.id}`]}
+                deliveryBusy={deliveryBusy}
                 onOpenPreview={setAssetLightbox}
+                onSaveDelivery={() => void saveJobDelivery(selectedJob, true)}
+                onDownloadDelivery={() => void downloadEngineJob(config, selectedJob).catch((error) => setWorkspaceError(errorMessage(error)))}
                 onCancel={handleCancel}
                 onRetry={handleRetry}
                 onClose={clearInspectorSelection}
@@ -1464,6 +1652,9 @@ function NewJobForm({
   capabilities,
   draft,
   busy,
+  deliveryDirectoryName,
+  deliverySupported,
+  onChooseDeliveryDirectory,
   onChange,
   onClose,
   onSubmit,
@@ -1471,6 +1662,9 @@ function NewJobForm({
   capabilities: ImageTaskCapabilitiesV1
   draft: NewJobDraft
   busy: boolean
+  deliveryDirectoryName: string | null
+  deliverySupported: boolean
+  onChooseDeliveryDirectory: () => void
   onChange: (draft: NewJobDraft) => void
   onClose: () => void
   onSubmit: (event: FormEvent) => void
@@ -1565,6 +1759,20 @@ function NewJobForm({
         <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG</span></div>
         <div className="mt-2 flex justify-between"><span>增强器</span><span className="font-mono">lanczos3</span></div>
       </div>
+      <div className="mt-4 flex items-start gap-3 border-l-2 border-emerald-400 bg-emerald-50/70 px-3 py-3 text-xs text-emerald-900 dark:bg-emerald-400/10 dark:text-emerald-100">
+        <HardDrive className="mt-0.5 h-4 w-4 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">生成成功后自动交付到本机</div>
+          <div className="mt-1 leading-5 opacity-80">
+            {deliveryDirectoryName ? `保存位置：${deliveryDirectoryName}/jobs/...` : deliverySupported ? '尚未选择目录；提交后可在详情中重试保存。' : '当前浏览器不支持目录写入，生成后提供 PNG 下载。'}
+          </div>
+          {deliverySupported && (
+            <button type="button" onClick={onChooseDeliveryDirectory} className="mt-2 inline-flex h-7 items-center gap-1 rounded-md border border-emerald-500/40 px-2 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100 dark:text-emerald-100 dark:hover:bg-emerald-400/15">
+              <FolderOpen className="h-3 w-3" />{deliveryDirectoryName ? '更换目录' : '选择本地目录'}
+            </button>
+          )}
+        </div>
+      </div>
       <button
         type="submit"
         disabled={busy || !draft.prompt.trim() || !draft.model.trim() || (draft.fallbackEnabled && !draft.fallbackModel.trim())}
@@ -1582,6 +1790,9 @@ function NewBatchForm({
   draft,
   batchDraft,
   busy,
+  deliveryDirectoryName,
+  deliverySupported,
+  onChooseDeliveryDirectory,
   onChange,
   onRatioChange,
   onAutoReviseChange,
@@ -1592,6 +1803,9 @@ function NewBatchForm({
   draft: NewJobDraft
   batchDraft: { name: string; prompts: string }
   busy: boolean
+  deliveryDirectoryName: string | null
+  deliverySupported: boolean
+  onChooseDeliveryDirectory: () => void
   onChange: (draft: { name: string; prompts: string }) => void
   onRatioChange: (ratio: string) => void
   onAutoReviseChange: (autoRevise: boolean) => void
@@ -1666,6 +1880,20 @@ function NewBatchForm({
         <div className="flex justify-between"><span>规范源图</span><span className="font-mono">{calculateImageSize('2K', draft.ratio)}</span></div>
         <div className="mt-2 flex justify-between"><span>最终产物</span><span className="font-mono">{calculateImageSize('4K', draft.ratio)} PNG (Lanczos3)</span></div>
       </div>
+      <div className="mt-4 flex items-start gap-3 border-l-2 border-emerald-400 bg-emerald-50/70 px-3 py-3 text-xs text-emerald-900 dark:bg-emerald-400/10 dark:text-emerald-100">
+        <HardDrive className="mt-0.5 h-4 w-4 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium">批次完成后自动交付全部成功产物</div>
+          <div className="mt-1 leading-5 opacity-80">
+            {deliveryDirectoryName ? `保存位置：${deliveryDirectoryName}/batches/...` : deliverySupported ? '尚未选择目录；批次完成后可在详情中重试保存。' : '当前浏览器不支持目录写入，批次详情提供 ZIP 下载。'}
+          </div>
+          {deliverySupported && (
+            <button type="button" onClick={onChooseDeliveryDirectory} className="mt-2 inline-flex h-7 items-center gap-1 rounded-md border border-emerald-500/40 px-2 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100 dark:text-emerald-100 dark:hover:bg-emerald-400/15">
+              <FolderOpen className="h-3 w-3" />{deliveryDirectoryName ? '更换目录' : '选择本地目录'}
+            </button>
+          )}
+        </div>
+      </div>
       <label className="mt-4 flex cursor-pointer items-start gap-3 border-l-2 border-amber-300 bg-amber-50/70 px-3 py-3 text-xs text-amber-900 dark:border-amber-400/50 dark:bg-amber-400/10 dark:text-amber-100">
         <input
           type="checkbox"
@@ -1694,6 +1922,10 @@ function BatchInspector({
   batch,
   config,
   busy,
+  delivery,
+  deliveryBusy,
+  onSaveDelivery,
+  onDownloadDelivery,
   onControl,
   onReview,
   onRetryItem,
@@ -1706,6 +1938,10 @@ function BatchInspector({
   batch: ImageBatchV1
   config: ImageTaskApiConfig
   busy: boolean
+  delivery?: EngineDeliveryRecord
+  deliveryBusy: boolean
+  onSaveDelivery: () => void
+  onDownloadDelivery: () => void
   onControl: (action: 'pause' | 'resume' | 'retry-failed' | 'retry-cancelled') => void
   onReview: (itemKey: string, acceptanceStatus: 'accepted' | 'rejected') => void
   onRetryItem: (item: ImageBatchItemV1) => void
@@ -1768,6 +2004,23 @@ function BatchInspector({
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
+      </div>
+      <div className="mt-4 border-l-2 border-emerald-400 bg-emerald-50/70 px-3 py-3 text-xs text-emerald-900 dark:bg-emerald-400/10 dark:text-emerald-100">
+        <div className="flex items-center gap-2">
+          <HardDrive className="h-4 w-4 shrink-0" />
+          <span className="font-medium">本地交付</span>
+          <span className="ml-auto"><DeliveryStatus record={delivery} supported={isEngineLocalDeliverySupported()} /></span>
+        </div>
+        {delivery?.error && <p className="mt-1 break-words leading-5 text-red-700 dark:text-red-300">{delivery.error}</p>}
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button type="button" onClick={onSaveDelivery} disabled={deliveryBusy || !isEngineLocalDeliverySupported() || batch.state === 'running'} className="inline-flex h-7 items-center gap-1 rounded-md bg-emerald-600 px-2 text-[10px] font-medium text-white hover:bg-emerald-700 disabled:opacity-40">
+            {deliveryBusy ? <LoaderCircle className="h-3 w-3 animate-spin" /> : <HardDrive className="h-3 w-3" />}保存到本机
+          </button>
+          <button type="button" onClick={onDownloadDelivery} disabled={deliveryBusy || batch.stats.succeeded === 0} className="inline-flex h-7 items-center gap-1 rounded-md border border-emerald-500/40 px-2 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-40 dark:text-emerald-100 dark:hover:bg-emerald-400/15">
+            <Download className="h-3 w-3" />下载批次 ZIP
+          </button>
+        </div>
+        <p className="mt-2 text-[10px] leading-4 opacity-75">只保存成功产物；失败、取消项保留在 batch-manifest.json 中，不会伪装成已交付。</p>
       </div>
       <div className="mt-5" aria-label="批次质量漏斗">
         <div className="grid grid-cols-5 gap-1.5">
@@ -1972,7 +2225,11 @@ function JobInspector({
   job,
   previewUrl,
   busy,
+  delivery,
+  deliveryBusy,
   onOpenPreview,
+  onSaveDelivery,
+  onDownloadDelivery,
   onCancel,
   onRetry,
   onClose,
@@ -1980,7 +2237,11 @@ function JobInspector({
   job: ImageJobV1
   previewUrl: string | null
   busy: boolean
+  delivery?: EngineDeliveryRecord
+  deliveryBusy: boolean
   onOpenPreview: (mode: 'source' | 'final') => void
+  onSaveDelivery: () => void
+  onDownloadDelivery: () => void
   onCancel: () => void
   onRetry: () => void
   onClose: () => void
@@ -2032,6 +2293,24 @@ function JobInspector({
           </div>
         </div>
       )}
+
+      <div className="mt-4 border-l-2 border-emerald-400 bg-emerald-50/70 px-3 py-3 text-xs text-emerald-900 dark:bg-emerald-400/10 dark:text-emerald-100">
+        <div className="flex items-center gap-2">
+          <HardDrive className="h-4 w-4 shrink-0" />
+          <span className="font-medium">本地交付</span>
+          <span className="ml-auto"><DeliveryStatus record={delivery} supported={isEngineLocalDeliverySupported()} /></span>
+        </div>
+        {delivery?.error && <p className="mt-1 break-words leading-5 text-red-700 dark:text-red-300">{delivery.error}</p>}
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button type="button" onClick={onSaveDelivery} disabled={deliveryBusy || !isEngineLocalDeliverySupported() || job.state !== 'succeeded'} className="inline-flex h-7 items-center gap-1 rounded-md bg-emerald-600 px-2 text-[10px] font-medium text-white hover:bg-emerald-700 disabled:opacity-40">
+            {deliveryBusy ? <LoaderCircle className="h-3 w-3 animate-spin" /> : <HardDrive className="h-3 w-3" />}保存到本机
+          </button>
+          <button type="button" onClick={onDownloadDelivery} disabled={deliveryBusy || job.state !== 'succeeded'} className="inline-flex h-7 items-center gap-1 rounded-md border border-emerald-500/40 px-2 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-40 dark:text-emerald-100 dark:hover:bg-emerald-400/15">
+            <Download className="h-3 w-3" />下载 PNG
+          </button>
+        </div>
+        <p className="mt-2 text-[10px] leading-4 opacity-75">生成成功不等于本地交付成功；两者分别显示状态，保存失败可重试。</p>
+      </div>
 
       <p className="mt-5 text-sm leading-6">{job.request.input.prompt || '图像编辑任务'}</p>
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-stone-300 py-4 text-xs dark:border-white/10">

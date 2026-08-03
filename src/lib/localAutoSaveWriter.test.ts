@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive, type WritableDirectoryHandle } from './localAutoSaveWriter'
+import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive, writeLocalDeliveryFiles, type WritableDirectoryHandle } from './localAutoSaveWriter'
 
 class FakeWritable {
   chunks: unknown[] = []
@@ -80,6 +80,25 @@ describe('local auto-save writer', () => {
     expect(folder?.files.has('image-1.png')).toBe(true)
     expect(folder?.files.has('prompt.txt')).toBe(true)
     expect(folder?.files.has('metadata.json')).toBe(true)
+  })
+
+  it('writes nested delivery files and reuses the same folder on retry', async () => {
+    const root = new FakeDirectoryHandle()
+    const first = await writeLocalDeliveryFiles({
+      rootHandle: root as unknown as WritableDirectoryHandle,
+      folderName: 'batches/batch-1',
+      files: [{ name: '001-item/final.png', data: new Blob([new Uint8Array([1])], { type: 'image/png' }), type: 'image/png' }],
+    })
+    const second = await writeLocalDeliveryFiles({
+      rootHandle: root as unknown as WritableDirectoryHandle,
+      folderName: 'batches/batch-1',
+      files: [{ name: '001-item/metadata.json', data: '{"ok":true}', type: 'application/json' }],
+    })
+
+    expect(first.folderName).toBe('batches/batch-1')
+    expect(second.folderName).toBe('batches/batch-1')
+    expect(root.directories.get('batches')?.directories.get('batch-1')?.directories.get('001-item')?.files.has('final.png')).toBe(true)
+    expect(root.directories.get('batches')?.directories.get('batch-1')?.directories.get('001-item')?.files.has('metadata.json')).toBe(true)
   })
 
   it('returns needs_permission when readwrite permission is denied', async () => {

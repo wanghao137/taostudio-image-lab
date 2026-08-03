@@ -416,6 +416,20 @@ export async function listImageBatchItems(
   return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/items${query}`)).json()
 }
 
+export async function listAllImageBatchItems(config: ImageTaskApiConfig, id: string, limit = 100): Promise<ImageBatchItemV1[]> {
+  const items: ImageBatchItemV1[] = []
+  const cursors = new Set<string>()
+  let cursor: string | undefined
+  while (true) {
+    const page = await listImageBatchItems(config, id, { limit, cursor })
+    items.push(...page.items)
+    if (!page.nextCursor || cursors.has(page.nextCursor)) break
+    cursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
+  return items
+}
+
 export async function listImageBatchEvents(
   config: ImageTaskApiConfig,
   id: string,

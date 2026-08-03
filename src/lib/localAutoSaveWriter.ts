@@ -14,11 +14,17 @@ export interface WritableDirectoryHandle {
 
 export interface LocalAutoSaveWriteFile {
   name: string
-  data: Uint8Array | string
+  data: Uint8Array | string | Blob
   type: string
 }
 
 export interface LocalAutoSaveWriteParams {
+  rootHandle: WritableDirectoryHandle
+  folderName: string
+  files: LocalAutoSaveWriteFile[]
+}
+
+export interface LocalDeliveryWriteParams {
   rootHandle: WritableDirectoryHandle
   folderName: string
   files: LocalAutoSaveWriteFile[]
@@ -53,11 +59,21 @@ async function ensureReadWritePermission(handle: WritableDirectoryHandle) {
 }
 
 async function writeFile(handle: WritableDirectoryHandle, file: LocalAutoSaveWriteFile) {
-  const fileHandle = await handle.getFileHandle(file.name, { create: true })
+  const segments = file.name.split('/').map((segment) => segment.trim()).filter(Boolean)
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..' || segment.includes('\\'))) {
+    throw new Error('本地保存文件名无效')
+  }
+  let directory = handle
+  for (const segment of segments.slice(0, -1)) {
+    directory = await directory.getDirectoryHandle(segment, { create: true })
+  }
+  const fileHandle = await directory.getFileHandle(segments[segments.length - 1], { create: true })
   const writable = await fileHandle.createWritable()
   const payload = typeof file.data === 'string'
     ? new Blob([file.data], { type: file.type })
-    : new Blob([toArrayBuffer(file.data)], { type: file.type })
+    : file.data instanceof Blob
+      ? file.data
+      : new Blob([toArrayBuffer(file.data)], { type: file.type })
   await writable.write(payload)
   await writable.close()
 }
@@ -106,5 +122,40 @@ export async function writeLocalAutoSaveArchive(params: LocalAutoSaveWriteParams
     if (isPermissionLikeError(err)) throw new LocalAutoSavePermissionError()
     const message = err instanceof Error ? err.message : String(err)
     throw new Error(`本地自动保存失败：${message}`)
+  }
+}
+
+function splitDirectoryPath(value: string) {
+  const segments = value.split('/').map((segment) => segment.trim()).filter(Boolean)
+  if (!segments.length || segments.some((segment) => segment === '.' || segment === '..' || segment.includes('\\'))) {
+    throw new Error('本地保存目录名无效')
+  }
+  return segments
+}
+
+async function getOrCreateDirectoryPath(rootHandle: WritableDirectoryHandle, path: string) {
+  let directory = rootHandle
+  for (const segment of splitDirectoryPath(path)) {
+    directory = await directory.getDirectoryHandle(segment, { create: true })
+  }
+  return directory
+}
+
+/** Write an idempotent delivery folder. Unlike the legacy archive writer this
+ * reuses the requested folder, so a retry updates the same local delivery. */
+export async function writeLocalDeliveryFiles(params: LocalDeliveryWriteParams) {
+  try {
+    await ensureReadWritePermission(params.rootHandle)
+    const folder = await getOrCreateDirectoryPath(params.rootHandle, params.folderName)
+    for (const file of params.files) await writeFile(folder, file)
+    return {
+      folderName: params.folderName,
+      files: params.files.map((file) => file.name),
+    }
+  } catch (err) {
+    if (err instanceof LocalAutoSavePermissionError) throw err
+    if (isPermissionLikeError(err)) throw new LocalAutoSavePermissionError()
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(`本地交付保存失败：${message}`)
   }
 }
