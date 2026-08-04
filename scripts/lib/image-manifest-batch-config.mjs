@@ -32,6 +32,14 @@ function parseIndexSet(value) {
   )
 }
 
+const MAX_RUNNER_CONCURRENCY = 8
+
+function runnerConcurrency(environment) {
+  const raw = Number(environment.IMAGE_BATCH_RUNNER_CONCURRENCY)
+  if (!Number.isInteger(raw) || raw < 1) return 1
+  return Math.min(raw, MAX_RUNNER_CONCURRENCY)
+}
+
 export function resolveImageManifestBatchConfig(environment = process.env, cwd = process.cwd()) {
   const repoRoot = resolve(environment.IMAGE_BATCH_REPO_ROOT || cwd)
   const batchKey = safeSlug(environment.IMAGE_BATCH_KEY || 'image-manifest-batch')
@@ -48,6 +56,7 @@ export function resolveImageManifestBatchConfig(environment = process.env, cwd =
     clientName: environment.IMAGE_BATCH_CLIENT_NAME?.trim() || `${batchKey}-client`,
     contactSheetPrefix: environment.IMAGE_BATCH_CONTACT_SHEET_PREFIX?.trim() || `${batchKey}-preview`,
     migrateIndexes: parseIndexSet(environment.IMAGE_BATCH_MIGRATE_INDEXES),
+    runnerConcurrency: runnerConcurrency(environment),
     routes: [
       {
         name: 'primary',

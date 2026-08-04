@@ -36,4 +36,29 @@ describe('image manifest batch config', () => {
       IMAGE_BATCH_PRIMARY_API_MODE: 'chat',
     }, 'C:/repo')).toThrow('IMAGE_BATCH_PRIMARY_API_MODE must be images or responses')
   })
+
+  it('defaults runner concurrency to 1 and clamps invalid values', () => {
+    const defaults = resolveImageManifestBatchConfig(REQUIRED, 'C:/repo')
+    expect(defaults.runnerConcurrency).toBe(1)
+
+    expect(resolveImageManifestBatchConfig({
+      ...REQUIRED,
+      IMAGE_BATCH_RUNNER_CONCURRENCY: '3',
+    }, 'C:/repo').runnerConcurrency).toBe(3)
+
+    expect(resolveImageManifestBatchConfig({
+      ...REQUIRED,
+      IMAGE_BATCH_RUNNER_CONCURRENCY: '99',
+    }, 'C:/repo').runnerConcurrency).toBe(8)
+
+    expect(resolveImageManifestBatchConfig({
+      ...REQUIRED,
+      IMAGE_BATCH_RUNNER_CONCURRENCY: '0',
+    }, 'C:/repo').runnerConcurrency).toBe(1)
+
+    expect(resolveImageManifestBatchConfig({
+      ...REQUIRED,
+      IMAGE_BATCH_RUNNER_CONCURRENCY: 'garbage',
+    }, 'C:/repo').runnerConcurrency).toBe(1)
+  })
 })
