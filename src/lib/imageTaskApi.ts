@@ -392,7 +392,12 @@ export async function createImageBatch(config: ImageTaskApiConfig, request: Imag
 })).json()
 }
 
-export async function listImageBatches(config: ImageTaskApiConfig, limit = 30): Promise<{ items: ImageBatchSummaryV1[] }> {
+// The server currently caps batch list results at `limit` (no cursor pagination),
+// so historical batches beyond the limit are silently absent. The caller is
+// expected to surface this when batches.length === limit. Default raised from
+// 30 to 50 to cover typical internal usage without truncation.
+export const BATCH_LIST_LIMIT = 50
+export async function listImageBatches(config: ImageTaskApiConfig, limit = BATCH_LIST_LIMIT): Promise<{ items: ImageBatchSummaryV1[] }> {
   return (await taskFetch(config, `/v1/image-batches?limit=${encodeURIComponent(String(limit))}`)).json()
 }
 
@@ -551,8 +556,38 @@ export async function waitForImageJob(
   throw new Error('Image Task API polling timed out')
 }
 
+// In-memory LRU blob caches so re-opening a job/batch inspector does not
+// re-download the same PNG on every access. The engine stores image bytes
+// server-side and serves them over HTTP with no client cache headers, so
+// without this layer the inspector re-fetches on every render. Mirrors the
+// gallery's imageCache.ts LRU pattern but keyed on assetId (not task id) and
+// holding Blob objects (not data URLs) to avoid base64-inflating 4K PNGs.
+const engineBlobCache = new Map<string, Blob>()
+const engineThumbnailCache = new Map<string, Blob>()
+const MAX_ENGINE_BLOB_ENTRIES = 6
+const MAX_ENGINE_THUMBNAIL_ENTRIES = 60
+
+function cacheBlob(cache: Map<string, Blob>, max: number, key: string, blob: Blob) {
+  cache.delete(key)
+  cache.set(key, blob)
+  while (cache.size > max) {
+    const oldestKey = cache.keys().next().value
+    if (oldestKey == null) break
+    cache.delete(oldestKey)
+  }
+}
+
 export async function getImageAssetBlob(config: ImageTaskApiConfig, assetId: string): Promise<Blob> {
-  return (await taskFetch(config, `/v1/assets/${encodeURIComponent(assetId)}`)).blob()
+  const cached = engineBlobCache.get(assetId)
+  if (cached) {
+    // Refresh LRU recency without mutating the original entry.
+    engineBlobCache.delete(assetId)
+    engineBlobCache.set(assetId, cached)
+    return cached
+  }
+  const blob = await (await taskFetch(config, `/v1/assets/${encodeURIComponent(assetId)}`)).blob()
+  cacheBlob(engineBlobCache, MAX_ENGINE_BLOB_ENTRIES, assetId, blob)
+  return blob
 }
 
 export async function getImageAssetThumbnailBlob(
@@ -560,10 +595,20 @@ export async function getImageAssetThumbnailBlob(
   assetId: string,
   width = 320,
 ): Promise<Blob> {
-  return (await taskFetch(
+  // Thumbnail cache is keyed by assetId only (width is constant in practice);
+  // a different requested width simply misses and re-fetches.
+  const cached = engineThumbnailCache.get(assetId)
+  if (cached) {
+    engineThumbnailCache.delete(assetId)
+    engineThumbnailCache.set(assetId, cached)
+    return cached
+  }
+  const blob = await (await taskFetch(
     config,
     `/v1/assets/${encodeURIComponent(assetId)}/thumbnail?width=${encodeURIComponent(String(width))}`,
   )).blob()
+  cacheBlob(engineThumbnailCache, MAX_ENGINE_THUMBNAIL_ENTRIES, assetId, blob)
+  return blob
 }
 
 export async function getImageAssetManifest(config: ImageTaskApiConfig, assetId: string): Promise<ImageAssetManifestV1> {

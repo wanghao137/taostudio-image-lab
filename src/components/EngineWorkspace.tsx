@@ -32,6 +32,7 @@ import {
 } from '../lib/engineBatch'
 import {
   cancelImageJob,
+  BATCH_LIST_LIMIT,
   clearLocalImageTaskApiConfig,
   createImageTaskGeneration,
   createImageJob,
@@ -1464,6 +1465,11 @@ export default function EngineWorkspace() {
                 <h2 className="text-sm font-semibold">批次队列</h2>
                 <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.incomplete.length} 异常结束 · {batchGroups.history.length} 归档</span>
               </div>
+              {batches.length >= BATCH_LIST_LIMIT && (
+                <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-300">
+                  仅显示最近 {BATCH_LIST_LIMIT} 个批次，更早的历史批次未列出。
+                </div>
+              )}
               {batches.length > 3 && (
                 <div className="mb-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                   <input
@@ -2107,6 +2113,7 @@ function BatchInspector({
               key={value}
               type="button"
               onClick={() => setReviewFilter(value)}
+              aria-pressed={reviewFilter === value}
               className={`h-7 rounded-md border px-2 text-[10px] font-medium transition-colors ${
                 reviewFilter === value
                   ? 'border-[#356c82] bg-[#356c82] text-white'
@@ -2296,28 +2303,29 @@ function JobInspector({
 
       {previewUrl && (
         <div className="mt-4">
-          <div
-            role="button"
-            tabIndex={0}
+          <button
+            type="button"
             onClick={() => onOpenPreview('final')}
-            onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onOpenPreview('final') }}
-            className="group relative overflow-hidden rounded-md border border-stone-300 bg-[repeating-conic-gradient(#ddd_0_25%,#fff_0_50%)_0_0/16px_16px] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[#356c82] dark:border-white/10"
+            className="group relative block w-full overflow-hidden rounded-md border border-stone-300 bg-[repeating-conic-gradient(#ddd_0_25%,#fff_0_50%)_0_0/16px_16px] cursor-zoom-in outline-none focus-visible:ring-2 focus-visible:ring-[#356c82] dark:border-white/10"
             aria-label="放大预览 4K 产物"
           >
             <span className="absolute right-2 top-2 z-10 inline-flex h-8 w-8 items-center justify-center rounded-md bg-black/65 text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
               <Maximize2 className="h-4 w-4" />
             </span>
             {job.sourceAssetId && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onOpenPreview('source') }}
-                className="absolute left-2 top-2 z-10 inline-flex h-7 items-center gap-1 rounded-md bg-black/65 px-2 text-[10px] text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+              <span
+                role="button"
+                tabIndex={0}
+                onClick={(e) => { e.stopPropagation(); e.preventDefault(); onOpenPreview('source') }}
+                onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.stopPropagation(); onOpenPreview('source') } }}
+                className="absolute left-2 top-2 z-10 inline-flex h-7 cursor-pointer items-center gap-1 rounded-md bg-black/65 px-2 text-[10px] text-white opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+                aria-label="放大预览原图"
               >
                 原图
-              </button>
+              </span>
             )}
             <img src={previewUrl} alt="最终产物" className="max-h-[420px] w-full object-contain" />
-          </div>
+          </button>
         </div>
       )}
 
@@ -2424,6 +2432,7 @@ function EngineAssetLightbox({
   const [position, setPosition] = useState({ x: 0, y: 0 })
   const [drag, setDrag] = useState<{ pointerId: number; x: number; y: number } | null>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
   const src = mode === 'source' ? sourceUrl : finalUrl
 
   const resetView = useCallback(() => {
@@ -2437,6 +2446,24 @@ function EngineAssetLightbox({
       if (event.key === '0') resetView()
       if (event.key === '+' || event.key === '=') setScale((value) => Math.min(4, value + 0.25))
       if (event.key === '-') setScale((value) => Math.max(0.5, value - 0.25))
+      // Focus trap: keep Tab navigation within the dialog so screen-reader and
+      // keyboard users cannot wander into the page behind the modal overlay.
+      if (event.key === 'Tab' && dialogRef.current) {
+        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        )
+        if (focusables.length === 0) return
+        const first = focusables[0]
+        const last = focusables[focusables.length - 1]
+        const active = document.activeElement as HTMLElement | null
+        if (event.shiftKey && (active === first || !dialogRef.current.contains(active))) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && active === last) {
+          event.preventDefault()
+          first.focus()
+        }
+      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -2472,6 +2499,7 @@ function EngineAssetLightbox({
 
   return (
     <div
+      ref={dialogRef}
       className="fixed inset-0 z-[100] flex flex-col bg-black/[0.94] text-white backdrop-blur-sm"
       role="dialog"
       aria-modal="true"

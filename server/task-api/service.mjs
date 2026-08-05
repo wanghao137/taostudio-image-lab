@@ -389,6 +389,49 @@ async function providerResponseText(response, signal) {
   }
 }
 
+// Shared response-decoding + error-classification for the three OpenAI-compatible
+// provider call shapes (images/generations, images/edits, responses). Reads the
+// body, classifies a non-OK HTTP status or a non-JSON/malformed body into the
+// same typed error vocabulary, and returns the parsed JSON payload on success.
+// The per-call success-path extraction (b64_json vs responses output) stays in
+// each caller; only the error taxonomy is shared.
+async function decodeProviderJsonResponse(response, signal) {
+  const contentType = response.headers.get('content-type') || ''
+  const responseText = await providerResponseText(response, signal)
+  const isJson = contentType.toLowerCase().includes('application/json')
+  if (!response.ok) {
+    let errorPayload = null
+    if (isJson) {
+      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
+    }
+    const error = errorPayload
+      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
+      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
+          code: 'PROVIDER_HTTP_ERROR',
+          retryable: response.status === 429 || response.status >= 500,
+          diagnostics: responseShape(responseText),
+        })
+    error.httpStatus = response.status
+    throw error
+  }
+  if (!isJson) {
+    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
+    })
+  }
+  try {
+    return JSON.parse(responseText)
+  } catch {
+    throw Object.assign(new Error('provider returned malformed JSON'), {
+      code: 'PROVIDER_RESPONSE_ERROR',
+      retryable: true,
+      diagnostics: { contentType, ...responseShape(responseText) },
+    })
+  }
+}
+
 function processIsRunning(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
@@ -1937,41 +1980,7 @@ async function compatibleGenerate(request, providerConfig, signal) {
       n: 1,
     }),
   }, 'generation-request')
-  const contentType = response.headers.get('content-type') || ''
-  const responseText = await providerResponseText(response, signal)
-  const isJson = contentType.toLowerCase().includes('application/json')
-  if (!response.ok) {
-    let errorPayload = null
-    if (isJson) {
-      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
-    }
-    const error = errorPayload
-      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
-      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
-          code: 'PROVIDER_HTTP_ERROR',
-          retryable: response.status === 429 || response.status >= 500,
-          diagnostics: responseShape(responseText),
-        })
-    error.httpStatus = response.status
-    throw error
-  }
-  if (!isJson) {
-    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
-      code: 'PROVIDER_RESPONSE_ERROR',
-      retryable: true,
-      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
-    })
-  }
-  let payload
-  try {
-    payload = JSON.parse(responseText)
-  } catch {
-    throw Object.assign(new Error('provider returned malformed JSON'), {
-      code: 'PROVIDER_RESPONSE_ERROR',
-      retryable: true,
-      diagnostics: { contentType, ...responseShape(responseText) },
-    })
-  }
+  const payload = await decodeProviderJsonResponse(response, signal)
   const entry = payload?.data?.[0]
   if (entry?.b64_json) return { buffer: Buffer.from(entry.b64_json, 'base64'), usage: payload.usage ?? null }
   if (entry?.url) {
@@ -2017,41 +2026,7 @@ async function compatibleEdit(request, providerConfig, sourceBuffer, signal) {
     body: formData,
   }, 'edit-request')
 
-  const contentType = response.headers.get('content-type') || ''
-  const responseText = await providerResponseText(response, signal)
-  const isJson = contentType.toLowerCase().includes('application/json')
-  if (!response.ok) {
-    let errorPayload = null
-    if (isJson) {
-      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
-    }
-    const error = errorPayload
-      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
-      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
-          code: 'PROVIDER_HTTP_ERROR',
-          retryable: response.status === 429 || response.status >= 500,
-          diagnostics: responseShape(responseText),
-        })
-    error.httpStatus = response.status
-    throw error
-  }
-  if (!isJson) {
-    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
-      code: 'PROVIDER_RESPONSE_ERROR',
-      retryable: true,
-      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
-    })
-  }
-  let payload
-  try {
-    payload = JSON.parse(responseText)
-  } catch {
-    throw Object.assign(new Error('provider returned malformed JSON'), {
-      code: 'PROVIDER_RESPONSE_ERROR',
-      retryable: true,
-      diagnostics: { contentType, ...responseShape(responseText) },
-    })
-  }
+  const payload = await decodeProviderJsonResponse(response, signal)
   const entry = payload?.data?.[0]
   if (entry?.b64_json) return { buffer: Buffer.from(entry.b64_json, 'base64'), usage: payload.usage ?? null }
   if (entry?.url) {
@@ -2142,41 +2117,7 @@ async function responsesGenerate(request, providerConfig, signal, sourceBuffer) 
       tool_choice: 'required',
     }),
   }, isEdit ? 'edit-request' : 'generation-request')
-  const contentType = response.headers.get('content-type') || ''
-  const responseText = await providerResponseText(response, signal)
-  const isJson = contentType.toLowerCase().includes('application/json')
-  if (!response.ok) {
-    let errorPayload = null
-    if (isJson) {
-      try { errorPayload = JSON.parse(responseText) } catch { /* status remains the source of truth */ }
-    }
-    const error = errorPayload
-      ? providerPayloadError(errorPayload, response.status === 429 || response.status >= 500)
-      : Object.assign(new Error(`provider returned HTTP ${response.status}`), {
-          code: 'PROVIDER_HTTP_ERROR',
-          retryable: response.status === 429 || response.status >= 500,
-          diagnostics: responseShape(responseText),
-        })
-    error.httpStatus = response.status
-    throw error
-  }
-  if (!isJson) {
-    throw Object.assign(new Error(`provider returned unexpected content type: ${contentType || 'missing'}`), {
-      code: 'PROVIDER_RESPONSE_ERROR',
-      retryable: true,
-      diagnostics: { contentType: contentType || 'missing', ...responseShape(responseText) },
-    })
-  }
-  let payload
-  try {
-    payload = JSON.parse(responseText)
-  } catch {
-    throw Object.assign(new Error('provider returned malformed JSON'), {
-      code: 'PROVIDER_RESPONSE_ERROR',
-      retryable: true,
-      diagnostics: { contentType, ...responseShape(responseText) },
-    })
-  }
+  const payload = await decodeProviderJsonResponse(response, signal)
   const output = Array.isArray(payload?.output) ? payload.output : []
   // Find a completed image_generation_call and decode its bytes.
   for (const item of output) {
