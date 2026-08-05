@@ -6,8 +6,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import sharp from 'sharp'
 import {
-  buildQaRevisionInstruction,
-  classifyQaFailure,
   expandReadyEntries,
   inspectPng,
   shouldUseSolRevision,
@@ -26,6 +24,7 @@ const {
   migrateIndexes: validatedCoreIndexes,
   workDir,
   routes,
+  runnerConcurrency,
 } = resolveImageManifestBatchConfig()
 const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
 const cliIndex = process.argv.find((value) => value.startsWith('--index='))
@@ -37,6 +36,19 @@ const runId = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '')
 
 function hash(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+// Async mutex for serializing shared disk writes (statusPath, metadata.json)
+// when multiple worker pool entries run concurrently. JS is single-threaded so
+// object mutations are safe, but writeFile must be sequenced to avoid corrupt
+// JSON from interleaved full-file rewrites.
+function createMutex() {
+  let chain = Promise.resolve()
+  return async function withLock(task) {
+    const next = chain.then(() => task())
+    chain = next.catch(() => {})
+    return next
+  }
 }
 
 function outputPath(...segments) {
@@ -218,8 +230,28 @@ function entryDirectory(entry) {
 const manifestReady = expandReadyEntries(manifest.entries)
   .filter((entry) => selectedIndex === null || entry.index === selectedIndex)
 for (const entry of manifestReady) entryDirectory(entry)
-const plannedScope = manifestReady.slice(0, limit)
+
+// 载入本地执行状态，在确定本轮 batch 窗口前剔除已 succeeded 的条目。
+// 这样 `--limit=N` 表示"接下来 N 个未完成项"，而非"manifest 前 N 项"——
+// 否则早期已完成条目会导致后续批次窗口被空切片（selected=0）。
+const priorState = existsSync(statusPath)
+  ? JSON.parse(await readFile(statusPath, 'utf8'))
+  : { schemaVersion: 1, startedAt: new Date().toISOString(), items: {} }
+const priorSucceededKeys = new Set(
+  Object.entries(priorState.items || {})
+    .filter(([, v]) => v?.status === 'succeeded')
+    .map(([k]) => k),
+)
+const plannedScope = manifestReady
+  .filter((entry) => !priorSucceededKeys.has(entry.itemKey))
+  .slice(0, limit)
 const plannedItemKeys = new Set(plannedScope.map((entry) => entry.itemKey))
+// 给 batch name 追加时间戳与本批 item 范围，让引擎 UI 里每批可区分，
+// 而不是所有批次都显示同一个 IMAGE_BATCH_NAME。
+const scopeRange = plannedScope.length
+  ? `${plannedScope[0].itemKey}-${plannedScope[plannedScope.length - 1].itemKey}`
+  : 'empty'
+const displayName = `${batchName} ${scopeRange} ${runId}`
 // A logical batch describes one exact manifest scope. runId is intentionally
 // absent: it identifies a runner attempt, not a new generation workload.
 const logicalBatchKey = `${batchKey}-${hash(JSON.stringify({
@@ -451,9 +483,7 @@ async function releaseRunner() {
 }
 
 try {
-let state = existsSync(statusPath)
-  ? JSON.parse(await readFile(statusPath, 'utf8'))
-  : { schemaVersion: 1, startedAt: new Date().toISOString(), items: {} }
+const state = priorState
 state.runId = runId
 state.updatedAt = new Date().toISOString()
 
@@ -723,7 +753,7 @@ if (queuedEntries.length) {
     const batchResult = await callMcp('image_batch_create', {
       idempotencyKey: logicalBatchKey,
       logicalKey: logicalBatchKey,
-      name: batchName,
+      name: displayName,
       outputRoot,
       items: queuedEntries.map((entry) => ({
         itemKey: entry.itemKey,
@@ -769,7 +799,27 @@ if (queuedEntries.length) {
   await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
 }
 
-for (const entry of queuedEntries) {
+// Worker pool: process entries concurrently to feed the engine's concurrency.
+// Each worker pulls the next entry by index (JS single-thread → ++ is atomic),
+// processes it fully (wait → download → QA → accept), then loops.
+const diskMutex = createMutex()
+const jobByItemKey = new Map((activeBatch?.items || []).map((item) => [item.itemKey, item.job]))
+const batchId = activeBatch?.id || null
+
+async function recordBatchItemQa(itemKey, review) {
+  if (!batchId) return
+  await callMcp('image_batch_item_qa', { batchId, itemKey, ...review })
+}
+
+async function replaceItemJob(itemKey, replacementKey, reason, itemSpec) {
+  if (!batchId) return null
+  const result = await callMcp('image_batch_item_replace_job', { batchId, replacementKey, reason, item: itemSpec })
+  const updatedItem = result?.items?.find((it) => it.itemKey === itemKey)
+  return updatedItem?.job || null
+}
+
+async function processEntry(entry, workerId) {
+  const tag = `w${workerId}`
   const directory = entryDirectory(entry)
   const stateKey = entry.itemKey
   const priorItem = state.items[stateKey]
@@ -787,7 +837,7 @@ for (const entry of queuedEntries) {
     batchAttempt,
     startedAt: new Date().toISOString(),
   }
-  await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  await diskMutex(() => writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8'))
 
   const revisions = []
   try {
@@ -800,17 +850,17 @@ for (const entry of queuedEntries) {
     let executionPrompt = initialExecutionPrompt(entry)
     let replacementReason = 'initial'
     let safeRewrite = null
-    let currentJob = activeBatch.items.find((item) => item.itemKey === entry.itemKey)?.job
+    let currentJob = jobByItemKey.get(entry.itemKey)
     if (!currentJob) throw new Error(`batch item ${entry.itemKey} is unavailable`)
 
     for (let revision = 0; revision < 2 && !accepted; revision += 1) {
       if (revision > 0) {
         const useSolRevision = shouldUseSolRevision(replacementReason)
-        activeBatch = await callMcp('image_batch_item_replace_job', {
-          batchId: activeBatch.id,
-          replacementKey: `${batchKey}-revision-${hash(`${runId}:${entry.itemKey}:${revision}:${executionPrompt}`).slice(0, 32)}`,
-          reason: replacementReason,
-          item: {
+        currentJob = await replaceItemJob(
+          entry.itemKey,
+          `${batchKey}-revision-${hash(`${runId}:${entry.itemKey}:${revision}:${executionPrompt}`).slice(0, 32)}`,
+          replacementReason,
+          {
             itemKey: entry.itemKey,
             prompt: executionPrompt,
             ...(reference ? { sourceAssetId: reference.assetId } : {}),
@@ -828,11 +878,10 @@ for (const entry of queuedEntries) {
             contentClass: entry.generation.contentClass,
             maxAttempts: 3,
           },
-        })
-        currentJob = activeBatch.items.find((item) => item.itemKey === entry.itemKey)?.job
+        )
         if (!currentJob) throw new Error(`replacement job for ${entry.itemKey} is unavailable`)
       }
-      console.log(`CREATED index=${entry.index} item=${entry.itemKey} revision=${revision} route=primary+fallback job=${currentJob.id}`)
+      console.log(`[${tag}] CREATED index=${entry.index} item=${entry.itemKey} revision=${revision} route=primary+fallback job=${currentJob.id}`)
       const job = await callMcp('image_job_wait', {
         jobId: currentJob.id,
         timeoutMs: 1_800_000,
@@ -880,9 +929,7 @@ for (const entry of queuedEntries) {
           replacementReason = 'safe_rewrite'
           continue
         }
-        activeBatch = await callMcp('image_batch_item_qa', {
-          batchId: activeBatch.id,
-          itemKey: entry.itemKey,
+        await recordBatchItemQa(entry.itemKey, {
           qaStatus: 'not_run',
           failureClass: policyFailure(job) ? 'content_policy' : (job.error?.failureClass || 'generation_failed'),
           recoveryAction: policyFailure(job) ? 'safe_rewrite' : (job.error?.recoveryAction || 'inspect_failure'),
@@ -899,14 +946,10 @@ for (const entry of queuedEntries) {
 
       const sourcePath = resolve(directory, `\u5019\u9009-${job.id}-\u539f\u56fe.png`)
       const finalPath = resolve(directory, `\u5019\u9009-${job.id}-4K.png`)
-      const sourceDownload = await callMcp('image_asset_download', {
-        assetId: job.sourceAssetId,
-        outputPath: sourcePath,
-      })
-      const finalDownload = await callMcp('image_asset_download', {
-        assetId: job.finalAssetId,
-        outputPath: finalPath,
-      })
+      const [sourceDownload, finalDownload] = await Promise.all([
+        callMcp('image_asset_download', { assetId: job.sourceAssetId, outputPath: sourcePath }),
+        callMcp('image_asset_download', { assetId: job.finalAssetId, outputPath: finalPath }),
+      ])
       const verification = await verifyAssets(
         sourcePath,
         finalPath,
@@ -923,12 +966,10 @@ for (const entry of queuedEntries) {
       // QA provider 返回 5xx 时降级为 unavailable，继续验收，不熔断整个批次。
       // 真正的生成 provider 5xx 仍由 providerRoutesUnavailable 检测并触发 BATCH_PAUSED。
       const qaPass = qa.status === 'completed' && qa.pass
-      console.log(`QA index=${entry.index} revision=${revision} status=${qa.status} pass=${qaPass} notes=${qa.notes || qa.reason || ''}`)
-      // QA only records evidence. A succeeded, technically verified asset is
-      // ready for human review whether QA passes, warns, or is unavailable.
-      activeBatch = await callMcp('image_batch_item_qa', {
-        batchId: activeBatch.id,
-        itemKey: entry.itemKey,
+      console.log(`[${tag}] QA index=${entry.index} revision=${revision} status=${qa.status} pass=${qaPass} notes=${qa.notes || qa.reason || ''}`)
+      // QA pass auto-confirms a technically verified asset. Warnings and an
+      // unavailable QA evaluator remain explicitly pending human review.
+      await recordBatchItemQa(entry.itemKey, {
         qaStatus: qaPass ? 'passed' : (qa.status === 'completed' ? 'needs_review' : 'not_run'),
         ...(qaPass ? {} : {
           failureClass: qa.status === 'completed' ? 'qa_reference_only' : 'qa_unavailable',
@@ -951,9 +992,7 @@ for (const entry of queuedEntries) {
 
     if (!accepted) {
       if (!reviewRecorded) {
-        activeBatch = await callMcp('image_batch_item_qa', {
-          batchId: activeBatch.id,
-          itemKey: entry.itemKey,
+        await recordBatchItemQa(entry.itemKey, {
           qaStatus: 'needs_review',
           failureClass: 'recovery_exhausted',
           recoveryAction: 'manual_review',
@@ -966,8 +1005,8 @@ for (const entry of queuedEntries) {
         completedAt: new Date().toISOString(),
         revisions,
       }
-      await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[stateKey], null, 2)}\n`, 'utf8')
-      console.log(`NEEDS_REVIEW index=${entry.index} item=${entry.itemKey}`)
+      await diskMutex(() => writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[stateKey], null, 2)}\n`, 'utf8'))
+      console.log(`[${tag}] NEEDS_REVIEW index=${entry.index} item=${entry.itemKey}`)
     } else {
       await preserveCanonical(directory)
       const sourceCanonical = resolve(directory, '\u539f\u56fe.png')
@@ -1008,21 +1047,21 @@ for (const entry of queuedEntries) {
         },
       }
       state.items[stateKey] = record
-      await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
-      completed.push(record)
-      if (completed.length % 20 === 0) {
-        const contactSheet = await makeContactSheet(completed, completed.length)
-        state.lastContactSheet = contactSheet
-      }
-      console.log(`SUCCEEDED index=${entry.index} route=${accepted.route.name} final=${entry.generation.dimensions}`)
+      await diskMutex(async () => {
+        await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
+        completed.push(record)
+        if (completed.length % 20 === 0) {
+          const contactSheet = await makeContactSheet(completed, completed.length)
+          state.lastContactSheet = contactSheet
+        }
+      })
+      console.log(`[${tag}] SUCCEEDED index=${entry.index} route=${accepted.route.name} final=${entry.generation.dimensions}`)
     }
   } catch (error) {
     const runnerLeaseLost = error?.code === 'RUNNER_LEASE_LOST'
-    if (activeBatch?.id && !runnerLeaseLost) {
+    if (batchId && !runnerLeaseLost) {
       try {
-        activeBatch = await callMcp('image_batch_item_qa', {
-          batchId: activeBatch.id,
-          itemKey: entry.itemKey,
+        await recordBatchItemQa(entry.itemKey, {
           qaStatus: 'needs_review',
           failureClass: error?.code === 'PROVIDER_UNAVAILABLE' ? 'provider_transient' : 'batch_error',
           recoveryAction: error?.code === 'PROVIDER_UNAVAILABLE' ? 'health_probe' : 'inspect_failure',
@@ -1043,24 +1082,42 @@ for (const entry of queuedEntries) {
       },
     }
     if (error?.code === 'PROVIDER_UNAVAILABLE') pauseReason = state.items[stateKey].error.message
-    await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[stateKey], null, 2)}\n`, 'utf8')
-    console.log(`ERROR index=${entry.index} item=${entry.itemKey} message=${state.items[stateKey].error.message}`)
+    await diskMutex(() => writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[stateKey], null, 2)}\n`, 'utf8'))
+    console.log(`[${tag}] ERROR index=${entry.index} item=${entry.itemKey} message=${state.items[stateKey].error.message}`)
     if (runnerLeaseLost) throw error
   }
 
-  state.updatedAt = new Date().toISOString()
-  state.summary = {
-    succeeded: Object.values(state.items).filter((item) => item.status === 'succeeded').length,
-    needsReview: Object.values(state.items).filter((item) => item.status === 'needs_review').length,
-    errors: Object.values(state.items).filter((item) => item.status === 'batch_error').length,
-  }
-  await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
-  if (pauseReason) {
-    if (activeBatch?.id && activeBatch.state !== 'completed') {
-      activeBatch = await callMcp('image_batch_pause', { batchId: activeBatch.id, reason: 'provider_unavailable' })
+  await diskMutex(async () => {
+    state.updatedAt = new Date().toISOString()
+    state.summary = {
+      succeeded: Object.values(state.items).filter((item) => item.status === 'succeeded').length,
+      needsReview: Object.values(state.items).filter((item) => item.status === 'needs_review').length,
+      errors: Object.values(state.items).filter((item) => item.status === 'batch_error').length,
+    }
+    await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  })
+}
+
+if (queuedEntries.length) {
+  const poolSize = Math.min(runnerConcurrency, queuedEntries.length) || 1
+  console.log(`WORKER_POOL size=${poolSize} entries=${queuedEntries.length} (runnerConcurrency=${runnerConcurrency})`)
+  let nextEntryIndex = 0
+  const workers = Array.from({ length: poolSize }, async (_, workerId) => {
+    while (!pauseReason) {
+      const index = nextEntryIndex++
+      if (index >= queuedEntries.length) break
+      await processEntry(queuedEntries[index], workerId)
+    }
+  })
+  await Promise.all(workers)
+
+  if (pauseReason && batchId) {
+    try {
+      await callMcp('image_batch_pause', { batchId, reason: 'provider_unavailable' })
+    } catch {
+      // Best-effort pause; the runner is tearing down anyway.
     }
     console.log(`BATCH_PAUSED reason=${pauseReason}`)
-    break
   }
 }
 

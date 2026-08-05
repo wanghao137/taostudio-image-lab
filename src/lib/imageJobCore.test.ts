@@ -151,4 +151,31 @@ describe('Image Job Contract v1 core', () => {
       expect(ratioMatchesWithinOnePixel(source, target)).toBe(true)
     }
   })
+
+  it('rejects an unsupported ratio that has no explicit output.dimensions', () => {
+    const result = validateImageJobRequest({
+      contractVersion: '1',
+      idempotencyKey: 'bad-ratio-001',
+      input: { prompt: 'cinematic still' },
+      composition: { ratio: '7:19' },
+      generation: { provider: 'mock', model: 'mock-v1' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', enhancement: 'auto' },
+    })
+    expect(result.valid).toBe(false)
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.stringMatching(/composition\.ratio must be one of/)]),
+    )
+  })
+
+  it('accepts an unsupported ratio when output.dimensions pins the size explicitly', () => {
+    const result = validateImageJobRequest({
+      contractVersion: '1',
+      idempotencyKey: 'custom-ratio-001',
+      input: { prompt: 'ultrawide banner' },
+      composition: { ratio: '21:7' },
+      generation: { provider: 'mock', model: 'mock-v1' },
+      output: { ratioMode: 'inherit', format: 'png', quality: 'high', enhancement: 'auto', dimensions: '3840x1280' },
+    })
+    expect(result).toEqual({ valid: true, errors: [] })
+  })
 })

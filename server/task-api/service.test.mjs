@@ -125,6 +125,41 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     await rm(stateDir, { recursive: true, force: true })
   })
 
+  it('backfills QA-passed legacy batch items as system-approved delivery', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-qa-migration-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const firstRepository = new TaskRepository(databasePath)
+    const created = firstRepository.createOrGetBatch({
+      idempotencyKey: 'batch-qa-migration-001',
+      items: [{
+        itemKey: 'legacy-qa-pass',
+        request: request({ idempotencyKey: 'batch-qa-migration-job-001' }),
+      }],
+    }).batch
+    const item = created.items[0]
+    firstRepository.db.prepare("UPDATE jobs SET state='succeeded' WHERE id=?").run(item.job.id)
+    firstRepository.db.prepare(`
+      UPDATE batch_items
+      SET qa_status='passed',acceptance_status='needs_review',human_review_status='pending'
+      WHERE batch_id=? AND item_key=?
+    `).run(created.id, item.itemKey)
+    firstRepository.close()
+
+    const reopenedRepository = new TaskRepository(databasePath)
+    expect(reopenedRepository.getBatch(created.id)).toMatchObject({
+      acceptanceState: 'accepted',
+      stats: { accepted: 1, needsReview: 0, humanReviewPending: 0, humanReviewApproved: 1 },
+      items: [{
+        qaStatus: 'passed',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted', migrated: true },
+      }],
+    })
+    reopenedRepository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
   it('recovers interrupted batch automation claims after a service restart', async () => {
     const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-automation-restart-'))
     const databasePath = join(stateDir, 'jobs.sqlite')
@@ -302,6 +337,64 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
     expect(conflict.status).toBe(409)
     expect((await conflict.json()).error.code).toBe('BATCH_IDEMPOTENCY_CONFLICT')
+  })
+
+  it('serves lightweight batch summary, paginated items, and paginated events', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-pages-001',
+        items: [
+          { itemKey: 'first', request: request({ idempotencyKey: 'batch-pages-job-001' }) },
+          { itemKey: 'second', request: request({ idempotencyKey: 'batch-pages-job-002' }) },
+        ],
+      }),
+    }).then((response) => response.json())
+
+    const summaryResponse = await fetch(`${url}/v1/image-batches/${created.id}/summary`, { headers: headers() })
+    const summary = await summaryResponse.json()
+    expect(summaryResponse.status).toBe(200)
+    expect(summary).not.toHaveProperty('items')
+    expect(summary).not.toHaveProperty('events')
+
+    const firstPage = await fetch(`${url}/v1/image-batches/${created.id}/items?limit=1`, { headers: headers() }).then((response) => response.json())
+    expect(firstPage).toMatchObject({ total: 2, items: [{ itemKey: 'first' }] })
+    expect(firstPage.nextCursor).not.toBeNull()
+    const secondPage = await fetch(`${url}/v1/image-batches/${created.id}/items?limit=1&cursor=${firstPage.nextCursor}`, { headers: headers() }).then((response) => response.json())
+    expect(secondPage).toMatchObject({ total: 2, nextCursor: null, items: [{ itemKey: 'second' }] })
+
+    const eventPage = await fetch(`${url}/v1/image-batches/${created.id}/events?limit=1`, { headers: headers() }).then((response) => response.json())
+    expect(eventPage.total).toBeGreaterThan(0)
+    expect(eventPage.items).toHaveLength(1)
+  })
+
+  it('streams authenticated change notifications over SSE', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const controller = new AbortController()
+    const response = await fetch(`${url}/v1/events`, { headers: headers({ accept: 'text/event-stream' }), signal: controller.signal })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toContain('text/event-stream')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let stream = ''
+    while (!stream.includes('event: ready')) {
+      const chunk = await reader.read()
+      stream += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
+    }
+
+    await fetch(`${url}/v1/image-jobs`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(request({ idempotencyKey: 'sse-change-job-001' })),
+    })
+    while (!stream.includes('event: change')) {
+      const chunk = await reader.read()
+      stream += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done })
+    }
+    expect(stream).toContain('"kind":"job"')
+    controller.abort()
   })
 
   it('reuses one durable logical batch across runner restarts', async () => {
@@ -527,6 +620,27 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(api.repository.events(claimed.id).some((event) => event.detail?.reason === 'manual_retry')).toBe(true)
   })
 
+  it('recreates cancelled batch jobs while preserving replacement history', async () => {
+    const { url } = await start({ concurrency: 0 })
+    const created = await fetch(`${url}/v1/image-batches`, {
+      method: 'POST',
+      headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({
+        idempotencyKey: 'batch-cancel-recovery-001',
+        items: [{ itemKey: 'cancelled-item', request: request({ idempotencyKey: 'batch-cancel-recovery-job-001' }) }],
+      }),
+    }).then((response) => response.json())
+    await fetch(`${url}/v1/image-jobs/${created.items[0].job.id}/cancel`, { method: 'POST', headers: headers() })
+
+    const recoveredResponse = await fetch(`${url}/v1/image-batches/${created.id}/retry-cancelled`, { method: 'POST', headers: headers() })
+    const recovered = await recoveredResponse.json()
+    expect(recoveredResponse.status).toBe(200)
+    expect(recovered).toMatchObject({ state: 'running', stats: { queued: 1, cancelled: 0 } })
+    expect(recovered.items[0].job.id).not.toBe(created.items[0].job.id)
+    expect(recovered.items[0].jobHistory.at(-1)).toMatchObject({ reason: 'cancelled_recovery' })
+    expect(recovered.events.at(-1)).toMatchObject({ event: 'retry_cancelled', detail: { retried: 1 } })
+  })
+
   it('auto-resumes a paused batch after the cooldown window when there are no recent provider failures', async () => {
     const { url, api } = await start({
       concurrency: 0,
@@ -704,15 +818,16 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     }).then((response) => response.json())
     expect(qaPassed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'needs_review',
-      stats: { succeeded: 1, accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
+      acceptanceState: 'accepted',
+      stats: { succeeded: 1, accepted: 1, needsReview: 0, qaPassed: 1, humanReviewPending: 0, humanReviewApproved: 1 },
       items: [{
         itemKey: 'reviewed-item',
         revision: 0,
         generationStatus: 'succeeded',
         qaStatus: 'passed',
-        acceptanceStatus: 'needs_review',
-        humanReviewStatus: 'pending',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted' },
         jobHistory: [{ revision: 0, reason: 'initial', job: { id: firstJob.id } }],
       }],
     })
@@ -762,7 +877,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     })
   })
 
-  it('expands multi-output prompts, records QA, and leaves delivery to human review', async () => {
+  it('expands multi-output prompts and auto-accepts QA-passed delivery', async () => {
     const evaluator = {
       rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
       qa: async () => ({
@@ -814,11 +929,12 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     )
     expect(completed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'needs_review',
-      stats: { total: 2, succeeded: 2, accepted: 0, needsReview: 2, qaPassed: 2, humanReviewPending: 2 },
+      acceptanceState: 'accepted',
+      stats: { total: 2, succeeded: 2, accepted: 2, needsReview: 0, qaPassed: 2, humanReviewPending: 0, humanReviewApproved: 2 },
     })
     expect(completed.items.every((item) => item.automationState === 'done')).toBe(true)
-    expect(completed.items.every((item) => item.humanReviewStatus === 'pending')).toBe(true)
+    expect(completed.items.every((item) => item.humanReviewStatus === 'approved')).toBe(true)
+    expect(completed.items.every((item) => item.humanReview?.decision === 'qa_passed_auto_accepted')).toBe(true)
     expect(completed.items.every((item) => item.job.request.input.prompt.includes('not a contact sheet'))).toBe(true)
   })
 
@@ -871,13 +987,14 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(rewrites).toBe(1)
     expect(completed).toMatchObject({
       state: 'completed',
-      acceptanceState: 'needs_review',
-      stats: { total: 1, succeeded: 1, accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
+      acceptanceState: 'accepted',
+      stats: { total: 1, succeeded: 1, accepted: 1, needsReview: 0, qaPassed: 1, humanReviewPending: 0, humanReviewApproved: 1 },
       items: [{
         itemKey: 'policy',
         revision: 1,
-        acceptanceStatus: 'needs_review',
-        humanReviewStatus: 'pending',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted' },
         job: { request: { input: { prompt: 'A compliant documentary poster' } } },
         jobHistory: [
           { revision: 0, reason: 'initial', job: { state: 'failed' } },
@@ -941,12 +1058,13 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(inspections).toBe(2)
     expect(completed).toMatchObject({
       state: 'completed',
-      stats: { accepted: 0, needsReview: 1, qaPassed: 1, humanReviewPending: 1 },
+      stats: { accepted: 1, needsReview: 0, qaPassed: 1, humanReviewPending: 0, humanReviewApproved: 1 },
       items: [{
         itemKey: 'qa',
         revision: 1,
-        acceptanceStatus: 'needs_review',
-        humanReviewStatus: 'pending',
+        acceptanceStatus: 'accepted',
+        humanReviewStatus: 'approved',
+        humanReview: { actor: 'system', decision: 'qa_passed_auto_accepted' },
         jobHistory: [
           { revision: 0, reason: 'initial' },
           { revision: 1, reason: 'recompose' },
@@ -1441,6 +1559,92 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     await secondApi.close()
   })
 
+  it('resets route_attempts when recovering an interrupted job so a crashed retry budget is not carried forward', async () => {
+    // Regression guard for the first-principles "recover clean" invariant:
+    // a job that had already burned route_attempts before a crash must get a
+    // fresh per-route budget on restart, otherwise the next claim pushes it
+    // past maxAttempts and fails it permanently on the first post-restart try.
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-recover-attempts-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const firstRepository = new TaskRepository(databasePath)
+    const created = firstRepository.createOrGetJob(request({ idempotencyKey: 'recover-attempts-001' }))
+    const jobId = created.job.id
+    // Simulate two prior completed-but-retried provider attempts on this route,
+    // going through the legal state machine: claim (validating) -> failed ->
+    // queued, the same path TaskWorkerPool.process uses for automatic retries.
+    firstRepository.claimNextJob()
+    firstRepository.transition(jobId, 'failed', { error: { code: 'TEST', retryable: true }, skipProjection: true })
+    firstRepository.transition(jobId, 'queued', { detail: { reason: 'automatic_retry' } })
+    firstRepository.claimNextJob()
+    firstRepository.transition(jobId, 'failed', { error: { code: 'TEST', retryable: true }, skipProjection: true })
+    firstRepository.transition(jobId, 'queued', { detail: { reason: 'automatic_retry' } })
+    firstRepository.claimNextJob()
+    // Now mid-flight (validating) with route_attempts already at 3 == maxAttempts.
+    const midFlight = firstRepository.getJob(jobId)
+    expect(midFlight.routeAttempts).toBe(3)
+    firstRepository.close()
+
+    const recoveredRepository = new TaskRepository(databasePath)
+    recoveredRepository.recoverInterruptedJobs()
+    const recovered = recoveredRepository.getJob(jobId)
+    expect(recovered.state).toBe('queued')
+    expect(recovered.routeAttempts).toBe(0)
+    // Total attempts history is preserved for observability; only the
+    // per-route budget is reset so the next claim starts a fresh attempt count.
+    expect(recovered.attempts).toBe(3)
+    recoveredRepository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
+  it('does not mark a non-automation batch item as rejected during an automatic retry', async () => {
+    // Regression guard for the phantom-`failed` projection bug. A transient
+    // failure that is immediately retried goes through the legal state machine
+    // (active -> failed -> queued). Previously the intermediate `failed` ran
+    // syncBatchItemExecutionProjection, which momentarily wrote
+    // acceptance_status='rejected' + failure_class on the batch item. Any
+    // observer snapshotting the row in that window (SSE listener, funnel stats,
+    // a concurrent getBatch) would see a false failure. The fix records the
+    // `failed` event for auditability but skips the projection when a requeue
+    // (retry or fallback) immediately follows; the subsequent `queued` carries
+    // the authoritative retry reason and runs the projection on the durable
+    // next state. We assert the projection is skipped by reading the row
+    // synchronously between the two transitions.
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-phantom-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const repository = new TaskRepository(databasePath)
+    const { batch } = repository.createOrGetBatch({
+      idempotencyKey: 'batch-phantom-retry-001',
+      items: [{ itemKey: 'phantom-item', request: request({ idempotencyKey: 'batch-phantom-retry-job-001' }) }],
+    })
+    const jobId = batch.items[0].job.id
+    repository.claimNextJob()
+    // Simulate the retry path: transient `failed` (skipProjection) then queued.
+    repository.transition(jobId, 'failed', {
+      error: { code: 'PROVIDER_TIMEOUT', retryable: true },
+      detail: { stage: 'generating' },
+      skipProjection: true,
+    })
+    // In the window between the two transitions, the batch item must NOT have
+    // been projected to a terminal rejection. With the old code this row had
+    // acceptance_status='rejected' and failure_class='generation_failed'.
+    const transientItem = repository.db.prepare('SELECT acceptance_status,failure_class FROM batch_items WHERE job_id=?').get(jobId)
+    expect(transientItem.acceptance_status).toBe('pending')
+    expect(transientItem.failure_class).toBeNull()
+    // Now the authoritative requeue, which runs the projection on the real
+    // durable state (`queued` -> running).
+    repository.transition(jobId, 'queued', { detail: { reason: 'automatic_retry' } })
+    const requeuedItem = repository.db.prepare('SELECT acceptance_status,failure_class,qa_status FROM batch_items WHERE job_id=?').get(jobId)
+    expect(requeuedItem.acceptance_status).toBe('pending')
+    expect(requeuedItem.failure_class).toBeNull()
+    expect(requeuedItem.qa_status).toBe('not_run')
+    // The `failed` event is still recorded for observability/audit.
+    const failureEvents = repository.events(jobId).filter((event) => event.state === 'failed')
+    expect(failureEvents).toHaveLength(1)
+    expect(failureEvents[0].detail.stage).toBe('generating')
+    repository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
   it('prevents two task API instances from driving the same state directory', async () => {
     const first = await start({ concurrency: 0 })
     await expect(createTaskApi({ stateDir: first.stateDir, token: 'other-token', concurrency: 0 })).rejects.toMatchObject({ code: 'STATE_DIR_LOCKED' })
@@ -1801,7 +2005,7 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(createHash('sha256').update(finalFile).digest('hex')).toBe(finalManifest.sha256)
   })
 
-  it('does not auto-accept items in automation-enabled batches', async () => {
+  it('auto-accepts QA-passed items in automation-enabled batches', async () => {
     const evaluator = {
       rewrite: async () => ({ prompt: 'unused rewrite', changes: '' }),
       qa: async () => ({
@@ -1842,8 +2046,9 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
       (batch) => batch.state === 'completed' && batch.stats.qaPassed === 1,
     )
     const item = completed.items[0]
-    expect(item.acceptanceStatus).toBe('needs_review')
-    expect(item.humanReviewStatus).toBe('pending')
+    expect(item.acceptanceStatus).toBe('accepted')
+    expect(item.humanReviewStatus).toBe('approved')
+    expect(item.humanReview).toMatchObject({ actor: 'system', decision: 'qa_passed_auto_accepted' })
     expect(item.review.autoAccepted).toBeUndefined()
   })
 })

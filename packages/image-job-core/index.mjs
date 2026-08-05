@@ -318,7 +318,19 @@ export function validateImageJobRequest(request) {
   if (!request.idempotencyKey || typeof request.idempotencyKey !== 'string') errors.push('idempotencyKey is required')
   if (!request.input || typeof request.input !== 'object') errors.push('input is required')
   if (!request.input?.prompt && !request.input?.sourceAssetId) errors.push('input.prompt or input.sourceAssetId is required')
-  if (request.composition?.ratio && !parseRatio(request.composition.ratio)) errors.push('composition.ratio is invalid')
+  if (request.composition?.ratio) {
+    const parsed = parseRatio(request.composition.ratio)
+    if (!parsed) {
+      errors.push('composition.ratio is invalid')
+    } else if (!COMMON_IMAGE_RATIOS.includes(request.composition.ratio) && !request.output?.dimensions) {
+      // A ratio outside the supported preset set is only accepted when the
+      // caller also pins output.dimensions explicitly — otherwise the engine
+      // would silently fall back to an untested arbitrary-ratio size calc and
+      // the user gets a composition they did not ask for. Fail fast at request
+      // time instead of deep inside the worker.
+      errors.push(`composition.ratio must be one of ${COMMON_IMAGE_RATIOS.join(', ')} unless output.dimensions is provided`)
+    }
+  }
   if (request.generation?.apiMode !== undefined && !API_MODES.includes(request.generation.apiMode)) errors.push(`generation.apiMode must be one of ${API_MODES.join(', ')}`)
   if (request.generation?.fallback !== undefined) {
     const fallback = request.generation.fallback

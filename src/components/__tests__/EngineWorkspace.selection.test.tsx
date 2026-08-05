@@ -15,6 +15,10 @@ const apiMocks = vi.hoisted(() => ({
   listImageBatches: vi.fn(),
   getImageJob: vi.fn(),
   getImageBatch: vi.fn(),
+  getImageBatchSummary: vi.fn(),
+  listImageBatchItems: vi.fn(),
+  listImageBatchEvents: vi.fn(),
+  subscribeImageTaskEvents: vi.fn(),
   getImageAssetBlob: vi.fn(),
   readLocalImageTaskApiConfig: vi.fn(),
 }))
@@ -173,6 +177,13 @@ describe('EngineWorkspace inspector selection', () => {
     apiMocks.listImageBatches.mockResolvedValue({ items: [batch] })
     apiMocks.getImageJob.mockResolvedValue(job)
     apiMocks.getImageBatch.mockResolvedValue(batch)
+    apiMocks.getImageBatchSummary.mockResolvedValue((({ items: _items, events: _events, ...summary }) => summary)(batch))
+    apiMocks.listImageBatchItems.mockResolvedValue({ items: batch.items, nextCursor: null, total: batch.stats.total })
+    apiMocks.listImageBatchEvents.mockResolvedValue({ items: batch.events, nextCursor: null, total: batch.events.length })
+    apiMocks.subscribeImageTaskEvents.mockImplementation((_config, options) => new Promise((_resolve, reject) => {
+      options.onOpen?.()
+      options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
   })
 
   afterEach(() => cleanup())
@@ -191,7 +202,7 @@ describe('EngineWorkspace inspector selection', () => {
 
   it('ignores a stale batch detail response after a job is selected', async () => {
     let resolveBatch!: (value: ImageBatchV1) => void
-    apiMocks.getImageBatch.mockImplementationOnce(() => new Promise((resolve) => {
+    apiMocks.getImageBatchSummary.mockImplementationOnce(() => new Promise((resolve) => {
       resolveBatch = resolve
     }))
     render(<EngineWorkspace />)
@@ -200,7 +211,7 @@ describe('EngineWorkspace inspector selection', () => {
     fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
     expect(await screen.findByText('Job detail')).toBeTruthy()
 
-    resolveBatch(batch)
+    resolveBatch((({ items: _items, events: _events, ...summary }) => summary)(batch) as ImageBatchV1)
 
     await waitFor(() => {
       expect(screen.queryByText('Batch detail')).toBeNull()
@@ -235,7 +246,7 @@ describe('EngineWorkspace inspector selection', () => {
 
     const activeSection = await screen.findByLabelText('执行中')
     const attentionSection = screen.getByLabelText('待处理')
-    const historySection = screen.getByLabelText('历史记录')
+    const historySection = screen.getByLabelText('已归档')
     expect(within(activeSection).getByText('Active batch')).toBeTruthy()
     expect(within(attentionSection).getByText('Interrupted batch')).toBeTruthy()
     expect(within(historySection).getByText('Selection test batch')).toBeTruthy()
@@ -253,5 +264,55 @@ describe('EngineWorkspace inspector selection', () => {
     } finally {
       visibilityListenerSpy.mockRestore()
     }
+  })
+
+  it('preserves the next page cursor when an event refreshes the first page', async () => {
+    const secondJob = {
+      ...job,
+      id: 'job-selection-second',
+      request: {
+        ...job.request,
+        idempotencyKey: 'selection-test-second',
+        input: { prompt: 'Second page image' },
+      },
+    } satisfies ImageJobV1
+    const thirdJob = {
+      ...job,
+      id: 'job-selection-third',
+      request: {
+        ...job.request,
+        idempotencyKey: 'selection-test-third',
+        input: { prompt: 'Third page image' },
+      },
+    } satisfies ImageJobV1
+    const stats = { ...jobList.stats, total: 3, terminal: 3, succeeded: 3, matching: 3, byState: { ...jobList.stats.byState, succeeded: 3 } }
+    apiMocks.getImageTaskCapabilities.mockResolvedValue({
+      ...capabilities,
+      capabilities: { ...capabilities.capabilities, events: { transport: 'sse' } },
+    })
+    apiMocks.listImageJobs.mockImplementation((_config, options = {}) => {
+      if (options.cursor === 'cursor-2') return Promise.resolve({ items: [thirdJob], nextCursor: null, stats })
+      if (options.cursor === 'cursor-1') return Promise.resolve({ items: [secondJob], nextCursor: 'cursor-2', stats })
+      return Promise.resolve({ items: [job], nextCursor: 'cursor-1', stats })
+    })
+    let announceChange: (() => void) | undefined
+    apiMocks.subscribeImageTaskEvents.mockImplementation((_config, options) => new Promise((_resolve, reject) => {
+      announceChange = options.onChange
+      options.onOpen?.()
+      options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
+
+    render(<EngineWorkspace />)
+    fireEvent.click(await screen.findByRole('button', { name: '加载更早任务' }, { timeout: 10_000 }))
+    expect(await screen.findByText('Second page image')).toBeTruthy()
+
+    announceChange?.()
+    await waitFor(() => {
+      expect(apiMocks.listImageJobs.mock.calls.filter(([, options]) => !options?.cursor)).toHaveLength(2)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '加载更早任务' }))
+    expect(await screen.findByText('Third page image')).toBeTruthy()
+    expect(apiMocks.listImageJobs.mock.calls.some(([, options]) => options?.cursor === 'cursor-2')).toBe(true)
   })
 })
