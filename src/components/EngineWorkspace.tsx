@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
 import {
   Activity,
+  ArrowLeft,
   Ban,
   Check,
   ChevronRight,
@@ -1435,16 +1436,16 @@ export default function EngineWorkspace() {
           </div>
         </header>
 
-        <section className="hidden grid-cols-4 border-b border-stone-300 dark:border-white/10 sm:grid">
+        <section className="grid grid-cols-4 border-b border-stone-300 dark:border-white/10">
           {[
             ['任务总数', stats.total],
             ['执行中', stats.active],
             ['已成功', stats.succeeded],
             ['失败', stats.failed],
           ].map(([label, value]) => (
-            <div key={label} className="border-r border-stone-300 px-2 py-4 last:border-r-0 dark:border-white/10 sm:px-4">
-              <div className="font-mono text-xl font-semibold sm:text-2xl">{value}</div>
-              <div className="mt-1 text-[10px] font-medium uppercase text-stone-400 sm:text-xs">{label}</div>
+            <div key={label} className="border-r border-stone-300 px-2 py-2 last:border-r-0 dark:border-white/10 sm:px-4 sm:py-4">
+              <div className="font-mono text-base font-semibold sm:text-2xl">{value}</div>
+              <div className="mt-0.5 text-[9px] font-medium uppercase text-stone-400 sm:mt-1 sm:text-xs">{label}</div>
             </div>
           ))}
         </section>
@@ -1719,7 +1720,14 @@ function NewJobForm({
           onChange={(event) => onChange({ ...draft, model: event.target.value })}
           className="mt-2 h-10 w-full rounded-md border border-stone-300 bg-white px-3 font-mono text-sm outline-none focus:border-[#356c82] dark:border-white/10 dark:bg-white/[0.04]"
           placeholder="留空则使用引擎默认模型"
+          list="engine-model-suggestions"
+          autoComplete="off"
         />
+        <datalist id="engine-model-suggestions">
+          {capabilities.capabilities.generation.defaultModel
+            ? <option value={capabilities.capabilities.generation.defaultModel} />
+            : null}
+        </datalist>
       </label>
       <div className="mt-4 border-t border-stone-300 pt-4 dark:border-white/10">
         <label className="flex items-center justify-between gap-3 text-xs font-medium text-stone-500 dark:text-stone-400">
@@ -1952,7 +1960,10 @@ function BatchInspector({
   onClose: () => void
 }) {
   const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'not_run' | 'pending' | 'approved' | 'rejected' | 'failed' | 'cancelled'>('pending')
-  const autoAcceptedCount = batch.items.filter((item) => item.humanReviewStatus === 'approved' && item.humanReview?.actor === 'system').length
+  const autoAcceptedCount = useMemo(
+    () => batch.items.filter((item) => item.humanReviewStatus === 'approved' && item.humanReview?.actor === 'system').length,
+    [batch.items],
+  )
   const humanApprovedCount = Math.max(0, batch.stats.humanReviewApproved - autoAcceptedCount)
   const funnel = [
     { label: '执行完成', value: batch.stats.terminal, tone: 'bg-sky-500' },
@@ -1968,7 +1979,7 @@ function BatchInspector({
   const etaMs = remaining * averageMs
   const throughput = elapsedMs > 0 ? batch.stats.terminal / (elapsedMs / 60_000) : 0
   const retryCount = batch.items.reduce((sum, item) => sum + Math.max(0, item.job.attempts - 1), 0)
-  const reviewItems = batch.items.filter((item) => {
+  const reviewItems = useMemo(() => batch.items.filter((item) => {
     if (reviewFilter === 'warnings') return item.qaStatus === 'needs_review' || item.qaStatus === 'failed'
     if (reviewFilter === 'not_run') return item.qaStatus === 'not_run'
     if (reviewFilter === 'pending') return item.humanReviewStatus === 'pending'
@@ -1977,9 +1988,17 @@ function BatchInspector({
     if (reviewFilter === 'failed') return item.job.state === 'failed'
     if (reviewFilter === 'cancelled') return item.job.state === 'cancelled'
     return true
-  })
+  }), [batch.items, reviewFilter])
   return (
     <div>
+      <button
+        type="button"
+        onClick={onClose}
+        className="mb-3 inline-flex items-center gap-1.5 rounded-md border border-stone-300 px-2.5 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-100 lg:hidden dark:border-white/10 dark:text-stone-300 dark:hover:bg-white/[0.06]"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+        返回列表
+      </button>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[10px] font-medium uppercase text-stone-400">Batch detail</div>
@@ -2248,6 +2267,14 @@ function JobInspector({
 }) {
   return (
     <div>
+      <button
+        type="button"
+        onClick={onClose}
+        className="mb-3 inline-flex items-center gap-1.5 rounded-md border border-stone-300 px-2.5 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-100 lg:hidden dark:border-white/10 dark:text-stone-300 dark:hover:bg-white/[0.06]"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+        返回列表
+      </button>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[10px] font-medium uppercase text-stone-400">Job detail</div>

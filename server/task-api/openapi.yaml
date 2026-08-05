@@ -16,6 +16,18 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ImageTaskCapabilities' }
+  /v1/events:
+    get:
+      operationId: subscribeImageTaskEvents
+      description: Server-Sent Events stream of job and batch change notifications. Each `event: change` frame signals that clients should re-fetch affected resources; the server does not push full payloads, only invalidation signals.
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: 'Frames of the form `event: change\ndata: {"kind":"job|batch","id":"...","state":"..."}\n\n`'
   /v1/assets/uploads:
     post:
       operationId: uploadImageAsset
@@ -161,7 +173,72 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ImageBatch' }
-        '404': { description: Batch not found }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/image-batches/{id}/summary:
+    get:
+      operationId: getImageBatchSummary
+      description: Lightweight aggregate view of one batch without the full items/events payload, for list and dashboard rendering.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Batch summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatchSummary' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/image-batches/{id}/items:
+    get:
+      operationId: listImageBatchItems
+      description: Cursor-paginated batch items, newest-first by position.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated batch items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ImageBatch/properties/items/items' }
+                  nextCursor: { type: [string, 'null'] }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/image-batches/{id}/events:
+    get:
+      operationId: listImageBatchEvents
+      description: Cursor-paginated batch events (item_qa_recorded, runner_acquired, control transitions, etc.).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated batch events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ImageBatch/properties/events/items' }
+                  nextCursor: { type: [string, 'null'] }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/image-batches/by-logical-key/{logicalKey}:
     get:
       operationId: getImageBatchByLogicalKey
@@ -288,7 +365,20 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ImageBatch' }
-        '404': { description: Batch not found }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/image-batches/{id}/retry-cancelled:
+    post:
+      operationId: retryCancelledImageBatchJobs
+      description: Requeue every cancelled batch item with a fresh replacement job (the original job id cannot be reused once terminal).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Cancelled items replaced and the batch resumed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageBatch' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/image-batches/{id}/items/{itemKey}/review:
     post:
       operationId: reviewImageBatchItem
@@ -392,7 +482,33 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+  responses:
+    NotFound:
+      description: The referenced resource was not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: The request conflicts with the current resource state
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    BadRequest:
+      description: The request body failed validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
   schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: 'Machine-readable error code (e.g. JOB_NOT_RETRYABLE, RUNNER_LEASE_HELD, STATE_DIR_LOCKED)' }
+            message: { type: string }
     ImageJobState:
       type: string
       enum: [queued, validating, generating, source_ready, enhancing, finalizing, succeeded, failed, cancelled]
@@ -752,4 +868,4 @@ components:
               type: object
               required: [transport]
               properties:
-                transport: { const: polling }
+                transport: { const: sse }
