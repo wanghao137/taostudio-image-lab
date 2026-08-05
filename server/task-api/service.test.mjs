@@ -1559,6 +1559,92 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     await secondApi.close()
   })
 
+  it('resets route_attempts when recovering an interrupted job so a crashed retry budget is not carried forward', async () => {
+    // Regression guard for the first-principles "recover clean" invariant:
+    // a job that had already burned route_attempts before a crash must get a
+    // fresh per-route budget on restart, otherwise the next claim pushes it
+    // past maxAttempts and fails it permanently on the first post-restart try.
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-recover-attempts-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const firstRepository = new TaskRepository(databasePath)
+    const created = firstRepository.createOrGetJob(request({ idempotencyKey: 'recover-attempts-001' }))
+    const jobId = created.job.id
+    // Simulate two prior completed-but-retried provider attempts on this route,
+    // going through the legal state machine: claim (validating) -> failed ->
+    // queued, the same path TaskWorkerPool.process uses for automatic retries.
+    firstRepository.claimNextJob()
+    firstRepository.transition(jobId, 'failed', { error: { code: 'TEST', retryable: true }, skipProjection: true })
+    firstRepository.transition(jobId, 'queued', { detail: { reason: 'automatic_retry' } })
+    firstRepository.claimNextJob()
+    firstRepository.transition(jobId, 'failed', { error: { code: 'TEST', retryable: true }, skipProjection: true })
+    firstRepository.transition(jobId, 'queued', { detail: { reason: 'automatic_retry' } })
+    firstRepository.claimNextJob()
+    // Now mid-flight (validating) with route_attempts already at 3 == maxAttempts.
+    const midFlight = firstRepository.getJob(jobId)
+    expect(midFlight.routeAttempts).toBe(3)
+    firstRepository.close()
+
+    const recoveredRepository = new TaskRepository(databasePath)
+    recoveredRepository.recoverInterruptedJobs()
+    const recovered = recoveredRepository.getJob(jobId)
+    expect(recovered.state).toBe('queued')
+    expect(recovered.routeAttempts).toBe(0)
+    // Total attempts history is preserved for observability; only the
+    // per-route budget is reset so the next claim starts a fresh attempt count.
+    expect(recovered.attempts).toBe(3)
+    recoveredRepository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
+  it('does not mark a non-automation batch item as rejected during an automatic retry', async () => {
+    // Regression guard for the phantom-`failed` projection bug. A transient
+    // failure that is immediately retried goes through the legal state machine
+    // (active -> failed -> queued). Previously the intermediate `failed` ran
+    // syncBatchItemExecutionProjection, which momentarily wrote
+    // acceptance_status='rejected' + failure_class on the batch item. Any
+    // observer snapshotting the row in that window (SSE listener, funnel stats,
+    // a concurrent getBatch) would see a false failure. The fix records the
+    // `failed` event for auditability but skips the projection when a requeue
+    // (retry or fallback) immediately follows; the subsequent `queued` carries
+    // the authoritative retry reason and runs the projection on the durable
+    // next state. We assert the projection is skipped by reading the row
+    // synchronously between the two transitions.
+    const stateDir = await mkdtemp(join(tmpdir(), 'taostudio-task-api-phantom-'))
+    const databasePath = join(stateDir, 'jobs.sqlite')
+    const repository = new TaskRepository(databasePath)
+    const { batch } = repository.createOrGetBatch({
+      idempotencyKey: 'batch-phantom-retry-001',
+      items: [{ itemKey: 'phantom-item', request: request({ idempotencyKey: 'batch-phantom-retry-job-001' }) }],
+    })
+    const jobId = batch.items[0].job.id
+    repository.claimNextJob()
+    // Simulate the retry path: transient `failed` (skipProjection) then queued.
+    repository.transition(jobId, 'failed', {
+      error: { code: 'PROVIDER_TIMEOUT', retryable: true },
+      detail: { stage: 'generating' },
+      skipProjection: true,
+    })
+    // In the window between the two transitions, the batch item must NOT have
+    // been projected to a terminal rejection. With the old code this row had
+    // acceptance_status='rejected' and failure_class='generation_failed'.
+    const transientItem = repository.db.prepare('SELECT acceptance_status,failure_class FROM batch_items WHERE job_id=?').get(jobId)
+    expect(transientItem.acceptance_status).toBe('pending')
+    expect(transientItem.failure_class).toBeNull()
+    // Now the authoritative requeue, which runs the projection on the real
+    // durable state (`queued` -> running).
+    repository.transition(jobId, 'queued', { detail: { reason: 'automatic_retry' } })
+    const requeuedItem = repository.db.prepare('SELECT acceptance_status,failure_class,qa_status FROM batch_items WHERE job_id=?').get(jobId)
+    expect(requeuedItem.acceptance_status).toBe('pending')
+    expect(requeuedItem.failure_class).toBeNull()
+    expect(requeuedItem.qa_status).toBe('not_run')
+    // The `failed` event is still recorded for observability/audit.
+    const failureEvents = repository.events(jobId).filter((event) => event.state === 'failed')
+    expect(failureEvents).toHaveLength(1)
+    expect(failureEvents[0].detail.stage).toBe('generating')
+    repository.close()
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
   it('prevents two task API instances from driving the same state directory', async () => {
     const first = await start({ concurrency: 0 })
     await expect(createTaskApi({ stateDir: first.stateDir, token: 'other-token', concurrency: 0 })).rejects.toMatchObject({ code: 'STATE_DIR_LOCKED' })

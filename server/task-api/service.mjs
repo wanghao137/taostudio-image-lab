@@ -468,6 +468,7 @@ export class TaskRepository {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
@@ -674,10 +675,21 @@ export class TaskRepository {
     this.db.prepare("UPDATE provider_calls SET state='interrupted', completed_at=?, error_json=? WHERE state='started'")
       .run(now(), JSON.stringify({ code: 'WORKER_RESTARTED', message: 'provider call was interrupted by worker restart' }))
     const placeholders = ACTIVE_STATES.map(() => '?').join(',')
-    const interrupted = this.db.prepare(`SELECT id,state FROM jobs WHERE state IN (${placeholders})`).all(...ACTIVE_STATES)
+    const interrupted = this.db.prepare(`SELECT id,state,route_attempts,attempts FROM jobs WHERE state IN (${placeholders})`).all(...ACTIVE_STATES)
     for (const job of interrupted) {
-      this.db.prepare("UPDATE jobs SET state='queued', available_at=0, updated_at=? WHERE id=?").run(now(), job.id)
-      this.recordEvent(job.id, 'queued', { reason: 'recovered_after_restart', interruptedState: job.state })
+      // A crash mid-flight means the in-progress attempt never completed, so
+      // the accumulated route_attempts must not be carried forward — otherwise
+      // the next claim would push a twice-retried job straight past its
+      // maxAttempts ceiling and fail it permanently on the first post-restart
+      // try. Reset route_attempts (and clear the stale error) so the job gets a
+      // clean retry budget, matching manual retryJob() semantics.
+      this.db.prepare("UPDATE jobs SET state='queued', route_attempts=0, error_json=NULL, available_at=0, updated_at=? WHERE id=?").run(now(), job.id)
+      this.recordEvent(job.id, 'queued', {
+        reason: 'recovered_after_restart',
+        interruptedState: job.state,
+        previousRouteAttempts: job.route_attempts,
+        previousAttempts: job.attempts,
+      })
     }
     return interrupted.length
   }
@@ -1784,7 +1796,13 @@ export class TaskRepository {
       .run(nextState, mutation.resetAttempts === true ? 1 : 0, mutation.routeIndex ?? null, mutation.resetRouteAttempts === true ? 1 : 0, mutation.clearCancel === true ? 1 : 0, options.sourceAssetId ?? null, options.finalAssetId ?? null, options.error ? JSON.stringify(options.error) : null, options.result ? JSON.stringify(options.result) : null, options.availableAt ?? 0, timestamp, id)
     this.recordEvent(id, nextState, options.detail ?? null)
     const next = this.getJob(id)
-    this.syncBatchItemExecutionProjection(id, next)
+    // Skip the batch projection for an intermediate state that is immediately
+    // followed by another transition (e.g. the transient `failed` recorded
+    // solely to satisfy the state machine before an automatic retry/fallback
+    // requeues the job). Running the projection on that phantom `failed` would
+    // momentarily mark the batch item as `rejected`, then flip it back on the
+    // immediate requeue — a visible lie to SSE listeners and the funnel stats.
+    if (options.skipProjection !== true) this.syncBatchItemExecutionProjection(id, next)
     return next
   }
 
@@ -2470,12 +2488,19 @@ export class TaskWorkerPool {
         })
         providerCallFinished = true
       }
-      this.repository.transition(jobId, 'failed', { error: detail, detail })
+      // Record the failure as an event + error_json (it is a real observation
+      // of a failed attempt), but mark it transient via skipProjection so the
+      // batch item is NOT momentarily marked `rejected` before the immediate
+      // requeue below flips it back. The subsequent `queued` transition carries
+      // the authoritative retry/fallback reason and runs the projection on the
+      // real, durable next state.
+      const transient = retryable || canFallback
+      this.repository.transition(jobId, 'failed', { error: detail, detail, skipProjection: transient })
       if (retryable) {
         const delay = Math.min(this.providerRetryBaseMs * (2 ** (current.routeAttempts - 1)), this.providerRetryBaseMs * 4)
         this.repository.transition(jobId, 'queued', {
           availableAt: Date.now() + delay,
-          detail: { reason: 'automatic_retry', delay, route: current.actualRoute },
+          detail: { reason: 'automatic_retry', delay, route: current.actualRoute, transientFailure: detail },
         })
       } else if (canFallback) {
         const fallbackRoute = routeFromRequest(current.request, 1)
