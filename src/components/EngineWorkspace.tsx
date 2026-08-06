@@ -410,7 +410,7 @@ function batchPresentationState(batch: ImageBatchSummaryV1): BatchPresentationSt
   if (batch.state === 'paused') return 'paused'
   if (batch.stats.humanReviewPending > 0 || batch.acceptanceState === 'needs_review') return 'waiting_human'
   if (batchHasPendingQa(batch)) return 'waiting_qa'
-  if (batch.stats.failed > 0 || batch.stats.cancelled > 0) return 'partial_failure'
+  if (batch.stats.failed > 0) return 'partial_failure'
   if (batch.acceptanceState === 'rejected' || batch.stats.rejected > 0) return 'rejected'
   if (batch.stats.accepted > 0 && batch.stats.accepted === batch.stats.total) return 'delivery_ready'
   return 'archived'
@@ -449,7 +449,7 @@ function BatchQueueRow({
   selected: boolean
   onSelect: (batch: ImageBatchSummaryV1) => void
 }) {
-  const issueCount = batch.stats.failed + batch.stats.cancelled + batch.stats.needsReview + batch.stats.rejected
+  const issueCount = batch.stats.failed + batch.stats.needsReview + batch.stats.rejected
   return (
     <button
       type="button"
@@ -460,8 +460,8 @@ function BatchQueueRow({
         <div className="truncate text-sm font-medium" title={batch.name || batch.id}>{displayBatchName(batch)}</div>
         <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-stone-400">
           <span>{batch.stats.succeeded}/{batch.stats.total} 完成</span>
-          {batch.stats.failed > 0 && <span>{batch.stats.failed} 失败</span>}
-          {batch.stats.cancelled > 0 && <span>{batch.stats.cancelled} 取消</span>}
+          {batch.stats.failed > 0 && <span className="text-red-500 dark:text-red-300">{batch.stats.failed} 失败</span>}
+          {batch.stats.cancelled > 0 && <span className="text-amber-600 dark:text-amber-300">{batch.stats.cancelled} 已中断</span>}
           {batch.stats.qaNeedsReview + batch.stats.qaFailed > 0 && <span>{batch.stats.qaNeedsReview + batch.stats.qaFailed} QA 告警</span>}
           {batch.stats.needsReview > 0 && <span>{batch.stats.needsReview} 待人工确认</span>}
         </div>
@@ -1176,7 +1176,6 @@ export default function EngineWorkspace() {
     const attentionIds = new Set(needsAttention.map((batch) => batch.id))
     const incomplete = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && (
       batch.stats.failed > 0
-      || batch.stats.cancelled > 0
       || batch.acceptanceState === 'rejected'
       || batch.stats.rejected > 0
     ))

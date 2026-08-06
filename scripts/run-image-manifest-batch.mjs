@@ -254,11 +254,14 @@ const scopeRange = plannedScope.length
 const displayName = `${batchName} ${scopeRange} ${runId}`
 // A logical batch describes one exact manifest scope. runId is intentionally
 // absent: it identifies a runner attempt, not a new generation workload.
+// The key uses ALL manifest-ready item keys (not the plannedScope subset) so
+// it stays stable as items complete — enabling resume to reattach to the same
+// engine batch regardless of how many items have succeeded since last run.
 const logicalBatchKey = `${batchKey}-${hash(JSON.stringify({
   outputRoot,
   selectedIndex,
   manifest,
-  itemKeys: plannedScope.map((entry) => entry.itemKey),
+  itemKeys: manifestReady.map((entry) => entry.itemKey),
 })).slice(0, 40)}`
 if (preflightOnly) {
   console.log(`BATCH_PREFLIGHT_OK key=${batchKey} selected=${plannedScope.length}`)
@@ -1073,7 +1076,7 @@ async function processEntry(entry, workerId) {
     }
     state.items[stateKey] = {
       ...state.items[stateKey],
-      status: runnerLeaseLost ? 'interrupted' : 'batch_error',
+      status: (runnerLeaseLost || error?.code === 'PROVIDER_UNAVAILABLE') ? 'interrupted' : 'batch_error',
       completedAt: new Date().toISOString(),
       revisions,
       error: {
@@ -1102,6 +1105,27 @@ if (queuedEntries.length) {
   const poolSize = Math.min(runnerConcurrency, queuedEntries.length) || 1
   console.log(`WORKER_POOL size=${poolSize} entries=${queuedEntries.length} (runnerConcurrency=${runnerConcurrency})`)
   let nextEntryIndex = 0
+
+  // Periodic heartbeat: flush updatedAt + progress to status.json every 30s
+  // so the UI can show "processing X/N" even during long image_job_wait calls.
+  const heartbeatTimer = setInterval(async () => {
+    if (pauseReason) return
+    try {
+      await diskMutex(async () => {
+        state.updatedAt = new Date().toISOString()
+        state.heartbeat = {
+          activeWorkers: poolSize,
+          processedSoFar: nextEntryIndex,
+          totalQueued: queuedEntries.length,
+          nextItemKey: queuedEntries[nextEntryIndex]?.itemKey || null,
+        }
+        await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+      })
+    } catch {
+      // Heartbeat is best-effort; don't let disk write errors kill the batch.
+    }
+  }, 30_000)
+
   const workers = Array.from({ length: poolSize }, async (_, workerId) => {
     while (!pauseReason) {
       const index = nextEntryIndex++
@@ -1110,6 +1134,7 @@ if (queuedEntries.length) {
     }
   })
   await Promise.all(workers)
+  clearInterval(heartbeatTimer)
 
   if (pauseReason && batchId) {
     try {

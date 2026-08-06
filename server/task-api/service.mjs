@@ -1431,6 +1431,25 @@ export class TaskRepository {
     }
   }
 
+  cancelActiveBatchJobs(batchId) {
+    // Request cooperative cancellation for all in-flight (non-terminal,
+    // non-queued) jobs in this batch.  Queued jobs are already gated by
+    // claimNextJob's control_state check, so they don't need cancellation.
+    // In-flight jobs are checked via shouldCancel() at each stage boundary
+    // inside process(), so setting cancel_requested lets them exit gracefully
+    // at the next checkpoint rather than burning provider calls that are
+    // doomed to fail (e.g. when the provider is down).
+    const activeJobs = this.db.prepare(`
+      SELECT j.id FROM jobs j
+      JOIN batch_items bi ON bi.job_id = j.id
+      WHERE bi.batch_id = ? AND j.state IN ('validating','generating','source_ready','enhancing','finalizing')
+    `).all(batchId)
+    for (const job of activeJobs) {
+      this.db.prepare('UPDATE jobs SET cancel_requested=1, updated_at=? WHERE id=?').run(now(), job.id)
+    }
+    return activeJobs.length
+  }
+
   setBatchControlState(id, controlState, reason) {
     const batch = this.getBatch(id)
     if (!batch) return null
@@ -1443,7 +1462,17 @@ export class TaskRepository {
     if (batch.controlState !== controlState) {
       const detailJson = reason ? JSON.stringify({ reason }) : null
       this.db.prepare('UPDATE batches SET control_state=?,pause_reason=?,updated_at=? WHERE id=?').run(controlState, reason || null, now(), id)
-      this.recordBatchEvent(id, controlState, detailJson ? JSON.parse(detailJson) : null)
+      // When pausing, cascade cancellation to in-flight jobs so they don't
+      // continue burning provider calls that will fail.  This prevents the
+      // scenario where a provider outage causes dozens of jobs to be marked
+      // "failed" permanently when they should have been cleanly cancelled.
+      let cancelledInFlight = 0
+      if (controlState === 'paused') {
+        cancelledInFlight = this.cancelActiveBatchJobs(id)
+      }
+      const eventDetail = detailJson ? JSON.parse(detailJson) : {}
+      if (cancelledInFlight > 0) eventDetail.cancelledInFlight = cancelledInFlight
+      this.recordBatchEvent(id, controlState, Object.keys(eventDetail).length ? eventDetail : null)
     }
     return this.getBatch(id)
   }
