@@ -507,6 +507,57 @@ function BatchQueueSection({
   )
 }
 
+// A batch queue section that can collapse its rows behind its header. Used for
+// historical groups (incomplete / archived) so they don't bury the running and
+// needs-attention batches that need immediate attention. The header always shows
+// the count and a chevron; clicking it toggles the rows without losing state.
+function CollapsibleBatchSection({
+  title,
+  batches,
+  selectedBatchId,
+  onSelect,
+  collapsed,
+  onToggle,
+}: {
+  title: string
+  batches: ImageBatchSummaryV1[]
+  selectedBatchId: string | undefined
+  onSelect: (batch: ImageBatchSummaryV1) => void
+  collapsed: boolean
+  onToggle: () => void
+}) {
+  if (!batches.length) return null
+  return (
+    <section aria-label={title} className="border-t border-stone-200 first:border-t-0 dark:border-white/[0.06]">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        aria-controls={`batch-group-${title}`}
+        className="flex w-full items-center justify-between px-2 py-2 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:px-3"
+      >
+        <span className="flex items-center gap-1.5">
+          <ChevronRight className={`h-3 w-3 text-stone-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+          <h3 className="text-[10px] font-medium uppercase text-stone-400">{title}</h3>
+        </span>
+        <span className="font-mono text-[10px] text-stone-400">{batches.length}</span>
+      </button>
+      {!collapsed && (
+        <div id={`batch-group-${title}`} className="divide-y divide-stone-200 dark:divide-white/[0.06]">
+          {batches.map((batch) => (
+            <BatchQueueRow
+              key={batch.id}
+              batch={batch}
+              selected={selectedBatchId === batch.id}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 interface NewJobDraft {
   prompt: string
   ratio: string
@@ -561,6 +612,10 @@ export default function EngineWorkspace() {
   const [showNewBatch, setShowNewBatch] = useState(false)
   const [batchFilter, setBatchFilter] = useState('')
   const [batchFacet, setBatchFacet] = useState<'all' | 'review' | 'failed' | 'cancelled' | 'qa' | 'delivery' | 'low_success' | 'recent'>('all')
+  // Historical batch groups (incomplete / archived) are collapsed by default so
+  // the high-priority running + needs-attention batches stay visible without
+  // being buried under dozens of past batches. Users expand a group on demand.
+  const [collapsedBatchGroups, setCollapsedBatchGroups] = useState<Record<string, boolean>>({ '已结束但不完整': true, '已归档': true })
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
   const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
   const [deliveryDirectoryName, setDeliveryDirectoryName] = useState<string | null>(null)
@@ -576,6 +631,10 @@ export default function EngineWorkspace() {
   const selectedJobId = selectedJob?.id
   const inspectorOpen = showNewJob || showNewBatch || Boolean(selectedJob || selectedBatch)
   const inspectorRef = useRef<HTMLElement>(null)
+  // Sentinel element at the bottom of the job queue. When it scrolls into view
+  // and there is a next page, auto-load older jobs instead of forcing the user
+  // to click a "load more" button.
+  const jobSentinelRef = useRef<HTMLDivElement | null>(null)
   const inspectorSelectionRef = useRef<{
     version: number
     kind: 'none' | 'job' | 'batch'
@@ -763,20 +822,33 @@ export default function EngineWorkspace() {
         state: filter === 'all' ? undefined : filter,
       })
       setJobStats(result.stats)
-      const hadLoadedPages = !cursor && jobs.length > result.items.length
-      const known = new Set(jobs.map((job) => job.id))
-      const refreshed = new Set(result.items.map((job) => job.id))
-      const nextJobs = cursor
-        ? [...jobs, ...result.items.filter((job) => !known.has(job.id))]
-        : hadLoadedPages
-          ? [...result.items, ...jobs.filter((job) => !refreshed.has(job.id))]
-          : result.items
+      const fetchedIds = new Set(result.items.map((job) => job.id))
+      let nextJobs: ImageJobV1[]
+      let resolvedCursor: string | null
+      if (cursor) {
+        // Append-load (older page): keep existing jobs, append only the ones we
+        // don't already have, preserving newest-first order.
+        const known = new Set(jobs.map((job) => job.id))
+        nextJobs = [...jobs, ...result.items.filter((job) => !known.has(job.id))]
+        resolvedCursor = nextJobs.length >= result.stats.matching ? null : result.nextCursor
+      } else {
+        // First-page refresh (SSE poll or manual): replace the first page with
+        // the fresh result, but preserve any previously-appended older pages
+        // whose jobs did not reappear in the refreshed first page. Older-page
+        // jobs are by definition older than the first page, so a job that
+        // genuinely belongs to an older page will not be in the fresh first
+        // page (unless it moved forward in time, which jobs cannot).
+        const olderJobs = jobs.filter((job) => !fetchedIds.has(job.id))
+        nextJobs = [...result.items, ...olderJobs]
+        // Keep the existing cursor if we still have appended older pages;
+        // otherwise adopt the fresh first-page cursor. Only null out when the
+        // merged list actually covers everything matching.
+        resolvedCursor = nextJobs.length >= result.stats.matching
+          ? null
+          : (nextCursor ?? result.nextCursor)
+      }
       setJobs(nextJobs)
-      setNextCursor(nextJobs.length >= result.stats.matching
-        ? null
-        : hadLoadedPages
-          ? nextCursor || result.nextCursor
-          : result.nextCursor)
+      setNextCursor(resolvedCursor)
       setWorkspaceError(null)
       if (selectedJobId) {
         const selectionVersion = inspectorSelectionRef.current.version
@@ -795,6 +867,32 @@ export default function EngineWorkspace() {
     }
   }, [config, filter, jobs, nextCursor, selectedJobId])
 
+  // Auto-load older jobs when the sentinel scrolls into view. Guards against:
+  //   - no next page (nextCursor null)
+  //   - a load already in flight (refreshing)
+  //   - config not ready
+  // The refresh callback is stable per its deps; we read nextCursor/refreshing
+  // from refs inside the observer callback so we don't have to tear down and
+  // rebuild the observer on every state change. (refreshRef is declared below
+  // alongside the polling refs; nextCursorRef/refreshingRef are added there too.)
+  const nextCursorForObserverRef = useRef(nextCursor)
+  nextCursorForObserverRef.current = nextCursor
+  const refreshingForObserverRef = useRef(refreshing)
+  refreshingForObserverRef.current = refreshing
+  useEffect(() => {
+    const sentinel = jobSentinelRef.current
+    if (!sentinel) return
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        const cursor = nextCursorForObserverRef.current
+        if (cursor && !refreshingForObserverRef.current && pollingStateRef.current.config) {
+          void refreshRef.current(pollingStateRef.current.config, cursor)
+        }
+      }
+    }, { rootMargin: '200px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [])
   const connect = useCallback(async (candidate: ImageTaskApiConfig, persist: boolean) => {
     setBusy(true)
     setConnectionError(null)
@@ -1492,10 +1590,29 @@ export default function EngineWorkspace() {
                 </div>
               )}
               <div id="batch-queue-list" className="border-y border-stone-300 dark:border-white/10">
-                <BatchQueueSection title="执行中" batches={batchGroups.active} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
-                <BatchQueueSection title="待处理" batches={batchGroups.needsAttention} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
-                <BatchQueueSection title="已结束但不完整" batches={batchGroups.incomplete} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
-                <BatchQueueSection title="已归档" batches={batchGroups.history} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                {/* Priority groups: running + needs-attention get a min-height quota so
+                    historical batches can never push them out of view. */}
+                <div className="min-h-[120px]">
+                  <BatchQueueSection title="执行中" batches={batchGroups.active} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                  <BatchQueueSection title="待处理" batches={batchGroups.needsAttention} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                </div>
+                {/* Historical groups: collapsed by default, expand on demand. */}
+                <CollapsibleBatchSection
+                  title="已结束但不完整"
+                  batches={batchGroups.incomplete}
+                  selectedBatchId={selectedBatch?.id}
+                  onSelect={handleSelectBatch}
+                  collapsed={collapsedBatchGroups['已结束但不完整'] ?? false}
+                  onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已结束但不完整': !current['已结束但不完整'] }))}
+                />
+                <CollapsibleBatchSection
+                  title="已归档"
+                  batches={batchGroups.history}
+                  selectedBatchId={selectedBatch?.id}
+                  onSelect={handleSelectBatch}
+                  collapsed={collapsedBatchGroups['已归档'] ?? false}
+                  onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已归档': !current['已归档'] }))}
+                />
                 {!batchGroups.filtered.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有匹配的批次</div>}
               </div>
             </div>
@@ -1553,15 +1670,14 @@ export default function EngineWorkspace() {
                 <div className="px-4 py-16 text-center text-sm text-stone-400">当前筛选下没有任务</div>
               )}
             </div>
-            {nextCursor && (
-              <button
-                type="button"
-                onClick={() => void refresh(config, nextCursor)}
-                disabled={refreshing}
-                className="mt-3 w-full rounded-md border border-stone-300 py-2 text-xs font-medium text-stone-600 hover:bg-white dark:border-white/10 dark:text-stone-300 dark:hover:bg-white/[0.04]"
-              >
-                加载更早任务
-              </button>
+            {/* Infinite-scroll sentinel: the IntersectionObserver above fires an
+                auto-load when this enters view. A 200px rootMargin pre-loads
+                before the user reaches the very bottom. Visible feedback shows
+                while loading; an empty sentinel (no cursor) stays invisible. */}
+            {jobs.length > 0 && (
+              <div ref={jobSentinelRef} className="py-3 text-center text-xs text-stone-400">
+                {nextCursor ? (refreshing ? '加载更早任务…' : '向下滚动加载更多') : '没有更早的任务了'}
+              </div>
             )}
           </section>
 
