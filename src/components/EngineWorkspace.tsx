@@ -1184,6 +1184,7 @@ export default function EngineWorkspace() {
     const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id))
     return { filtered, active, needsAttention, incomplete, history }
   }, [batches, batchFacet, batchFilter])
+  const activeOrPendingCount = batchGroups.active.length + batchGroups.needsAttention.length
 
   const handleConnect = async (event: FormEvent) => {
     event.preventDefault()
@@ -1599,11 +1600,18 @@ export default function EngineWorkspace() {
               )}
               <div id="batch-queue-list" className="border-y border-stone-300 dark:border-white/10">
                 {/* Priority groups: running + needs-attention get a min-height quota so
-                    historical batches can never push them out of view. */}
-                <div className="min-h-[120px]">
-                  <BatchQueueSection title="执行中" batches={batchGroups.active} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
-                  <BatchQueueSection title="待处理" batches={batchGroups.needsAttention} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
-                </div>
+                    historical batches can never push them out of view. The quota only
+                    applies while there is something to protect; when both groups are
+                    empty it is dropped and an empty-state hint is shown instead of a
+                    dead blank strip. */}
+                {activeOrPendingCount > 0 ? (
+                  <div className="min-h-[120px]">
+                    <BatchQueueSection title="执行中" batches={batchGroups.active} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                    <BatchQueueSection title="待处理" batches={batchGroups.needsAttention} selectedBatchId={selectedBatch?.id} onSelect={handleSelectBatch} />
+                  </div>
+                ) : (
+                  <div className="px-3 py-5 text-center text-xs text-stone-400">当前没有执行中或待处理的批次</div>
+                )}
                 {/* Historical groups: collapsed by default, expand on demand. */}
                 <CollapsibleBatchSection
                   title="已结束但不完整"
