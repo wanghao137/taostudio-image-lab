@@ -188,9 +188,19 @@ describe('EngineWorkspace inspector selection', () => {
 
   afterEach(() => cleanup())
 
+  // The historical batch groups (已结束但不完整 / 已归档) are collapsed by
+  // default; tests that need to interact with an archived batch must expand it
+  // first by clicking its section header.
+  async function expandArchivedBatches() {
+    // The archived section header is a button with aria-expanded=false.
+    const header = await screen.findByRole('button', { name: /已归档/ }, { timeout: 10_000 })
+    if (header.getAttribute('aria-expanded') === 'false') fireEvent.click(header)
+  }
+
   it('switches from batch detail to the selected job detail', async () => {
     render(<EngineWorkspace />)
 
+    await expandArchivedBatches()
     fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
     expect(await screen.findByText('Batch detail')).toBeTruthy()
 
@@ -207,6 +217,7 @@ describe('EngineWorkspace inspector selection', () => {
     }))
     render(<EngineWorkspace />)
 
+    await expandArchivedBatches()
     fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
     fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
     expect(await screen.findByText('Job detail')).toBeTruthy()
@@ -246,6 +257,9 @@ describe('EngineWorkspace inspector selection', () => {
 
     const activeSection = await screen.findByLabelText('执行中')
     const attentionSection = screen.getByLabelText('待处理')
+    // The archived group is collapsed by default; expand it to assert its rows.
+    const historyHeader = screen.getByRole('button', { name: /已归档/ })
+    fireEvent.click(historyHeader)
     const historySection = screen.getByLabelText('已归档')
     expect(within(activeSection).getByText('Active batch')).toBeTruthy()
     expect(within(attentionSection).getByText('Interrupted batch')).toBeTruthy()
@@ -257,7 +271,9 @@ describe('EngineWorkspace inspector selection', () => {
     try {
       render(<EngineWorkspace />)
 
-      await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 })
+      // The archived batch is collapsed; wait on the job row instead, which is
+      // always rendered, to confirm the workspace mounted and polling started.
+      await screen.findByRole('button', { name: /Selection test image/ }, { timeout: 10_000 })
       await waitFor(() => {
         expect(visibilityListenerSpy.mock.calls.filter(([type]) => type === 'visibilitychange')).toHaveLength(1)
       })
@@ -302,17 +318,49 @@ describe('EngineWorkspace inspector selection', () => {
       options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
     }))
 
+    // The job queue uses an IntersectionObserver sentinel for infinite scroll.
+    // jsdom does not provide IntersectionObserver, so install a minimal stub
+    // whose intersect() method fires the callback as if the sentinel scrolled
+    // into view. This lets the test drive the auto-load without a real layout.
+    const observerCallbacks: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = []
+    class IntersectionObserverStub {
+      constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void) { observerCallbacks.push(cb) }
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal('IntersectionObserver', IntersectionObserverStub)
+    const fireIntersect = () => {
+      for (const cb of observerCallbacks) cb([{ isIntersecting: true }])
+    }
+
     render(<EngineWorkspace />)
-    fireEvent.click(await screen.findByRole('button', { name: '加载更早任务' }, { timeout: 10_000 }))
+    // Wait for the first page to render, then trigger the sentinel to auto-load
+    // the second page (cursor-1). fireIntersect is retried inside waitFor
+    // because the observer ref's cursor is only populated after the first-page
+    // state commit, which may lag the initial render by a tick.
+    await screen.findByText('Selection test image', {}, { timeout: 10_000 })
+    await waitFor(() => {
+      fireIntersect()
+      // Keep retrying until the load is observed via a cursor-1 API call.
+      expect(apiMocks.listImageJobs.mock.calls.some(([, options]) => options?.cursor === 'cursor-1')).toBe(true)
+    }, { timeout: 5000 })
     expect(await screen.findByText('Second page image')).toBeTruthy()
 
+    // An SSE change event refreshes the first page (no cursor). The previously
+    // loaded second page must be preserved — it should not reappear as a
+    // duplicate, and the cursor must remain usable.
     announceChange?.()
     await waitFor(() => {
       expect(apiMocks.listImageJobs.mock.calls.filter(([, options]) => !options?.cursor)).toHaveLength(2)
     })
 
-    fireEvent.click(screen.getByRole('button', { name: '加载更早任务' }))
+    // Trigger the sentinel again to load the third page (cursor-2).
+    await waitFor(() => {
+      fireIntersect()
+      expect(apiMocks.listImageJobs.mock.calls.some(([, options]) => options?.cursor === 'cursor-2')).toBe(true)
+    }, { timeout: 5000 })
     expect(await screen.findByText('Third page image')).toBeTruthy()
     expect(apiMocks.listImageJobs.mock.calls.some(([, options]) => options?.cursor === 'cursor-2')).toBe(true)
+    vi.unstubAllGlobals()
   })
 })

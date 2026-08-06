@@ -879,9 +879,17 @@ export default function EngineWorkspace() {
   nextCursorForObserverRef.current = nextCursor
   const refreshingForObserverRef = useRef(refreshing)
   refreshingForObserverRef.current = refreshing
+  // The sentinel div is conditionally rendered (only when jobs exist), so the
+  // observer effect must re-run once the first page of jobs mounts the
+  // sentinel. hasJobs gates this: it flips false->true exactly once in the
+  // normal flow, attaching the observer then; subsequent job updates read the
+  // latest cursor/refreshing state through refs without re-running the effect.
+  const hasJobs = jobs.length > 0
   useEffect(() => {
+    if (!hasJobs) return
     const sentinel = jobSentinelRef.current
     if (!sentinel) return
+    if (typeof IntersectionObserver === 'undefined') return
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
         const cursor = nextCursorForObserverRef.current
@@ -892,7 +900,7 @@ export default function EngineWorkspace() {
     }, { rootMargin: '200px' })
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [])
+  }, [hasJobs])
   const connect = useCallback(async (candidate: ImageTaskApiConfig, persist: boolean) => {
     setBusy(true)
     setConnectionError(null)
