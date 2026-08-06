@@ -1,8 +1,11 @@
 @echo off
 REM TaoStudio Image Engine launcher wrapper for the Windows Task Scheduler.
-REM The scheduler cannot reliably pass quoted arguments with spaces, so this
-REM thin wrapper exists to invoke the Node supervisor with the right working
-REM directory. Driven by the "TaoStudio Image Engine" scheduled task (logon).
-REM Runs hidden because windowsHide=true is set inside the Node launcher.
+REM
+REM The scheduler runs this .cmd in a transient session; a child started with
+REM "start /b" is tied to that session and is reaped when the task completes,
+REM so the engine dies shortly after logon. Instead we use PowerShell
+REM Start-Process, which spawns a detached, independent process that survives
+REM the task session. -WindowStyle Hidden keeps it background; the Node
+REM launcher itself sets windowsHide=true for the engine child too.
 cd /d "D:\codesolo\taostudio-image-lab"
-start "" /b "C:\Program Files\nodejs\node.exe" "D:\codesolo\taostudio-image-lab\scripts\start-engine.mjs" --daemon
+powershell -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'C:\Program Files\nodejs\node.exe' -ArgumentList 'D:\codesolo\taostudio-image-lab\scripts\start-engine.mjs','--daemon' -WorkingDirectory 'D:\codesolo\taostudio-image-lab' -WindowStyle Hidden"
