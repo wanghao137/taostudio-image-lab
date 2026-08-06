@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import { unlinkSync, existsSync as existsSyncSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { basename, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,6 +12,11 @@ import sharp from 'sharp'
 // undici must not cut connections early. Set undici's own timers to 15 minutes
 // so the engine's application-level timeout is always the primary gate.
 setGlobalDispatcher(new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 }))
+
+// Safe existence check that swallows errors from permission issues etc.
+function existsSyncSafe(filePath) {
+  try { return existsSyncSync(filePath) } catch { return false }
+}
 import {
   API_MODES,
   assertTransition,
@@ -624,6 +630,8 @@ export class TaskRepository {
     const jobColumns = new Set(this.db.prepare('PRAGMA table_info(jobs)').all().map((column) => column.name))
     if (!jobColumns.has('route_index')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_index INTEGER NOT NULL DEFAULT 0')
     if (!jobColumns.has('route_attempts')) this.db.exec('ALTER TABLE jobs ADD COLUMN route_attempts INTEGER NOT NULL DEFAULT 0')
+    // P1-8: Priority column for batch job ordering (higher = claimed first)
+    if (!jobColumns.has('priority')) this.db.exec('ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0')
     const batchColumns = new Set(this.db.prepare('PRAGMA table_info(batches)').all().map((column) => column.name))
     if (!batchColumns.has('automation_json')) this.db.exec('ALTER TABLE batches ADD COLUMN automation_json TEXT')
     if (!batchColumns.has('pause_reason')) this.db.exec('ALTER TABLE batches ADD COLUMN pause_reason TEXT')
@@ -1243,7 +1251,9 @@ export class TaskRepository {
       ? 'completed'
       : row.control_state === 'paused'
         ? 'paused'
-        : 'running'
+        : row.control_state === 'archived'
+          ? 'archived'
+          : 'running'
     const runnerLeaseExpiresAt = Number(row.runner_lease_expires_at || 0)
     return {
       id: row.id,
@@ -1849,7 +1859,7 @@ export class TaskRepository {
       WHERE j.state='queued'
         AND j.available_at<=?
         AND (bi.job_id IS NULL OR b.control_state='running')
-      ORDER BY j.created_at
+      ORDER BY j.priority DESC, j.created_at
       LIMIT 1
     `).get(Date.now())
     if (!row) return null
@@ -1917,6 +1927,113 @@ export class TaskRepository {
   getAsset(id) {
     const row = this.db.prepare('SELECT * FROM assets WHERE id=?').get(id)
     return row ? { manifest: JSON.parse(row.manifest_json), filePath: row.file_path } : null
+  }
+
+  // P0-3: Asset garbage collection — deletes asset files and rows for jobs
+  // whose assets have already been copied to their output directory (harvested).
+  // Returns the number of asset files removed.
+  pruneHarvestedAssets(batchId = null) {
+    let query = `
+      SELECT a.id, a.file_path, a.job_id, a.kind FROM assets a
+      JOIN jobs j ON j.id = a.job_id
+      WHERE j.state = 'succeeded'
+    `
+    const params = []
+    if (batchId) {
+      query += ` AND EXISTS (SELECT 1 FROM batch_items bi WHERE bi.job_id = a.job_id AND bi.batch_id = ?)`
+      params.push(batchId)
+    }
+    const candidates = this.db.prepare(query).all(...params)
+    let removed = 0
+    for (const asset of candidates) {
+      // Only prune if the harvest target file actually exists on disk —
+      // output_path is set at batch creation, not when the asset is copied.
+      // Checking existence prevents deleting the only copy of an asset whose
+      // harvest copy hasn't been written yet (e.g. runner crashed mid-harvest).
+      const bi = this.db.prepare('SELECT output_path FROM batch_items WHERE job_id=?').get(asset.job_id)
+      if (!bi?.output_path) continue
+      const harvestFinal = join(bi.output_path, asset.kind === 'source' ? '原图.png' : '4K.png')
+      if (!existsSyncSafe(harvestFinal)) continue
+      try { unlinkSync(asset.file_path) } catch { /* file already gone */ }
+      this.db.prepare('DELETE FROM assets WHERE id=?').run(asset.id)
+      removed += 1
+    }
+    return removed
+  }
+
+  // P0-3: Also delete orphaned assets not referenced by any job (e.g. from
+  // crash recovery, cancelled jobs, or old revisions). Excludes upload assets
+  // (jobId='upload') which are user-uploaded reference images still in active use.
+  pruneOrphanedAssets() {
+    const orphans = this.db.prepare(`
+      SELECT a.id, a.file_path FROM assets a
+      LEFT JOIN jobs j ON j.id = a.job_id
+      WHERE a.job_id != 'upload'
+        AND (j.id IS NULL OR j.state IN ('failed', 'cancelled'))
+    `).all()
+    let removed = 0
+    for (const row of orphans) {
+      try { unlinkSync(row.file_path) } catch { /* file already gone */ }
+      this.db.prepare('DELETE FROM assets WHERE id=?').run(row.id)
+      removed += 1
+    }
+    return removed
+  }
+
+  // P2-14: Aggregate provider health stats from the provider_calls table.
+  getProviderHealth(sinceIso = null) {
+    const since = sinceIso || new Date(Date.now() - 3600_000).toISOString()
+    const rows = this.db.prepare(`
+      SELECT
+        provider, model,
+        COUNT(*) AS total,
+        SUM(CASE WHEN state = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed,
+        AVG(CASE WHEN completed_at IS NOT NULL AND started_at IS NOT NULL
+            THEN (julianday(completed_at) - julianday(started_at)) * 86400000 ELSE NULL END) AS avg_ms,
+        MAX(started_at) AS last_call
+      FROM provider_calls
+      WHERE completed_at >= ?
+      GROUP BY provider, model
+      ORDER BY total DESC
+    `).all(since)
+    return rows.map((r) => ({
+      provider: r.provider,
+      model: r.model,
+      total: r.total,
+      succeeded: r.succeeded,
+      failed: r.failed,
+      successRate: r.total > 0 ? r.succeeded / r.total : null,
+      avgLatencyMs: r.avg_ms ? Math.round(r.avg_ms) : null,
+      lastCall: r.last_call,
+    }))
+  }
+
+  // P2-11: Archive a completed batch (soft-delete from active list).
+  archiveBatch(id) {
+    const batch = this.getBatch(id)
+    if (!batch) return null
+    this.db.prepare("UPDATE batches SET control_state='archived', updated_at=? WHERE id=?").run(now(), id)
+    this.recordBatchEvent(id, 'archived', null)
+    return this.getBatch(id)
+  }
+
+  // P2-11: Delete a batch and all its items, events, and job history.
+  // Assets are NOT deleted here — use pruneHarvestedAssets first.
+  deleteBatch(id) {
+    const batch = this.getBatch(id)
+    if (!batch) return null
+    const jobIds = this.db.prepare('SELECT job_id FROM batch_items WHERE batch_id=?').all(id).map((r) => r.job_id)
+    this.db.prepare('DELETE FROM batch_item_jobs WHERE batch_id=?').run(id)
+    this.db.prepare('DELETE FROM batch_items WHERE batch_id=?').run(id)
+    this.db.prepare('DELETE FROM batch_events WHERE batch_id=?').run(id)
+    for (const jobId of jobIds) {
+      this.db.prepare('DELETE FROM job_events WHERE job_id=?').run(jobId)
+      this.db.prepare('DELETE FROM provider_calls WHERE job_id=?').run(jobId)
+      this.db.prepare('DELETE FROM jobs WHERE id=?').run(jobId)
+    }
+    this.db.prepare('DELETE FROM batches WHERE id=?').run(id)
+    return { deleted: true, jobsRemoved: jobIds.length }
   }
 
   getBatchItemByJobId(jobId) {
@@ -2788,7 +2905,7 @@ export async function createTaskApi(options = {}) {
       response.setHeader('access-control-allow-origin', cors)
       response.setHeader('vary', 'Origin')
       response.setHeader('access-control-allow-headers', 'authorization,content-type,x-file-name')
-      response.setHeader('access-control-allow-methods', 'GET,POST,OPTIONS')
+      response.setHeader('access-control-allow-methods', 'GET,POST,DELETE,OPTIONS')
     }
     if (request.method === 'OPTIONS') return void response.writeHead(204).end()
     if (!safeEqual(request.headers.authorization, `Bearer ${token}`)) return void json(response, 401, { error: { code: 'UNAUTHORIZED', message: 'Bearer token required' } })
@@ -2979,6 +3096,28 @@ export async function createTaskApi(options = {}) {
           body.reason,
         )
         return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      // P2-11: Batch archive/delete endpoints
+      const batchArchiveMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)\/archive$/)
+      if (request.method === 'POST' && batchArchiveMatch) {
+        const batch = repository.archiveBatch(batchArchiveMatch[1])
+        return void (batch ? json(response, 200, batch) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      const batchDeleteMatch = url.pathname.match(/^\/v1\/image-batches\/([^/]+)$/)
+      if (request.method === 'DELETE' && batchDeleteMatch) {
+        const result = repository.deleteBatch(batchDeleteMatch[1])
+        return void (result ? json(response, 200, result) : json(response, 404, { error: { code: 'NOT_FOUND' } }))
+      }
+      // P0-3: Asset GC endpoint
+      if (request.method === 'POST' && url.pathname === '/v1/assets/prune') {
+        const body = JSON.parse((await readBody(request, 4096)).toString('utf8').trim() || '{}')
+        const harvested = repository.pruneHarvestedAssets(body.batchId || null)
+        const orphaned = body.includeOrphans ? repository.pruneOrphanedAssets() : 0
+        return void json(response, 200, { prunedHarvested: harvested, prunedOrphaned: orphaned })
+      }
+      // P2-14: Provider health monitoring
+      if (request.method === 'GET' && url.pathname === '/v1/provider-health') {
+        return void json(response, 200, { providers: repository.getProviderHealth() })
       }
       const jobMatch = url.pathname.match(/^\/v1\/image-jobs\/([^/]+)$/)
       if (request.method === 'GET' && jobMatch) {

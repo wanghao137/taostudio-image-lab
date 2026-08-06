@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
@@ -26,7 +26,20 @@ const {
   routes,
   runnerConcurrency,
 } = resolveImageManifestBatchConfig()
-const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+
+// P2-13: Manifest pre-validation — fail fast with a diagnostic instead of
+// an opaque SyntaxError crash when the manifest is truncated or corrupted.
+let manifest
+try {
+  manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+} catch (error) {
+  console.error(`MANIFEST_PARSE_ERROR path=${manifestPath} message=${error instanceof Error ? error.message : String(error)}`)
+  process.exit(1)
+}
+if (!Array.isArray(manifest.entries)) {
+  console.error(`MANIFEST_SCHEMA_ERROR path=${manifestPath} message=entries is not an array (got ${typeof manifest.entries})`)
+  process.exit(1)
+}
 const cliIndex = process.argv.find((value) => value.startsWith('--index='))
 const cliLimit = process.argv.find((value) => value.startsWith('--limit='))
 const preflightOnly = process.argv.includes('--preflight-only')
@@ -36,6 +49,40 @@ const runId = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '')
 
 function hash(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+// P0-1: Atomic status.json write — write to a temp file then rename, so a
+// crash mid-write (power loss, OOM, SIGINT) never leaves a truncated JSON.
+// On read, if the primary file is corrupt, fall back to the .bak copy.
+async function atomicWriteJson(filePath, data) {
+  // Use a unique temp suffix per write to avoid collisions between concurrent
+  // diskMutex writes and the SIGINT flush handler.
+  const tmp = `${filePath}.${randomUUID().slice(0, 8)}.tmp`
+  await writeFile(tmp, data, 'utf8')
+  await rename(tmp, filePath)
+}
+
+// Persist state to statusPath atomically, keeping a .bak copy of the previous
+// version so a crash between writes can be recovered.
+async function persistState() {
+  const json = `${JSON.stringify(state, null, 2)}\n`
+  if (existsSync(statusPath)) {
+    try { await copyFile(statusPath, `${statusPath}.bak`) } catch { /* best-effort */ }
+  }
+  await atomicWriteJson(statusPath, json)
+}
+
+async function readJsonWithFallback(filePath, fallbackValue) {
+  try {
+    return JSON.parse(await readFile(filePath, 'utf8'))
+  } catch {
+    const bakPath = `${filePath}.bak`
+    if (existsSync(bakPath)) {
+      console.log(`STATUS_RECOVERED_FROM_BAK path=${filePath}`)
+      return JSON.parse(await readFile(bakPath, 'utf8'))
+    }
+    return fallbackValue
+  }
 }
 
 // Async mutex for serializing shared disk writes (statusPath, metadata.json)
@@ -234,16 +281,27 @@ for (const entry of manifestReady) entryDirectory(entry)
 // 载入本地执行状态，在确定本轮 batch 窗口前剔除已 succeeded 的条目。
 // 这样 `--limit=N` 表示"接下来 N 个未完成项"，而非"manifest 前 N 项"——
 // 否则早期已完成条目会导致后续批次窗口被空切片（selected=0）。
-const priorState = existsSync(statusPath)
-  ? JSON.parse(await readFile(statusPath, 'utf8'))
-  : { schemaVersion: 1, startedAt: new Date().toISOString(), items: {} }
+const priorState = await readJsonWithFallback(
+  statusPath,
+  { schemaVersion: 1, startedAt: new Date().toISOString(), items: {} },
+)
 const priorSucceededKeys = new Set(
   Object.entries(priorState.items || {})
     .filter(([, v]) => v?.status === 'succeeded')
     .map(([k]) => k),
 )
+// P1-6: Permanently skip items whose content_policy refusal was already
+// blocked after safe-rewrite.  Retrying them wastes a provider call every run.
+const priorBlockedKeys = new Set(
+  Object.entries(priorState.items || {})
+    .filter(([, v]) => v?.refusalRecovery?.status === 'blocked')
+    .map(([k]) => k),
+)
+if (priorBlockedKeys.size) {
+  console.log(`BLOCKED_SKIP count=${priorBlockedKeys.size} reason=content_policy_permanently_blocked`)
+}
 const plannedScope = manifestReady
-  .filter((entry) => !priorSucceededKeys.has(entry.itemKey))
+  .filter((entry) => !priorSucceededKeys.has(entry.itemKey) && !priorBlockedKeys.has(entry.itemKey))
   .slice(0, limit)
 const plannedItemKeys = new Set(plannedScope.map((entry) => entry.itemKey))
 // 给 batch name 追加时间戳与本批 item 范围，让引擎 UI 里每批可区分，
@@ -490,6 +548,24 @@ const state = priorState
 state.runId = runId
 state.updatedAt = new Date().toISOString()
 
+// P0-1: Register SIGINT/SIGTERM handlers BEFORE the long-running work begins.
+// These ensure status.json is flushed atomically on Ctrl+C or kill, rather
+// than leaving a truncated JSON from an interrupted writeFile. The handlers
+// use a guard flag to avoid double-flushing and go through persistState which
+// is safe to call standalone (atomic write + rename).
+let sigintFlushed = false
+let sigintFlushing = false
+async function flushOnSignal(signal) {
+  if (sigintFlushing || sigintFlushed) return
+  sigintFlushing = true
+  console.log(`\n${signal}_RECEIVED — flushing state and exiting...`)
+  try { await persistState() } catch { /* best-effort */ }
+  sigintFlushed = true
+  process.exit(signal === 'SIGINT' ? 130 : 143)
+}
+process.on('SIGINT', () => void flushOnSignal('SIGINT'))
+process.on('SIGTERM', () => void flushOnSignal('SIGTERM'))
+
 // ====== 启动时引擎-本地对账 ======
 // 引擎里所有已成功（job succeeded + 有资产）的 source_item_key，
 // 是唯一的权威事实源。启动时必须把这些条目同步到本地 status.json，
@@ -621,7 +697,7 @@ if (reconciliation.missing.length) {
     needsReview: Object.values(state.items).filter((item) => item.status === 'needs_review').length,
     errors: Object.values(state.items).filter((item) => item.status === 'batch_error').length,
   }
-  await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  await persistState()
 }
 
 for (const entry of manifest.entries.filter((item) => validatedCoreIndexes.has(item.index))) {
@@ -679,7 +755,7 @@ state.summary = {
   needsReview: Object.values(state.items).filter((item) => item.status === 'needs_review').length,
   errors: Object.values(state.items).filter((item) => item.status === 'batch_error').length,
 }
-await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+await persistState()
 
 const completed = Object.values(state.items).filter((item) => item.status === 'succeeded')
 const existingLookup = await callMcp('image_batch_find_by_logical_key', { logicalKey: logicalBatchKey })
@@ -799,7 +875,7 @@ if (queuedEntries.length) {
   state.batchId = activeBatch.id
   state.logicalBatchKey = logicalBatchKey
   state.runner = { owner: runnerOwner, attempt: activeBatch.runner?.attempt || null, attachedAt: new Date().toISOString() }
-  await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+  await persistState()
 }
 
 // Worker pool: process entries concurrently to feed the engine's concurrency.
@@ -840,7 +916,7 @@ async function processEntry(entry, workerId) {
     batchAttempt,
     startedAt: new Date().toISOString(),
   }
-  await diskMutex(() => writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8'))
+  await diskMutex(() => persistState())
 
   const revisions = []
   try {
@@ -1053,15 +1129,29 @@ async function processEntry(entry, workerId) {
       await diskMutex(async () => {
         await writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
         completed.push(record)
+        // P1-9: Contact sheet is best-effort — a sharp composite failure must
+        // never demote an already-succeeded item to batch_error.
         if (completed.length % 20 === 0) {
-          const contactSheet = await makeContactSheet(completed, completed.length)
-          state.lastContactSheet = contactSheet
+          try {
+            const contactSheet = await makeContactSheet(completed, completed.length)
+            state.lastContactSheet = contactSheet
+          } catch (sheetError) {
+            console.log(`[${tag}] CONTACT_SHEET_SKIPPED count=${completed.length} message=${sheetError instanceof Error ? sheetError.message : String(sheetError)}`)
+          }
         }
       })
       console.log(`[${tag}] SUCCEEDED index=${entry.index} route=${accepted.route.name} final=${entry.generation.dimensions}`)
     }
   } catch (error) {
     const runnerLeaseLost = error?.code === 'RUNNER_LEASE_LOST'
+    // P0-2: ENOSPC (disk full) is a batch-level circuit-breaker — every
+    // subsequent write will also fail, so pause the entire batch instead
+    // of cascading per-item errors.
+    const isDiskFull = error && (
+      error.code === 'ENOSPC'
+      || (error instanceof Error && /ENOSPC|no space left on device/i.test(error.message))
+    )
+    if (isDiskFull) error.code = 'DISK_FULL'
     if (batchId && !runnerLeaseLost) {
       try {
         await recordBatchItemQa(entry.itemKey, {
@@ -1076,7 +1166,7 @@ async function processEntry(entry, workerId) {
     }
     state.items[stateKey] = {
       ...state.items[stateKey],
-      status: (runnerLeaseLost || error?.code === 'PROVIDER_UNAVAILABLE') ? 'interrupted' : 'batch_error',
+      status: (runnerLeaseLost || error?.code === 'PROVIDER_UNAVAILABLE' || isDiskFull) ? 'interrupted' : 'batch_error',
       completedAt: new Date().toISOString(),
       revisions,
       error: {
@@ -1085,6 +1175,7 @@ async function processEntry(entry, workerId) {
       },
     }
     if (error?.code === 'PROVIDER_UNAVAILABLE') pauseReason = state.items[stateKey].error.message
+    if (isDiskFull) pauseReason = `disk space exhausted: ${state.items[stateKey].error.message}`
     await diskMutex(() => writeFile(resolve(directory, 'metadata.json'), `${JSON.stringify(state.items[stateKey], null, 2)}\n`, 'utf8'))
     console.log(`[${tag}] ERROR index=${entry.index} item=${entry.itemKey} message=${state.items[stateKey].error.message}`)
     if (runnerLeaseLost) throw error
@@ -1097,7 +1188,7 @@ async function processEntry(entry, workerId) {
       needsReview: Object.values(state.items).filter((item) => item.status === 'needs_review').length,
       errors: Object.values(state.items).filter((item) => item.status === 'batch_error').length,
     }
-    await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+    await persistState()
   })
 }
 
@@ -1119,7 +1210,7 @@ if (queuedEntries.length) {
           totalQueued: queuedEntries.length,
           nextItemKey: queuedEntries[nextEntryIndex]?.itemKey || null,
         }
-        await writeFile(statusPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+        await persistState()
       })
     } catch {
       // Heartbeat is best-effort; don't let disk write errors kill the batch.
@@ -1148,6 +1239,9 @@ if (queuedEntries.length) {
 
 if (!pauseReason) console.log(`BATCH_DONE ${JSON.stringify(state.summary || {})}`)
 } finally {
+  // P0-1: Final atomic flush to guarantee status.json is intact even if the
+  // runner exits via an error path or SIGINT.
+  try { await persistState() } catch { /* best-effort */ }
   try {
     await releaseRunner()
   } catch (error) {

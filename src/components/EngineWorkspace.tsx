@@ -54,6 +54,10 @@ import {
   retryImageJob,
   saveLocalImageTaskApiConfig,
   subscribeImageTaskEvents,
+  bulkReviewBatchItems,
+  archiveImageBatch,
+  deleteImageBatch,
+  pruneAssets,
   type ImageBatchEventV1,
   type ImageBatchItemV1,
   type ImageJobStateV1,
@@ -65,6 +69,7 @@ import {
   type ImageTaskCapabilitiesV1,
   ImageTaskApiError,
 } from '../lib/imageTaskApi'
+import { showBrowserNotification } from '../lib/browserNotification'
 import {
   chooseEngineLocalDeliveryDirectory,
   downloadEngineBatch,
@@ -628,6 +633,8 @@ export default function EngineWorkspace() {
   const deliveryResyncRevisionRef = useRef<number | null>(null)
   const deliveryAttemptedRef = useRef(new Set<string>())
   const deliveryRunningRef = useRef(new Set<string>())
+  // P1-5: Track which batches were active (running/paused) to detect completion
+  const batchActiveRef = useRef(new Set<string>())
   const selectedJobId = selectedJob?.id
   const inspectorOpen = showNewJob || showNewBatch || Boolean(selectedJob || selectedBatch)
   const inspectorRef = useRef<HTMLElement>(null)
@@ -958,6 +965,22 @@ export default function EngineWorkspace() {
     try {
       const result = await listImageBatches(targetConfig)
       const next = result.items
+      // P1-5: Fire browser notification when a batch transitions to completed
+      const prevActiveRef = batchActiveRef.current
+      for (const batch of next) {
+        const wasActive = prevActiveRef.has(batch.id)
+        const isNowCompleted = batch.state === 'completed'
+        if (wasActive && isNowCompleted) {
+          const accepted = batch.stats.accepted
+          const failed = batch.stats.failed
+          showBrowserNotification('批次已完成', {
+            body: `${batch.name?.split(' ').slice(0, 3).join(' ') || batch.id.slice(0, 12)} · ${accepted} 成功${failed > 0 ? ` · ${failed} 失败` : ''}`,
+            tag: `batch-complete-${batch.id}`,
+          })
+        }
+        if (isNowCompleted) prevActiveRef.delete(batch.id)
+        else prevActiveRef.add(batch.id)
+      }
       if (selectedBatch?.id) {
         const currentSummary = next.find((batch) => batch.id === selectedBatch.id)
         if (currentSummary) {
@@ -1396,6 +1419,74 @@ export default function EngineWorkspace() {
     }
   }
 
+  // P1-4: Bulk review — accept all QA-passed items or reject all pending items
+  const handleBulkReview = async (
+    items: ImageBatchV1['items'][number][],
+    acceptanceStatus: 'accepted' | 'rejected',
+  ) => {
+    if (!config || !selectedBatch || !items.length) return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      const itemKeys = items.map((item) => item.itemKey)
+      const next = await bulkReviewBatchItems(config, selectedBatch.id, itemKeys, acceptanceStatus)
+      applyBatchUpdate(next)
+      await refreshSelectedBatchPages()
+      setStatusAnnouncement(acceptanceStatus === 'accepted' ? `已批量确认 ${itemKeys.length} 项` : `已批量拒绝 ${itemKeys.length} 项`)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // P2-11: Archive / delete batch
+  const handleArchiveBatch = async (batchId: string) => {
+    if (!config) return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      const next = await archiveImageBatch(config, batchId)
+      applyBatchUpdate(next)
+      setStatusAnnouncement('批次已归档')
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDeleteBatch = async (batchId: string) => {
+    if (!config) return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      await deleteImageBatch(config, batchId)
+      setSelectedBatch(null)
+      await refreshBatches()
+      setStatusAnnouncement('批次已删除')
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // P0-3: Asset GC
+  const handlePruneAssets = async () => {
+    if (!config) return
+    setBusy(true)
+    setWorkspaceError(null)
+    try {
+      const result = await pruneAssets(config, { includeOrphans: true })
+      setStatusAnnouncement(`已清理 ${result.prunedHarvested + result.prunedOrphaned} 个资产文件`)
+    } catch (error) {
+      setWorkspaceError(errorMessage(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const handleRetry = async () => {
     if (!config || !selectedJob) return
     setBusy(true)
@@ -1741,6 +1832,10 @@ export default function EngineWorkspace() {
                 itemPage={{ loaded: selectedBatch.items.length, total: batchItemsTotal, hasMore: Boolean(batchItemsCursor) }}
                 eventPage={{ loaded: selectedBatch.events.length, total: batchEventsTotal, hasMore: Boolean(batchEventsCursor) }}
                 onClose={clearInspectorSelection}
+                onBulkReview={handleBulkReview}
+                onArchiveBatch={handleArchiveBatch}
+                onDeleteBatch={handleDeleteBatch}
+                onPruneAssets={handlePruneAssets}
               />
             ) : selectedJob ? (
               <JobInspector
@@ -2079,6 +2174,10 @@ function BatchInspector({
   itemPage,
   eventPage,
   onClose,
+  onBulkReview,
+  onArchiveBatch,
+  onDeleteBatch,
+  onPruneAssets,
 }: {
   batch: ImageBatchV1
   config: ImageTaskApiConfig
@@ -2095,8 +2194,14 @@ function BatchInspector({
   itemPage: { loaded: number; total: number; hasMore: boolean }
   eventPage: { loaded: number; total: number; hasMore: boolean }
   onClose: () => void
+  onBulkReview: (items: ImageBatchItemV1[], acceptanceStatus: 'accepted' | 'rejected') => void
+  onArchiveBatch: (batchId: string) => void
+  onDeleteBatch: (batchId: string) => void
+  onPruneAssets: () => void
 }) {
   const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'not_run' | 'pending' | 'approved' | 'rejected' | 'failed' | 'cancelled'>('pending')
+  // P2-12: Free-text search within batch items by prompt text
+  const [itemSearch, setItemSearch] = useState('')
   const autoAcceptedCount = useMemo(
     () => batch.items.filter((item) => item.humanReviewStatus === 'approved' && item.humanReview?.actor === 'system').length,
     [batch.items],
@@ -2124,8 +2229,13 @@ function BatchInspector({
     if (reviewFilter === 'rejected') return item.humanReviewStatus === 'rejected'
     if (reviewFilter === 'failed') return item.job.state === 'failed'
     if (reviewFilter === 'cancelled') return item.job.state === 'cancelled'
-    return true
-  }), [batch.items, reviewFilter])
+    return true // 'all'
+  }).filter((item) => {
+    // P2-12: Apply free-text search on prompt text
+    if (!itemSearch.trim()) return true
+    const prompt = (item.job.request.input.prompt || '').toLowerCase()
+    return prompt.includes(itemSearch.trim().toLowerCase())
+  }), [batch.items, reviewFilter, itemSearch])
   return (
     <div>
       <button
@@ -2255,6 +2365,15 @@ function BatchInspector({
             </button>
           ))}
         </div>
+        {/* P2-12: Prompt search within batch items */}
+        <input
+          type="search"
+          value={itemSearch}
+          onChange={(e) => setItemSearch(e.target.value)}
+          placeholder="搜索提示词…"
+          className="mt-2 h-8 w-full rounded-md border border-stone-300 bg-white px-3 text-xs dark:border-white/10 dark:bg-[#191714]"
+          aria-label="条目搜索"
+        />
         <div className="mt-3 grid max-h-[620px] grid-cols-1 gap-2 overflow-auto pr-1 sm:grid-cols-2">
           {reviewItems.map((item) => {
             const canDecide = item.job.state === 'succeeded' && item.humanReviewStatus === 'pending'
@@ -2365,6 +2484,27 @@ function BatchInspector({
           <button type="button" onClick={() => onControl('retry-cancelled')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-[#356c82]/35 px-3 text-xs font-medium text-[#356c82] hover:bg-[#356c82]/10 disabled:opacity-40 dark:border-[#8ec5d7]/30 dark:text-[#8ec5d7]">
             {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}继续 {batch.stats.cancelled} 个取消项
           </button>
+        )}
+        {(() => {
+          const qaPassedPending = batch.items.filter((it: ImageBatchItemV1) => it.humanReviewStatus === 'pending' && it.qaStatus === 'passed' && it.job.state === 'succeeded')
+          return qaPassedPending.length > 0 ? (
+            <button type="button" onClick={() => onBulkReview(qaPassedPending, 'accepted')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md bg-emerald-600 px-3 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-40">
+              <Check className="h-4 w-4" />批量确认 {qaPassedPending.length} 项
+            </button>
+          ) : null
+        })()}
+        {batch.state === 'completed' && (
+          <>
+            <button type="button" onClick={() => onArchiveBatch(batch.id)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-stone-300 px-3 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/10 dark:text-stone-300">
+              归档
+            </button>
+            <button type="button" onClick={() => { if (confirm('确定删除此批次？此操作不可撤销。')) onDeleteBatch(batch.id) }} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-red-300 px-3 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-400/30 dark:text-red-300">
+              删除
+            </button>
+            <button type="button" onClick={onPruneAssets} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-stone-300 px-3 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/10 dark:text-stone-300">
+              <HardDrive className="h-4 w-4" />清理资产
+            </button>
+          </>
         )}
       </div>
       <details className="mt-5 border-t border-stone-300 pt-4 dark:border-white/10">

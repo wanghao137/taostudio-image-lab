@@ -455,6 +455,52 @@ export async function controlImageBatch(
   return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/${action}`, { method: 'POST' })).json()
 }
 
+// P1-4: Bulk review — accept or reject multiple items in one call
+export async function bulkReviewBatchItems(
+  config: ImageTaskApiConfig,
+  batchId: string,
+  itemKeys: string[],
+  acceptanceStatus: 'accepted' | 'rejected',
+): Promise<ImageBatchV1> {
+  // The engine's review endpoint is per-item, so we batch client-side.
+  // Items are reviewed sequentially to avoid race conditions on the batch row.
+  let lastBatch: ImageBatchV1 | null = null
+  for (const itemKey of itemKeys) {
+    lastBatch = await reviewImageBatchItem(config, batchId, itemKey, { acceptanceStatus })
+  }
+  return lastBatch!
+}
+
+// P2-11: Archive / delete batch
+export async function archiveImageBatch(config: ImageTaskApiConfig, id: string): Promise<ImageBatchV1> {
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}/archive`, { method: 'POST' })).json()
+}
+
+export async function deleteImageBatch(config: ImageTaskApiConfig, id: string): Promise<{ deleted: boolean }> {
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(id)}`, { method: 'DELETE' })).json()
+}
+
+// P0-3: Asset GC
+export async function pruneAssets(config: ImageTaskApiConfig, options?: { batchId?: string; includeOrphans?: boolean }): Promise<{ prunedHarvested: number; prunedOrphaned: number }> {
+  const body = options ? JSON.stringify({ batchId: options.batchId, includeOrphans: options.includeOrphans }) : '{}'
+  return (await taskFetch(config, '/v1/assets/prune', { method: 'POST', headers: { 'content-type': 'application/json' }, body })).json()
+}
+
+// P1-7: Retry with modified prompt
+export async function replaceBatchItemJobWithPrompt(
+  config: ImageTaskApiConfig,
+  batchId: string,
+  itemKey: string,
+  request: ImageJobRequestV1,
+  reason: string,
+): Promise<ImageBatchV1> {
+  return (await taskFetch(config, `/v1/image-batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(itemKey)}/job`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ request, reason }),
+  })).json()
+}
+
 export async function subscribeImageTaskEvents(
   config: ImageTaskApiConfig,
   options: { signal: AbortSignal; onChange: () => void; onOpen?: () => void },
