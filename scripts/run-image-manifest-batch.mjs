@@ -543,10 +543,11 @@ async function releaseRunner() {
   }
 }
 
-try {
 const state = priorState
 state.runId = runId
 state.updatedAt = new Date().toISOString()
+
+try {
 
 // P0-1: Register SIGINT/SIGTERM handlers BEFORE the long-running work begins.
 // These ensure status.json is flushed atomically on Ctrl+C or kill, rather
