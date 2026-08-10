@@ -966,8 +966,13 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
         if (typeof value === 'string' && value.trim()) images.push(normalizeBase64Image(value, mime))
       }
     }
-    for (const url of imageUrls) {
-      images.push(await fetchImageUrlAsDataUrl(url, mime, signal))
+    // Only fetch image URLs when no b64_json was extracted, since some providers
+    // (e.g. chatgpt2api) return BOTH b64_json and url pointing to the same image —
+    // extracting both would duplicate every result.
+    if (images.length === 0) {
+      for (const url of imageUrls) {
+        images.push(await fetchImageUrlAsDataUrl(url, mime, signal))
+      }
     }
   } catch (err) {
     if (rawImageUrls.length > 0 && err instanceof Error) {
