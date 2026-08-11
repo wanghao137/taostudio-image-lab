@@ -409,6 +409,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
   const providerDrafts = {
     ...profile.providerDrafts,
     [profile.provider]: {
+      apiKey: profile.apiKey,
       baseUrl: profile.baseUrl,
       model: profile.model,
       apiMode: profile.apiMode,
@@ -426,6 +427,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     return {
       ...profile,
       provider,
+      apiKey: savedDraft?.apiKey ?? '',
       baseUrl: savedDraft?.baseUrl ?? DEFAULT_FAL_BASE_URL,
       model: savedDraft?.model ?? DEFAULT_FAL_MODEL,
       apiMode: 'images',
@@ -444,6 +446,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
     return {
       ...profile,
       provider: customProvider.id,
+      apiKey: savedDraft?.apiKey ?? '',
       baseUrl: savedDraft?.baseUrl ?? (shouldUseOpenAIDefaults ? DEFAULT_BASE_URL : profile.baseUrl || DEFAULT_BASE_URL),
       model: savedDraft?.model ?? (shouldUseOpenAIDefaults ? DEFAULT_IMAGES_MODEL : profile.model || DEFAULT_IMAGES_MODEL),
       apiMode: 'images',
@@ -468,6 +471,7 @@ export function switchApiProfileProvider(profile: ApiProfile, provider: ApiProvi
   return {
     ...profile,
     provider,
+    apiKey: savedDraft?.apiKey ?? '',
     baseUrl: savedDraft?.baseUrl ?? DEFAULT_BASE_URL,
     model: normalizeOpenAIModelForMode(savedDraft?.model, nextApiMode),
     apiMode: nextApiMode,
@@ -491,6 +495,7 @@ function normalizeProviderDraft(input: unknown, provider: ApiProvider, customPro
   if (!knownProvider) return undefined
 
   return {
+    apiKey: typeof input.apiKey === 'string' ? input.apiKey : undefined,
     baseUrl: provider === 'fal'
       ? baseUrl?.trim().replace(/\/+$/, '') || DEFAULT_FAL_BASE_URL
       : baseUrl,

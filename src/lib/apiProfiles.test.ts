@@ -806,4 +806,43 @@ describe('custom providers', () => {
     expect(restoredProfile.model).toBe('custom-openai-model')
     expect(restoredProfile.apiProxy).toBe(false)
   })
+
+  it('remembers apiKey per provider across switches', () => {
+    const openaiProfile = createDefaultOpenAIProfile({
+      apiKey: 'sk-openai-key',
+    })
+
+    // Switch openai -> fal: openai apiKey saved to draft, fal gets empty (first visit)
+    const falProfile = switchApiProfileProvider(openaiProfile, 'fal')
+    expect(falProfile.apiKey).toBe('')
+
+    // Set fal's apiKey, then switch back to openai
+    falProfile.apiKey = 'fal-key-xxx'
+    const restoredOpenai = switchApiProfileProvider(falProfile, 'openai')
+    expect(restoredOpenai.apiKey).toBe('sk-openai-key')
+
+    // Switch to fal again: fal's apiKey should be restored from draft
+    const restoredFal = switchApiProfileProvider(restoredOpenai, 'fal')
+    expect(restoredFal.apiKey).toBe('fal-key-xxx')
+  })
+
+  it('remembers apiKey for custom providers across switches', () => {
+    const provider = importCustomProviderDefinitionFromJson(JSON.stringify({
+      name: 'Custom Provider',
+      template: 'http-image',
+      submit: { path: 'images/generations' },
+    }))
+    const openaiProfile = createDefaultOpenAIProfile({ apiKey: 'sk-openai-key' })
+
+    // Switch to custom provider: first visit yields empty apiKey
+    const customProfile = switchApiProfileProvider(openaiProfile, provider.id, provider)
+    expect(customProfile.apiKey).toBe('')
+
+    // Set custom apiKey, switch back to openai, then back to custom
+    customProfile.apiKey = 'custom-key-yyy'
+    const backToOpenai = switchApiProfileProvider(customProfile, 'openai')
+    expect(backToOpenai.apiKey).toBe('sk-openai-key')
+    const backToCustom = switchApiProfileProvider(backToOpenai, provider.id, provider)
+    expect(backToCustom.apiKey).toBe('custom-key-yyy')
+  })
 })
