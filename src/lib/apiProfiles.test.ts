@@ -666,6 +666,25 @@ describe('custom providers', () => {
     expect(profile.model).toBe(DEFAULT_IMAGES_MODEL)
   })
 
+  it('synthesizes a default editSubmit for custom providers without one', () => {
+    const provider = importCustomProviderDefinitionFromJson(JSON.stringify({
+      name: 'Custom Provider',
+      template: 'http-image',
+      submit: { path: 'images/generations' },
+    }))
+
+    // editSubmit was not configured, but must be defaulted so image-edit
+    // requests (reference images) don't silently fall back to text-to-image.
+    expect(provider.editSubmit).toBeDefined()
+    expect(provider.editSubmit?.path).toBe('images/edits')
+    expect(provider.editSubmit?.contentType).toBe('multipart')
+    expect(provider.editSubmit?.files).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: 'image[]', source: 'inputImages' }),
+      ]),
+    )
+  })
+
   it('uses API-mode specific streaming defaults and preserves partial image count', () => {
     expect(createDefaultOpenAIProfile().streamImages).toBe(false)
     expect(createDefaultOpenAIProfile({ apiMode: 'responses' }).streamImages).toBe(true)

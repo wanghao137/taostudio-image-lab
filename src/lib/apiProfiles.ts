@@ -341,14 +341,14 @@ export function normalizeCustomProviderDefinition(input: unknown, usedIds = new 
       body: DEFAULT_GENERATE_BODY,
       result: DEFAULT_OPENAI_RESULT,
     }),
-    editSubmit: isRecord(record.editSubmit) ? normalizeSubmitMapping(record.editSubmit, {
+    editSubmit: normalizeSubmitMapping(isRecord(record.editSubmit) ? record.editSubmit : {}, {
       path: DEFAULT_CUSTOM_PROVIDER_PATHS.editPath,
       method: 'POST',
       contentType: 'multipart',
       body: DEFAULT_EDIT_BODY,
       files: DEFAULT_EDIT_FILES,
       result: DEFAULT_OPENAI_RESULT,
-    }) : undefined,
+    }),
     poll: normalizePollMapping(record.poll),
   }
 }
