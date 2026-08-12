@@ -1247,12 +1247,12 @@ export class TaskRepository {
     const needsReview = number(counters.needs_review)
     const rejected = number(counters.rejected)
     const acceptancePending = number(counters.acceptance_pending)
-    const state = terminal === total
-      ? 'completed'
-      : row.control_state === 'paused'
-        ? 'paused'
-        : row.control_state === 'archived'
-          ? 'archived'
+    const state = row.control_state === 'archived'
+      ? 'archived'
+      : terminal === total
+        ? 'completed'
+        : row.control_state === 'paused'
+          ? 'paused'
           : 'running'
     const runnerLeaseExpiresAt = Number(row.runner_lease_expires_at || 0)
     return {
