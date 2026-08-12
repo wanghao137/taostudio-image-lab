@@ -214,8 +214,8 @@ export interface ImageBatchV1 {
   id: string
   name?: string | null
   logicalKey?: string | null
-  state: 'running' | 'paused' | 'completed'
-  controlState: 'running' | 'paused'
+  state: 'running' | 'paused' | 'completed' | 'archived'
+  controlState: 'running' | 'paused' | 'archived'
   pauseReason?: string | null
   runner?: {
     active: boolean

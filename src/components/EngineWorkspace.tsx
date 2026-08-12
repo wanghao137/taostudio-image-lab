@@ -616,7 +616,7 @@ export default function EngineWorkspace() {
   const [showNewJob, setShowNewJob] = useState(false)
   const [showNewBatch, setShowNewBatch] = useState(false)
   const [batchFilter, setBatchFilter] = useState('')
-  const [batchFacet, setBatchFacet] = useState<'all' | 'review' | 'failed' | 'cancelled' | 'qa' | 'delivery' | 'low_success' | 'recent'>('all')
+  const [batchFacet, setBatchFacet] = useState<'all' | 'review' | 'failed' | 'cancelled' | 'qa' | 'delivery' | 'low_success' | 'recent' | 'archived'>('all')
   // Historical batch groups (incomplete / archived) are collapsed by default so
   // the high-priority running + needs-attention batches stay visible without
   // being buried under dozens of past batches. Users expand a group on demand.
@@ -1184,6 +1184,7 @@ export default function EngineWorkspace() {
         || (batchFacet === 'delivery' && batchPresentationState(batch) === 'delivery_ready')
         || (batchFacet === 'low_success' && batch.stats.total > 0 && batch.stats.succeeded / batch.stats.total < 0.9)
         || (batchFacet === 'recent' && Date.now() - new Date(batch.createdAt).getTime() < 7 * 24 * 60 * 60 * 1000)
+        || (batchFacet === 'archived' && batch.state === 'archived')
       return matchesText && matchesFacet
     })
     const runnerDisconnected = (batch: ImageBatchSummaryV1) => batch.state === 'running' && (batch.runner?.attempt || 0) > 0 && !batch.runner?.active
@@ -1203,8 +1204,12 @@ export default function EngineWorkspace() {
       || batch.stats.rejected > 0
     ))
     const incompleteIds = new Set(incomplete.map((batch) => batch.id))
-    const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id))
-    return { filtered, active, needsAttention, incomplete, history }
+    // Separate archived batches from normal completed history so the user can
+    // browse archived batch data without it being buried in the history list.
+    const archived = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id) && batch.state === 'archived')
+    const archivedIds = new Set(archived.map((batch) => batch.id))
+    const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id) && !archivedIds.has(batch.id))
+    return { filtered, active, needsAttention, incomplete, archived, history }
   }, [batches, batchFacet, batchFilter])
   const activeOrPendingCount = batchGroups.active.length + batchGroups.needsAttention.length
 
@@ -1660,7 +1665,7 @@ export default function EngineWorkspace() {
             <div className="mb-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">批次队列</h2>
-                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.incomplete.length} 异常结束 · {batchGroups.history.length} 归档</span>
+                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.incomplete.length} 异常结束 · {batchGroups.history.length} 已完成 · {batchGroups.archived.length} 已归档</span>
               </div>
               {batches.length >= BATCH_LIST_LIMIT && (
                 <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-300">
@@ -1685,6 +1690,7 @@ export default function EngineWorkspace() {
                     <option value="delivery">可交付</option>
                     <option value="low_success">成功率低于 90%</option>
                     <option value="recent">最近 7 天</option>
+                    <option value="archived">已归档</option>
                   </select>
                 </div>
               )}
@@ -1712,11 +1718,19 @@ export default function EngineWorkspace() {
                   onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已结束但不完整': !current['已结束但不完整'] }))}
                 />
                 <CollapsibleBatchSection
-                  title="已归档"
+                  title="已完成"
                   batches={batchGroups.history}
                   selectedBatchId={selectedBatch?.id}
                   onSelect={handleSelectBatch}
-                  collapsed={collapsedBatchGroups['已归档'] ?? false}
+                  collapsed={collapsedBatchGroups['已完成'] ?? true}
+                  onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已完成': !current['已完成'] }))}
+                />
+                <CollapsibleBatchSection
+                  title="已归档"
+                  batches={batchGroups.archived}
+                  selectedBatchId={selectedBatch?.id}
+                  onSelect={handleSelectBatch}
+                  collapsed={collapsedBatchGroups['已归档'] ?? true}
                   onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已归档': !current['已归档'] }))}
                 />
                 {!batchGroups.filtered.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有匹配的批次</div>}
