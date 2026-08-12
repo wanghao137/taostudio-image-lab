@@ -2501,9 +2501,6 @@ function BatchInspector({
             <button type="button" onClick={() => { if (confirm('确定删除此批次？此操作不可撤销。')) onDeleteBatch(batch.id) }} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-red-300 px-3 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-400/30 dark:text-red-300">
               删除
             </button>
-            <button type="button" onClick={onPruneAssets} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-stone-300 px-3 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/10 dark:text-stone-300">
-              <HardDrive className="h-4 w-4" />清理资产
-            </button>
           </>
         )}
       </div>
