@@ -1209,7 +1209,10 @@ export default function EngineWorkspace() {
     const archived = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id) && batch.state === 'archived')
     const archivedIds = new Set(archived.map((batch) => batch.id))
     const history = filtered.filter((batch) => !activeIds.has(batch.id) && !attentionIds.has(batch.id) && !incompleteIds.has(batch.id) && !archivedIds.has(batch.id))
-    return { filtered, active, needsAttention, incomplete, archived, history }
+    // Merge archived into history so the user sees one unified "历史" group.
+    // The archived filter (facet dropdown) still works to find them quickly.
+    const allHistory = [...history, ...archived]
+    return { filtered, active, needsAttention, incomplete, archived: allHistory, history: [] }
   }, [batches, batchFacet, batchFilter])
   const activeOrPendingCount = batchGroups.active.length + batchGroups.needsAttention.length
 
@@ -1665,7 +1668,7 @@ export default function EngineWorkspace() {
             <div className="mb-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold">批次队列</h2>
-                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.incomplete.length} 异常结束 · {batchGroups.history.length} 已完成 · {batchGroups.archived.length} 已归档</span>
+                <span className="text-[10px] font-medium uppercase text-stone-400">{batchGroups.active.length} 执行中 · {batchGroups.needsAttention.length} 待处理 · {batchGroups.incomplete.length} 异常结束 · {batchGroups.archived.length} 历史</span>
               </div>
               {batches.length >= BATCH_LIST_LIMIT && (
                 <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-300">
@@ -1718,27 +1721,18 @@ export default function EngineWorkspace() {
                   onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已结束但不完整': !current['已结束但不完整'] }))}
                 />
                 <CollapsibleBatchSection
-                  title="已完成"
-                  batches={batchGroups.history}
-                  selectedBatchId={selectedBatch?.id}
-                  onSelect={handleSelectBatch}
-                  collapsed={collapsedBatchGroups['已完成'] ?? true}
-                  onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已完成': !current['已完成'] }))}
-                />
-                <CollapsibleBatchSection
-                  title="已归档"
+                  title="历史批次"
                   batches={batchGroups.archived}
                   selectedBatchId={selectedBatch?.id}
                   onSelect={handleSelectBatch}
-                  collapsed={collapsedBatchGroups['已归档'] ?? true}
-                  onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '已归档': !current['已归档'] }))}
+                  collapsed={collapsedBatchGroups['历史批次'] ?? true}
+                  onToggle={() => setCollapsedBatchGroups((current) => ({ ...current, '历史批次': !current['历史批次'] }))}
                 />
                 {!batchGroups.filtered.length && <div className="px-3 py-8 text-center text-xs text-stone-400">还没有匹配的批次</div>}
               </div>
             </div>
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h2 className="text-sm font-semibold">{selectedBatch ? `批次条目 · ${selectedBatch.stats.succeeded}/${selectedBatch.stats.total}` : '任务队列'}</h2>
-              {!selectedBatch && (
+              <h2 className="text-sm font-semibold">任务队列</h2>
               <div className="flex flex-wrap items-center justify-end gap-2">
                 <span className="font-mono text-[10px] text-stone-400">
                   已加载 {jobs.length} / {jobStats?.matching ?? jobs.length}
@@ -1760,49 +1754,8 @@ export default function EngineWorkspace() {
                 ))}
                 </select>
               </div>
-              )}
             </div>
 
-            {selectedBatch ? (
-              <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
-                {selectedBatch.items.map((item) => (
-                  <div
-                    key={item.itemKey}
-                    className="grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3"
-                  >
-                    <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
-                      <ReviewThumbnail config={config} assetId={item.job.finalAssetId || null} label={`条目 ${item.itemKey} 缩略图`} interactive={false} />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium" title={item.job.request.input.prompt}>{shortTaskTitle(item.job.request.input.prompt)}</div>
-                      <div className="mt-1 flex items-center gap-1.5">
-                        <span className="truncate font-mono text-[10px] text-stone-400">{item.itemKey}</span>
-                        <QaBadge status={item.qaStatus} />
-                        <HumanReviewBadge status={item.humanReviewStatus} autoAccepted={item.humanReview?.actor === 'system'} />
-                      </div>
-                    </div>
-                    <div className="hidden self-center text-xs text-stone-500 dark:text-stone-400 sm:block">
-                      {item.job.request.composition.ratio} · {item.job.request.output.dimensions || '继承'}
-                    </div>
-                    <div className="hidden self-center text-xs text-stone-400 sm:block">{formatTime(item.job.updatedAt)}</div>
-                    <div className="flex items-center gap-2 self-center">
-                      <StatusBadge state={item.job.state} />
-                    </div>
-                  </div>
-                ))}
-                {!selectedBatch.items.length && (
-                  <div className="px-4 py-16 text-center text-sm text-stone-400">该批次暂无已加载条目</div>
-                )}
-                {selectedBatch.items.length > 0 && (
-                  <div className="py-3 text-center text-xs text-stone-400">
-                    已加载 {selectedBatch.items.length} / {batchItemsTotal} 个条目
-                    {Boolean(batchItemsCursor) && (
-                      <button type="button" onClick={() => void loadMoreBatchItems()} className="ml-2 rounded-md border border-stone-300 px-2 py-1 font-medium hover:text-stone-700 dark:border-white/10">加载更多</button>
-                    )}
-                  </div>
-                )}
-              </div>
-            ) : (
             <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
               {jobs.map((job) => (
                 <button
@@ -1832,12 +1785,11 @@ export default function EngineWorkspace() {
                 <div className="px-4 py-16 text-center text-sm text-stone-400">当前筛选下没有任务</div>
               )}
             </div>
-            )}
             {/* Infinite-scroll sentinel: the IntersectionObserver above fires an
                 auto-load when this enters view. A 200px rootMargin pre-loads
                 before the user reaches the very bottom. Visible feedback shows
                 while loading; an empty sentinel (no cursor) stays invisible. */}
-            {!selectedBatch && jobs.length > 0 && (
+            {jobs.length > 0 && (
               <div ref={jobSentinelRef} className="py-3 text-center text-xs text-stone-400">
                 {nextCursor ? (refreshing ? '加载更早任务…' : '向下滚动加载更多') : '没有更早的任务了'}
               </div>
