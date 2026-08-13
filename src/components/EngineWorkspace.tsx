@@ -1732,67 +1732,113 @@ export default function EngineWorkspace() {
               </div>
             </div>
             <div className="mb-3 flex items-center justify-between gap-3">
-              <h2 className="text-sm font-semibold">任务队列</h2>
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <span className="font-mono text-[10px] text-stone-400">
-                  已加载 {jobs.length} / {jobStats?.matching ?? jobs.length}
-                </span>
-                <select
-                value={filter}
-                onChange={(event) => {
-                  setFilter(event.target.value as ImageJobStateV1 | 'all')
-                  setJobs([])
-                  setJobStats(null)
-                  setNextCursor(null)
-                  setSelectedJob(null)
-                }}
-                className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs outline-none dark:border-white/10 dark:bg-[#191714]"
-              >
-                <option value="all">全部状态</option>
-                {capabilities.capabilities.jobs.states.map((state) => (
-                  <option key={state} value={state}>{STATE_LABELS[state]}</option>
-                ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
-              {jobs.map((job) => (
-                <button
-                  type="button"
-                  key={job.id}
-                  onClick={() => handleSelectJob(job)}
-                  className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors [content-visibility:auto] [contain-intrinsic-size:68px] hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === job.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
+              <h2 className="text-sm font-semibold">
+                {selectedBatch ? `批次条目 · ${selectedBatch.stats?.succeeded ?? 0}/${selectedBatch.stats?.total ?? 0}` : '任务队列'}
+              </h2>
+              {!selectedBatch && (
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <span className="font-mono text-[10px] text-stone-400">
+                    已加载 {jobs.length} / {jobStats?.matching ?? jobs.length}
+                  </span>
+                  <select
+                  value={filter}
+                  onChange={(event) => {
+                    setFilter(event.target.value as ImageJobStateV1 | 'all')
+                    setJobs([])
+                    setJobStats(null)
+                    setNextCursor(null)
+                    setSelectedJob(null)
+                  }}
+                  className="h-8 rounded-md border border-stone-300 bg-white px-2 text-xs outline-none dark:border-white/10 dark:bg-[#191714]"
                 >
-                  <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
-                    <ReviewThumbnail config={config} assetId={job.finalAssetId || null} label={`${shortTaskTitle(job.request.input.prompt)} 缩略图`} interactive={false} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium" title={job.request.input.prompt}>{shortTaskTitle(job.request.input.prompt)}</div>
-                    <div className="mt-1 truncate font-mono text-[10px] text-stone-400">{job.error?.message || job.id}</div>
-                  </div>
-                  <div className="hidden self-center text-xs text-stone-500 dark:text-stone-400 sm:block">
-                    {job.request.composition.ratio} · {job.request.output.dimensions || '继承'}
-                  </div>
-                  <div className="hidden self-center text-xs text-stone-400 sm:block">{formatTime(job.updatedAt)}</div>
-                  <div className="flex items-center gap-2 self-center">
-                    <StatusBadge state={job.state} />
-                    <ChevronRight className="h-4 w-4 text-stone-300" />
-                  </div>
-                </button>
-              ))}
-              {!jobs.length && (
-                <div className="px-4 py-16 text-center text-sm text-stone-400">当前筛选下没有任务</div>
+                  <option value="all">全部状态</option>
+                  {capabilities.capabilities.jobs.states.map((state) => (
+                    <option key={state} value={state}>{STATE_LABELS[state]}</option>
+                  ))}
+                  </select>
+                </div>
               )}
             </div>
-            {/* Infinite-scroll sentinel: the IntersectionObserver above fires an
-                auto-load when this enters view. A 200px rootMargin pre-loads
-                before the user reaches the very bottom. Visible feedback shows
-                while loading; an empty sentinel (no cursor) stays invisible. */}
-            {jobs.length > 0 && (
-              <div ref={jobSentinelRef} className="py-3 text-center text-xs text-stone-400">
-                {nextCursor ? (refreshing ? '加载更早任务…' : '向下滚动加载更多') : '没有更早的任务了'}
+
+            {selectedBatch ? (
+              <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
+                {(selectedBatch.items || []).map((item) => (
+                  <div
+                    key={item.itemKey}
+                    className="grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3"
+                  >
+                    <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
+                      <ReviewThumbnail config={config} assetId={item.job?.finalAssetId || null} label={`条目 ${item.itemKey}`} interactive={false} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium" title={item.job?.request?.input?.prompt || ''}>
+                        {shortTaskTitle(item.job?.request?.input?.prompt || '图像任务')}
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5">
+                        <span className="truncate font-mono text-[10px] text-stone-400">{item.itemKey}</span>
+                        <QaBadge status={item.qaStatus} />
+                        <HumanReviewBadge status={item.humanReviewStatus} autoAccepted={item.humanReview?.actor === 'system'} />
+                      </div>
+                    </div>
+                    <div className="hidden self-center text-xs text-stone-500 dark:text-stone-400 sm:block">
+                      {item.job?.request?.composition?.ratio || '—'} · {item.job?.request?.output?.dimensions || '继承'}
+                    </div>
+                    <div className="hidden self-center text-xs text-stone-400 sm:block">{formatTime(item.job?.updatedAt || new Date().toISOString())}</div>
+                    <div className="flex items-center gap-2 self-center">
+                      <StatusBadge state={item.job?.state || 'queued'} />
+                    </div>
+                  </div>
+                ))}
+                {(!selectedBatch.items || !selectedBatch.items.length) && (
+                  <div className="px-4 py-16 text-center text-sm text-stone-400">该批次暂无已加载条目</div>
+                )}
+                {selectedBatch.items && selectedBatch.items.length > 0 && (
+                  <div className="py-3 text-center text-xs text-stone-400">
+                    已加载 {selectedBatch.items.length} / {batchItemsTotal} 个条目
+                    {batchItemsCursor && (
+                      <button type="button" onClick={() => void loadMoreBatchItems()} className="ml-2 rounded-md border border-stone-300 px-2 py-1 font-medium hover:text-stone-700 dark:border-white/10">加载更多</button>
+                    )}
+                  </div>
+                )}
               </div>
+            ) : (
+              <>
+                <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
+                  {jobs.map((job) => (
+                    <button
+                      type="button"
+                      key={job.id}
+                      onClick={() => handleSelectJob(job)}
+                      className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors [content-visibility:auto] [contain-intrinsic-size:68px] hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === job.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
+                    >
+                      <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
+                        <ReviewThumbnail config={config} assetId={job.finalAssetId || null} label={`${shortTaskTitle(job.request.input.prompt)} 缩略图`} interactive={false} />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium" title={job.request.input.prompt}>{shortTaskTitle(job.request.input.prompt)}</div>
+                        <div className="mt-1 truncate font-mono text-[10px] text-stone-400">{job.error?.message || job.id}</div>
+                      </div>
+                      <div className="hidden self-center text-xs text-stone-500 dark:text-stone-400 sm:block">
+                        {job.request.composition.ratio} · {job.request.output.dimensions || '继承'}
+                      </div>
+                      <div className="hidden self-center text-xs text-stone-400 sm:block">{formatTime(job.updatedAt)}</div>
+                      <div className="flex items-center gap-2 self-center">
+                        <StatusBadge state={job.state} />
+                        <ChevronRight className="h-4 w-4 text-stone-300" />
+                      </div>
+                    </button>
+                  ))}
+                  {!jobs.length && (
+                    <div className="px-4 py-16 text-center text-sm text-stone-400">当前筛选下没有任务</div>
+                  )}
+                </div>
+                {/* Infinite-scroll sentinel */}
+                {jobs.length > 0 && (
+                  <div ref={jobSentinelRef} className="py-3 text-center text-xs text-stone-400">
+                    {nextCursor ? (refreshing ? '加载更早任务…' : '向下滚动加载更多') : '没有更早的任务了'}
+                  </div>
+                )}
+              </>
             )}
           </section>
 
