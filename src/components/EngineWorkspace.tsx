@@ -47,6 +47,7 @@ import {
   listImageBatches,
   listImageBatchEvents,
   listImageBatchItems,
+  listAllImageBatchItems,
   listImageJobs,
   replaceImageBatchItemJob,
   readLocalImageTaskApiConfig,
@@ -620,7 +621,7 @@ export default function EngineWorkspace() {
   // Historical batch groups (incomplete / archived) are collapsed by default so
   // the high-priority running + needs-attention batches stay visible without
   // being buried under dozens of past batches. Users expand a group on demand.
-  const [collapsedBatchGroups, setCollapsedBatchGroups] = useState<Record<string, boolean>>({ '已结束但不完整': true, '已归档': true })
+  const [collapsedBatchGroups, setCollapsedBatchGroups] = useState<Record<string, boolean>>({ '已结束但不完整': true, '历史批次': true })
   const [draft, setDraft] = useState<NewJobDraft>(DEFAULT_DRAFT)
   const [batchDraft, setBatchDraft] = useState({ name: '', prompts: '' })
   const [deliveryDirectoryName, setDeliveryDirectoryName] = useState<string | null>(null)
@@ -780,31 +781,44 @@ export default function EngineWorkspace() {
     setBatchItemsTotal(batch.stats.total)
     setBatchEventsTotal(0)
     if (!config) return
+    // Items load independently of the summary + events so the task queue
+    // populates (and batch-item rows become clickable) even when the summary
+    // fetch is slow. Each callback guards against a stale selection via the
+    // version captured at selection time.
+    const selectionMatches = () => {
+      const selection = inspectorSelectionRef.current
+      return selection.version === selectionVersion
+        && selection.kind === 'batch'
+        && selection.id === batch.id
+    }
+    // Load ALL items so client-side facet filtering (待确认 / QA告警 / etc.)
+    // matches the whole-batch counts shown on the facet tabs. Without this,
+    // pending items beyond the first page are invisible until manual load-more.
+    void listAllImageBatchItems(config, batch.id)
+      .then((items) => {
+        if (!selectionMatches()) return
+        setSelectedBatch((current) => current?.id === batch.id ? { ...current, items } : current)
+        setBatchItemsCursor(null)
+        setBatchItemsTotal(items.length)
+      })
+      .catch((error) => { if (!(error instanceof ImageTaskApiError && error.status === 404)) setWorkspaceError(errorMessage(error)) })
     void Promise.all([
       getImageBatchSummary(config, batch.id),
-      listImageBatchItems(config, batch.id, { limit: 50 }),
       listImageBatchEvents(config, batch.id, { limit: 30 }),
     ])
-      .then(([summary, itemPage, eventPage]) => {
-        const selection = inspectorSelectionRef.current
-        if (
-          selection.version === selectionVersion
-          && selection.kind === 'batch'
-          && selection.id === batch.id
-        ) {
-          setSelectedBatch({ ...summary, items: itemPage.items, events: eventPage.items })
-          setBatchItemsCursor(itemPage.nextCursor)
-          setBatchEventsCursor(eventPage.nextCursor)
-          setBatchItemsTotal(itemPage.total)
-          setBatchEventsTotal(eventPage.total)
-        }
+      .then(([summary, eventPage]) => {
+        if (!selectionMatches()) return
+        setSelectedBatch((current) => current?.id === batch.id
+          ? { ...summary, items: current.items, events: eventPage.items }
+          : current)
+        setBatchEventsCursor(eventPage.nextCursor)
+        setBatchEventsTotal(eventPage.total)
       })
       .catch(async (error) => {
         if (error instanceof ImageTaskApiError && error.status === 404) {
           try {
             const detail = await getImageBatch(config, batch.id)
-            const selection = inspectorSelectionRef.current
-            if (selection.version === selectionVersion && selection.kind === 'batch' && selection.id === batch.id) {
+            if (selectionMatches()) {
               setSelectedBatch(detail)
               setBatchItemsTotal(detail.items.length)
               setBatchEventsTotal(detail.events.length)
@@ -1359,22 +1373,44 @@ export default function EngineWorkspace() {
     setBatchEventsTotal(page.total)
   }, [batchEventsCursor, config, selectedBatch])
 
-  const refreshSelectedBatchPages = useCallback(async () => {
-    if (!config || !selectedBatch) return
-    try {
-      const [itemPage, eventPage] = await Promise.all([
-        listImageBatchItems(config, selectedBatch.id, { limit: Math.min(Math.max(selectedBatch.items.length, 50), 100) }),
-        listImageBatchEvents(config, selectedBatch.id, { limit: Math.min(Math.max(selectedBatch.events.length, 30), 100) }),
-      ])
-      setSelectedBatch((current) => current?.id === selectedBatch.id ? { ...current, items: itemPage.items, events: eventPage.items } : current)
-      setBatchItemsCursor(itemPage.nextCursor)
-      setBatchEventsCursor(eventPage.nextCursor)
-      setBatchItemsTotal(itemPage.total)
-      setBatchEventsTotal(eventPage.total)
-    } catch (error) {
-      if (!(error instanceof ImageTaskApiError && error.status === 404)) setWorkspaceError(errorMessage(error))
-    }
-  }, [config, selectedBatch])
+  // Update batch summary fields (stats / state / controlState) from a server
+  // response while PRESERVING the locally-loaded items and events. The server
+  // batch's items array is paginated and would truncate the user's loaded view,
+  // so only the summary fields are taken. Used after review / retry mutations.
+  const applyBatchSummaryUpdate = useCallback((next: ImageBatchV1) => {
+    setSelectedBatch((current) => current?.id === next.id
+      ? { ...next, items: current.items, events: current.events }
+      : current)
+    setBatches((current) => {
+      const summary = toBatchSummary(next)
+      const found = current.some((batch) => batch.id === next.id)
+      return found
+        ? current.map((batch) => batch.id === next.id ? summary : batch)
+        : [summary, ...current]
+    })
+  }, [])
+
+  // Optimistically patch one or more batch items' human-review status locally.
+  // This avoids a server refetch that would reset pagination and scroll position
+  // — the reviewed item simply slides out of the active facet on its own.
+  const patchBatchItemsReview = useCallback((
+    itemKeys: string[],
+    acceptanceStatus: 'accepted' | 'rejected',
+  ) => {
+    const decidedAt = new Date().toISOString()
+    const decision = acceptanceStatus === 'accepted' ? 'approved_for_delivery' : 'rejected_by_reviewer'
+    const humanReviewStatus: ImageBatchItemV1['humanReviewStatus'] = acceptanceStatus === 'accepted' ? 'approved' : 'rejected'
+    const keySet = new Set(itemKeys)
+    setSelectedBatch((current) => {
+      if (!current) return current
+      const items = current.items.map((item) =>
+        keySet.has(item.itemKey)
+          ? { ...item, humanReviewStatus, humanReview: { actor: 'human', decidedAt, decision } }
+          : item,
+      )
+      return { ...current, items }
+    })
+  }, [])
 
   const handleBatchItemReview = async (
     itemKey: string,
@@ -1392,8 +1428,10 @@ export default function EngineWorkspace() {
           decision: acceptanceStatus === 'accepted' ? 'approved_for_delivery' : 'rejected_by_reviewer',
         },
       })
-      applyBatchUpdate(next)
-      await refreshSelectedBatchPages()
+      // Optimistic update: patch summary + the one item locally. No refetch →
+      // the loaded items, facet filter, and scroll position all stay put.
+      applyBatchSummaryUpdate(next)
+      patchBatchItemsReview([itemKey], acceptanceStatus)
       setStatusAnnouncement(acceptanceStatus === 'accepted' ? '已确认该产物可交付' : '已拒绝该产物')
     } catch (error) {
       setWorkspaceError(errorMessage(error))
@@ -1417,8 +1455,17 @@ export default function EngineWorkspace() {
         },
         'human_review_retry',
       )
-      applyBatchUpdate(next)
-      await refreshSelectedBatchPages()
+      // Optimistic update: preserve loaded items, patch summary, and splice in
+      // the retried item from the server response (its job changed). No page-1
+      // refetch → view stays put.
+      applyBatchSummaryUpdate(next)
+      const updatedItem = next.items.find((entry) => entry.itemKey === item.itemKey)
+      if (updatedItem) {
+        setSelectedBatch((current) => {
+          if (!current || current.id !== selectedBatch.id) return current
+          return { ...current, items: current.items.map((entry) => entry.itemKey === item.itemKey ? updatedItem : entry) }
+        })
+      }
       setStatusAnnouncement('已提交该条目重新生成')
     } catch (error) {
       setWorkspaceError(errorMessage(error))
@@ -1438,8 +1485,9 @@ export default function EngineWorkspace() {
     try {
       const itemKeys = items.map((item) => item.itemKey)
       const next = await bulkReviewBatchItems(config, selectedBatch.id, itemKeys, acceptanceStatus)
-      applyBatchUpdate(next)
-      await refreshSelectedBatchPages()
+      // Optimistic update: patch summary + all reviewed items locally. No refetch.
+      applyBatchSummaryUpdate(next)
+      patchBatchItemsReview(itemKeys, acceptanceStatus)
       setStatusAnnouncement(acceptanceStatus === 'accepted' ? `已批量确认 ${itemKeys.length} 项` : `已批量拒绝 ${itemKeys.length} 项`)
     } catch (error) {
       setWorkspaceError(errorMessage(error))
@@ -1763,9 +1811,11 @@ export default function EngineWorkspace() {
             {selectedBatch ? (
               <div className="divide-y divide-stone-200 border-y border-stone-300 dark:divide-white/[0.06] dark:border-white/10">
                 {(selectedBatch.items || []).map((item) => (
-                  <div
+                  <button
+                    type="button"
                     key={item.itemKey}
-                    className="grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3"
+                    onClick={() => item.job && handleSelectJob(item.job)}
+                    className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === item.job?.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
                   >
                     <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
                       <ReviewThumbnail config={config} assetId={item.job?.finalAssetId || null} label={`条目 ${item.itemKey}`} interactive={false} />
@@ -1787,7 +1837,7 @@ export default function EngineWorkspace() {
                     <div className="flex items-center gap-2 self-center">
                       <StatusBadge state={item.job?.state || 'queued'} />
                     </div>
-                  </div>
+                  </button>
                 ))}
                 {(!selectedBatch.items || !selectedBatch.items.length) && (
                   <div className="px-4 py-16 text-center text-sm text-stone-400">该批次暂无已加载条目</div>

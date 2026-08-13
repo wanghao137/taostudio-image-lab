@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type {
+  ImageBatchItemV1,
   ImageBatchV1,
   ImageJobListV1,
   ImageJobV1,
@@ -17,6 +18,7 @@ const apiMocks = vi.hoisted(() => ({
   getImageBatch: vi.fn(),
   getImageBatchSummary: vi.fn(),
   listImageBatchItems: vi.fn(),
+  listAllImageBatchItems: vi.fn(),
   listImageBatchEvents: vi.fn(),
   subscribeImageTaskEvents: vi.fn(),
   getImageAssetBlob: vi.fn(),
@@ -60,6 +62,24 @@ const job = {
   updatedAt: '2026-07-27T00:01:00.000Z',
 } satisfies ImageJobV1
 
+const batchItem = {
+  itemKey: '1',
+  sourceItemKey: '1',
+  position: 0,
+  outputIndex: 1,
+  outputCount: 1,
+  revision: 0,
+  automationState: 'done',
+  generationStatus: 'succeeded',
+  qaStatus: 'passed',
+  acceptanceStatus: 'accepted',
+  humanReviewStatus: 'approved',
+  humanReview: null,
+  review: null,
+  job,
+  jobHistory: [],
+} satisfies ImageBatchItemV1
+
 const batch = {
   id: 'batch-selection-test',
   name: 'Selection test batch',
@@ -91,7 +111,7 @@ const batch = {
     humanReviewApproved: 1,
     humanReviewRejected: 0,
   },
-  items: [],
+  items: [batchItem],
   events: [],
   createdAt: '2026-07-27T00:00:00.000Z',
   updatedAt: '2026-07-27T00:01:00.000Z',
@@ -179,6 +199,7 @@ describe('EngineWorkspace inspector selection', () => {
     apiMocks.getImageBatch.mockResolvedValue(batch)
     apiMocks.getImageBatchSummary.mockResolvedValue((({ items: _items, events: _events, ...summary }) => summary)(batch))
     apiMocks.listImageBatchItems.mockResolvedValue({ items: batch.items, nextCursor: null, total: batch.stats.total })
+    apiMocks.listAllImageBatchItems.mockResolvedValue(batch.items)
     apiMocks.listImageBatchEvents.mockResolvedValue({ items: batch.events, nextCursor: null, total: batch.events.length })
     apiMocks.subscribeImageTaskEvents.mockImplementation((_config, options) => new Promise((_resolve, reject) => {
       options.onOpen?.()
@@ -188,12 +209,12 @@ describe('EngineWorkspace inspector selection', () => {
 
   afterEach(() => cleanup())
 
-  // The historical batch groups (已结束但不完整 / 已归档) are collapsed by
+  // The historical batch groups (已结束但不完整 / 历史批次) are collapsed by
   // default; tests that need to interact with an archived batch must expand it
   // first by clicking its section header.
   async function expandArchivedBatches() {
-    // The archived section header is a button with aria-expanded=false.
-    const header = await screen.findByRole('button', { name: /已归档/ }, { timeout: 10_000 })
+    // The history section header is a button with aria-expanded=false.
+    const header = await screen.findByRole('button', { name: /历史批次/ }, { timeout: 10_000 })
     if (header.getAttribute('aria-expanded') === 'false') fireEvent.click(header)
   }
 
@@ -204,7 +225,8 @@ describe('EngineWorkspace inspector selection', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
     expect(await screen.findByText('Batch detail')).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
+    // The batch task queue loads asynchronously; wait for the item row to appear.
+    fireEvent.click(await screen.findByRole('button', { name: /Selection test image/ }, { timeout: 10_000 }))
 
     expect(await screen.findByText('Job detail')).toBeTruthy()
     expect(screen.queryByText('Batch detail')).toBeNull()
@@ -219,7 +241,9 @@ describe('EngineWorkspace inspector selection', () => {
 
     await expandArchivedBatches()
     fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
-    fireEvent.click(screen.getByRole('button', { name: /Selection test image/ }))
+    // Items load independently of the delayed summary, so the batch-item row
+    // is clickable while the summary fetch is still pending.
+    fireEvent.click(await screen.findByRole('button', { name: /Selection test image/ }, { timeout: 10_000 }))
     expect(await screen.findByText('Job detail')).toBeTruthy()
 
     resolveBatch((({ items: _items, events: _events, ...summary }) => summary)(batch) as ImageBatchV1)
@@ -257,10 +281,10 @@ describe('EngineWorkspace inspector selection', () => {
 
     const activeSection = await screen.findByLabelText('执行中')
     const attentionSection = screen.getByLabelText('待处理')
-    // The archived group is collapsed by default; expand it to assert its rows.
-    const historyHeader = screen.getByRole('button', { name: /已归档/ })
+    // The history group is collapsed by default; expand it to assert its rows.
+    const historyHeader = screen.getByRole('button', { name: /历史批次/ })
     fireEvent.click(historyHeader)
-    const historySection = screen.getByLabelText('已归档')
+    const historySection = screen.getByLabelText('历史批次')
     expect(within(activeSection).getByText('Active batch')).toBeTruthy()
     expect(within(attentionSection).getByText('Interrupted batch')).toBeTruthy()
     expect(within(historySection).getByText('Selection test batch')).toBeTruthy()
