@@ -879,18 +879,32 @@ export class TaskRepository {
     const requestHash = sha256(requestJson)
     const logicalKey = request.logicalKey?.trim() || null
     if (logicalKey) {
-      const existingLogical = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
-      if (existingLogical) return { batch: this.getBatch(existingLogical.id), created: false, logicalReused: true }
+      const existingLogical = this.db.prepare('SELECT id, control_state FROM batches WHERE logical_key=?').get(logicalKey)
+      if (existingLogical) {
+        if (this.isBatchTerminal(existingLogical.id, existingLogical.control_state)) {
+          // The previous batch for this logical scope is done. Release the key
+          // so the fresh batch below can claim it for the remaining manifest
+          // items instead of replaying a dead batch.
+          this.releaseBatchLogicalKey(existingLogical.id, logicalKey, 'batch_terminal')
+        } else {
+          return { batch: this.getBatch(existingLogical.id), created: false, logicalReused: true }
+        }
+      }
     }
     const existing = this.db.prepare('SELECT * FROM batches WHERE idempotency_key=?').get(request.idempotencyKey)
     if (existing) {
-      if (existing.request_hash !== requestHash) {
+      if (this.isBatchTerminal(existing.id, existing.control_state)) {
+        // Terminal batch is holding this idempotency key but will never resume.
+        // Release it so the fresh batch below can reuse the key.
+        this.releaseBatchLogicalKey(existing.id, existing.idempotency_key, 'batch_terminal')
+      } else if (existing.request_hash !== requestHash) {
         throw Object.assign(new Error('batch idempotency key was already used with different input'), {
           statusCode: 409,
           code: 'BATCH_IDEMPOTENCY_CONFLICT',
         })
+      } else {
+        return { batch: this.getBatch(existing.id), created: false }
       }
-      return { batch: this.getBatch(existing.id), created: false }
     }
 
     const id = `batch_${randomUUID()}`
@@ -900,10 +914,14 @@ export class TaskRepository {
       // A second runner can reach this point after the optimistic read above. The
       // immediate transaction makes the logical-key check and first claim atomic.
       if (logicalKey) {
-        const existingLogical = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
+        const existingLogical = this.db.prepare('SELECT id, control_state FROM batches WHERE logical_key=?').get(logicalKey)
         if (existingLogical) {
-          this.db.exec('COMMIT')
-          return { batch: this.getBatch(existingLogical.id), created: false, logicalReused: true }
+          if (this.isBatchTerminal(existingLogical.id, existingLogical.control_state)) {
+            this.releaseBatchLogicalKey(existingLogical.id, logicalKey, 'batch_terminal')
+          } else {
+            this.db.exec('COMMIT')
+            return { batch: this.getBatch(existingLogical.id), created: false, logicalReused: true }
+          }
         }
       }
       for (const item of request.items) {
@@ -967,9 +985,46 @@ export class TaskRepository {
     return { batch: this.getBatch(id), created: true }
   }
 
+  // A batch is terminal when it will never produce more work: either it was
+  // explicitly archived, or every one of its items reached a terminal job state
+  // (succeeded / failed / cancelled). Terminal batches release their logical
+  // key so the next manifest run can create a fresh batch for remaining items.
+  isBatchTerminal(batchId, controlState) {
+    if (controlState === 'archived') return true
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN j.state IN ('succeeded','failed','cancelled') THEN 1 ELSE 0 END) AS terminal
+      FROM batch_items bi
+      JOIN jobs j ON j.id = bi.job_id
+      WHERE bi.batch_id = ?
+    `).get(batchId)
+    return Boolean(row && row.total > 0 && row.terminal === row.total)
+  }
+
+  releaseBatchLogicalKey(batchId, logicalKey, reason) {
+    // Free both identity columns so a terminal batch never blocks a fresh run
+    // from reclaiming the same logical key / idempotency key. The runner reuses
+    // one value for both, so both must be cleared together. logical_key is
+    // nullable (set to NULL); idempotency_key is NOT NULL, so it gets a unique
+    // tombstone value that will never collide with a real key.
+    const tombstone = `released:${batchId}:${now()}`
+    this.db.prepare('UPDATE batches SET logical_key=NULL, idempotency_key=?, updated_at=? WHERE id=?').run(tombstone, now(), batchId)
+    this.recordBatchEvent(batchId, 'logical_key_released', { logicalKey, reason })
+  }
+
+  // Resume lookup: only return a batch that still has open work. A terminal
+  // batch (archived or fully completed) is invisible here so callers fall
+  // through to creating a new batch instead of replaying a dead one.
   getBatchByLogicalKey(logicalKey) {
-    const row = this.db.prepare('SELECT id FROM batches WHERE logical_key=?').get(logicalKey)
-    return row ? this.getBatch(row.id) : null
+    const row = this.db.prepare(`
+      SELECT b.id, b.control_state AS control_state
+      FROM batches b
+      WHERE b.logical_key = ?
+    `).get(logicalKey)
+    if (!row) return null
+    if (this.isBatchTerminal(row.id, row.control_state)) return null
+    return this.getBatch(row.id)
   }
 
   adoptBatchLogicalKey(id, logicalKey) {

@@ -47,6 +47,8 @@ const selectedIndex = cliIndex ? Number(cliIndex.split('=')[1]) : null
 const limit = cliLimit ? Number(cliLimit.split('=')[1]) : Number.POSITIVE_INFINITY
 const runId = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '')
 
+const TERMINAL_JOB_STATES = new Set(['succeeded', 'failed', 'cancelled'])
+
 function hash(value) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -761,6 +763,14 @@ await persistState()
 const completed = Object.values(state.items).filter((item) => item.status === 'succeeded')
 const existingLookup = await callMcp('image_batch_find_by_logical_key', { logicalKey: logicalBatchKey })
 let activeBatch = existingLookup.batch || null
+// Safety net: if the matched batch has no open work left (every item reached a
+// terminal state), don't try to resume it — fall through to creating a fresh
+// batch for the remaining manifest scope. The engine also frees the logical
+// key from terminal batches, but this avoids relying on that path alone.
+if (activeBatch && activeBatch.items.every((item) => TERMINAL_JOB_STATES.has(item.job?.state))) {
+  console.log(`BATCH_PREVIOUS_DONE batch=${activeBatch.id} reason=all_items_terminal`)
+  activeBatch = null
+}
 if (!activeBatch && state.batchId) {
   try {
     const legacyBatch = await callMcp('image_batch_get', { batchId: state.batchId })
@@ -789,9 +799,14 @@ const ready = activeBatch
     .filter((entry) => !reconciliation.engineSucceeded.has(entry.itemKey))
     .filter((entry) => plannedItemKeys.has(entry.itemKey))
 if (activeBatch) {
-  const missingManifestEntries = activeBatch.items.filter((item) => !entryByItemKey.has(item.itemKey))
+  // Only unresolved (non-succeeded) items must be in the planned scope.
+  // Succeeded items legitimately fall out of scope as the manifest advances,
+  // so they are not a mismatch — this is what lets a fresh slice run after a
+  // previous slice on the same logical key finished.
+  const unresolved = activeBatch.items.filter((item) => item.job?.state !== 'succeeded')
+  const missingManifestEntries = unresolved.filter((item) => !entryByItemKey.has(item.itemKey))
   if (missingManifestEntries.length) {
-    throw new Error(`logical batch ${activeBatch.id} no longer matches the manifest; ${missingManifestEntries.length} item(s) are missing`)
+    throw new Error(`logical batch ${activeBatch.id} has ${missingManifestEntries.length} unresolved item(s) not in the planned scope`)
   }
 }
 console.log(`QUEUE_READY mode=${activeBatch ? 'resume' : 'create'} selected=${ready.length} alreadySucceeded=${completed.length}`)
