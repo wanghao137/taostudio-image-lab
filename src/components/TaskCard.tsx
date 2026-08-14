@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, type ReactNode } from 'react'
+import { memo, useEffect, useState, useRef, type ReactNode } from 'react'
 import type { TaskRecord } from '../types'
 import { useStore, retryTask } from '../store'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
@@ -67,7 +67,10 @@ function TaskActionButton({
   )
 }
 
-export default function TaskCard({
+// memo 化：画廊里每次任务 tick/选中切换都会让整列表重渲染；props 全部
+// 可稳定（task 引用只在自身变更时更换、回调由 TaskGrid 以 useCallback 提供），
+// 未变的卡片现在跳过渲染。
+function TaskCard({
   task,
   onReuse,
   onEditOutputs,
@@ -773,3 +776,5 @@ export default function TaskCard({
     </div>
   )
 }
+
+export default memo(TaskCard)

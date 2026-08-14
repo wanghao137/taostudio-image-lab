@@ -467,7 +467,15 @@ export default function InputBar() {
   const selectedFavoriteCollectionIds = useStore((s) => s.selectedFavoriteCollectionIds)
   const setSelectedFavoriteCollectionIds = useStore((s) => s.setSelectedFavoriteCollectionIds)
   const clearFavoriteCollectionSelection = useStore((s) => s.clearFavoriteCollectionSelection)
-  const tasks = useStore((s) => s.tasks)
+  // 订阅收窄：完整 tasks 数组只在批量操作回调里按需 getState 读取。
+  // 此前整订 s.tasks 让 2738 行的输入栏在每次任务 tick/选中切换时全量重渲染。
+  const getTasks = useCallback(() => useStore.getState().tasks, [])
+  /** 批量栏收藏图标所需的最小派生值（布尔，引用稳定）。 */
+  const allSelectedTasksFavorite = useStore((s) => {
+    if (s.selectedTaskIds.length === 0) return false
+    const byId = new Map(s.tasks.map((t) => [t.id, t]))
+    return s.selectedTaskIds.every((id) => byId.get(id)?.isFavorite === true)
+  })
   const favoriteCollections = useStore((s) => s.favoriteCollections)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
@@ -541,10 +549,11 @@ export default function InputBar() {
     handleFiles,
   } = useImageComposer()
 
-  const filteredTasks = useMemo(() => {
+  const getFilteredTasks = useCallback(() => {
+    const tasks = getTasks()
     const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
     const q = searchQuery.trim().toLowerCase()
-    
+
     return sorted.filter((t) => {
       if (filterFavorite) {
         if (!t.isFavorite) return false
@@ -552,17 +561,18 @@ export default function InputBar() {
       }
       const matchStatus = filterStatus === 'all' || t.status === filterStatus
       if (!matchStatus) return false
-      
+
       if (!q) return true
       const prompt = (t.prompt || '').toLowerCase()
       const paramStr = JSON.stringify(t.params).toLowerCase()
       return prompt.includes(q) || paramStr.includes(q)
     })
-  }, [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId])
+  }, [getTasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId])
 
   const inCollectionOverview = filterFavorite && !activeFavoriteCollectionId
 
-  const favoriteCollectionCards = useMemo(() => {
+  const getFavoriteCollectionCards = useCallback(() => {
+    const tasks = getTasks()
     return [
       {
         id: ALL_FAVORITES_COLLECTION_ID,
@@ -576,19 +586,21 @@ export default function InputBar() {
         tasks: getFavoriteCollectionTasksForBatch(collection.id, tasks),
       })),
     ]
-  }, [favoriteCollections, tasks])
+  }, [favoriteCollections, getTasks])
 
-  const filteredFavoriteCollectionCards = useMemo(() => {
+  const getFilteredFavoriteCollectionCards = useCallback(() => {
+    const favoriteCollectionCards = getFavoriteCollectionCards()
     if (!searchQuery.trim()) return favoriteCollectionCards
     const lowerQuery = searchQuery.toLowerCase()
     return favoriteCollectionCards.filter((collection) => collection.name.toLowerCase().includes(lowerQuery))
-  }, [favoriteCollectionCards, searchQuery])
+  }, [getFavoriteCollectionCards, searchQuery])
 
   const handleSelectAllVisibleTasks = useCallback(() => {
-    setSelectedTaskIds(filteredTasks.map((task) => task.id))
-  }, [filteredTasks, setSelectedTaskIds])
+    setSelectedTaskIds(getFilteredTasks().map((task) => task.id))
+  }, [getFilteredTasks, setSelectedTaskIds])
 
   const handleInvertVisibleTasks = useCallback(() => {
+    const filteredTasks = getFilteredTasks()
     const visibleIds = new Set(filteredTasks.map((task) => task.id))
     setSelectedTaskIds((current) => {
       const currentSet = new Set(current)
@@ -598,13 +610,14 @@ export default function InputBar() {
       })
       return next
     })
-  }, [filteredTasks, setSelectedTaskIds])
+  }, [getFilteredTasks, setSelectedTaskIds])
 
   const handleSelectAllVisibleFavoriteCollections = useCallback(() => {
-    setSelectedFavoriteCollectionIds(filteredFavoriteCollectionCards.map((collection) => collection.id))
-  }, [filteredFavoriteCollectionCards, setSelectedFavoriteCollectionIds])
+    setSelectedFavoriteCollectionIds(getFilteredFavoriteCollectionCards().map((collection) => collection.id))
+  }, [getFilteredFavoriteCollectionCards, setSelectedFavoriteCollectionIds])
 
   const handleInvertVisibleFavoriteCollections = useCallback(() => {
+    const filteredFavoriteCollectionCards = getFilteredFavoriteCollectionCards()
     const visibleIds = new Set(filteredFavoriteCollectionCards.map((collection) => collection.id))
     setSelectedFavoriteCollectionIds((current) => {
       const currentSet = new Set(current)
@@ -614,7 +627,7 @@ export default function InputBar() {
       })
       return next
     })
-  }, [filteredFavoriteCollectionCards, setSelectedFavoriteCollectionIds])
+  }, [getFilteredFavoriteCollectionCards, setSelectedFavoriteCollectionIds])
 
   const handleToggleFavorite = useCallback(() => {
     openFavoritePicker(selectedTaskIds)
@@ -631,7 +644,7 @@ export default function InputBar() {
   }, [selectedTaskIds, setConfirmDialog])
 
   const handleDownloadSelected = useCallback(async () => {
-    const selectedTasks = tasks.filter((t) => selectedTaskIds.includes(t.id))
+    const selectedTasks = getTasks().filter((t) => selectedTaskIds.includes(t.id))
     const imageIds = selectedTasks.flatMap(t => t.outputImages || [])
     if (imageIds.length === 0) {
       showToast('选中的任务没有图片', 'info')
@@ -657,11 +670,11 @@ export default function InputBar() {
       showToast('下载失败', 'error')
     }
     clearSelection()
-  }, [tasks, selectedTaskIds, settings.zipDownloadRoutes, showToast, clearSelection])
+  }, [getTasks, selectedTaskIds, settings.zipDownloadRoutes, showToast, clearSelection])
 
   const handleDownloadSelectedFavoriteCollections = useCallback(async () => {
     const selectedIdSet = new Set(selectedFavoriteCollectionIds)
-    const selectedCollections = favoriteCollectionCards.filter((collection) => selectedIdSet.has(collection.id))
+    const selectedCollections = getFavoriteCollectionCards().filter((collection) => selectedIdSet.has(collection.id))
     if (selectedCollections.length === 0) return
 
     let successCount = 0
@@ -698,7 +711,7 @@ export default function InputBar() {
       showToast('下载失败', 'error')
     }
     clearFavoriteCollectionSelection()
-  }, [clearFavoriteCollectionSelection, favoriteCollectionCards, selectedFavoriteCollectionIds, settings.zipDownloadRoutes, showToast])
+  }, [clearFavoriteCollectionSelection, getFavoriteCollectionCards, selectedFavoriteCollectionIds, settings.zipDownloadRoutes, showToast])
 
   const handleDeleteSelectedFavoriteCollections = useCallback(() => {
     const selectedIdSet = new Set(selectedFavoriteCollectionIds)
@@ -714,7 +727,7 @@ export default function InputBar() {
 
     const selectedCollectionIds = new Set(selectedCollections.map((collection) => collection.id))
     const imageCount = new Set(
-      tasks
+      getTasks()
         .filter((task) => getTaskFavoriteCollectionIds(task).some((id) => selectedCollectionIds.has(id)))
         .flatMap((task) => task.outputImages || []),
     ).size
@@ -734,7 +747,7 @@ export default function InputBar() {
         clearFavoriteCollectionSelection()
       },
     })
-  }, [clearFavoriteCollectionSelection, favoriteCollections, selectedFavoriteCollectionIds, setConfirmDialog, showToast, tasks])
+  }, [clearFavoriteCollectionSelection, favoriteCollections, getTasks, selectedFavoriteCollectionIds, setConfirmDialog, showToast])
 
   const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
   const moveInputImage = useStore((s) => s.moveInputImage)
@@ -857,10 +870,21 @@ export default function InputBar() {
   const qualityHint = useHintTooltip({ enabled: () => settings.codexCli || isFalProvider })
   const cursorPosition = cursorPos
   const visiblePrompt = stripImageMentionMarkers(prompt)
+  // 窄订阅键：轮次产出图只在「任务 outputImages 变化」时才变。
+  // getTasks() 是稳定引用（无效依赖），没有这个键的话图像任务完成
+  // （tasks-only 写入）不会触发 memo 重算，@第N轮图M 提及选项会过期。
+  const agentRoundImageKey = useStore((s) => {
+    const conv = s.agentConversations.find((c) => c.id === s.activeAgentConversationId)
+    if (!conv) return ''
+    return getActiveAgentRounds(conv)
+      .map((r) => r.outputTaskIds.map((id) =>
+        `${id}:${s.tasks.find((t) => t.id === id)?.outputImages?.join(',') ?? ''}`).join('|'))
+      .join('||')
+  })
   const agentOutputImageOptions = useMemo<AtImageOption[]>(() => {
     if (!activeAgentConversation) return []
     return getActiveAgentRounds(activeAgentConversation).flatMap((round) =>
-      collectAgentRoundOutputImageSlots(round, tasks).flatMap((imageId, imageIndex) => {
+      collectAgentRoundOutputImageSlots(round, getTasks()).flatMap((imageId, imageIndex) => {
         if (!imageId) return []
         const label = `@第${round.index}轮图${imageIndex + 1}`
         return {
@@ -872,7 +896,7 @@ export default function InputBar() {
         }
       }),
     )
-  }, [activeAgentConversation, tasks])
+  }, [activeAgentConversation, agentRoundImageKey])
   const atImageSourceCount = inputImages.length + agentOutputImageOptions.length
   const atImageQuery = isCursorInSelectedImageMention(prompt, cursorPosition)
     ? null
@@ -2342,7 +2366,7 @@ export default function InputBar() {
                 className="p-2 text-yellow-500 dark:text-yellow-400 hover:text-yellow-600 dark:hover:text-yellow-300 transition-colors"
                 tooltip="编辑收藏夹"
               >
-                {selectedTaskIds.length > 0 && selectedTaskIds.every((id) => tasks.find((t) => t.id === id)?.isFavorite) ? (
+                {allSelectedTasksFavorite ? (
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
                   </svg>

@@ -1,7 +1,8 @@
-import { useMemo, useRef, useState, useEffect } from 'react'
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask } from '../store'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds } from '../lib/favoriteState'
 import TaskCard from './TaskCard'
+import type { TaskRecord } from '../types'
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
@@ -50,13 +51,71 @@ export default function TaskGrid() {
     })
   }, [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
 
-  const handleDelete = (task: typeof tasks[0]) => {
+  const handleDelete = useCallback((task: typeof tasks[0]) => {
     setConfirmDialog({
       title: '删除任务',
       message: '确定要删除这个任务吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
       action: () => removeTask(task),
     })
-  }
+  }, [setConfirmDialog])
+
+  // 稳定回调：TaskCard 已 memo 化，这里必须提供引用稳定的 props，
+  // 否则每次 TaskGrid 渲染都生成新闭包让 memo 失效。
+  const handleCardClick = useCallback((task: TaskRecord) => (e: React.MouseEvent | React.TouchEvent) => {
+    if (Date.now() < suppressClickUntil.current) {
+      e.preventDefault()
+      return
+    }
+    suppressClickUntil.current = 0
+    const isCtrl = isMac ? (e as React.MouseEvent).metaKey : (e as React.MouseEvent).ctrlKey
+    if (isCtrl) {
+      useStore.getState().toggleTaskSelection(task.id)
+      return
+    }
+    setDetailTaskId(task.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMac, setDetailTaskId])
+
+  // 每张卡一个 memo 化的 handler（keyed by task 引用），避免内联箭头函数破坏 TaskCard 的 memo
+  const cardClickCache = useRef(new WeakMap<TaskRecord, (e: React.MouseEvent | React.TouchEvent) => void>())
+  const getCardClick = useCallback((task: TaskRecord) => {
+    let handler = cardClickCache.current.get(task)
+    if (!handler) {
+      handler = handleCardClick(task)
+      cardClickCache.current.set(task, handler)
+    }
+    return handler
+  }, [handleCardClick])
+  const cardActionCaches = useRef({
+    reuse: new WeakMap<TaskRecord, () => void>(),
+    editOutputs: new WeakMap<TaskRecord, () => void>(),
+    delete: new WeakMap<TaskRecord, () => void>(),
+  })
+  const getCardAction = useCallback((
+    kind: keyof typeof cardActionCaches.current,
+    task: TaskRecord,
+    invoke: (t: TaskRecord) => void,
+  ) => {
+    const cache = cardActionCaches.current[kind]
+    let handler = cache.get(task)
+    if (!handler) {
+      handler = () => invoke(task)
+      cache.set(task, handler)
+    }
+    return handler
+  }, [])
+
+  const handleReuse = useCallback((task: TaskRecord) => {
+    reuseConfig(task)
+  }, [])
+
+  const handleEditOutputs = useCallback((task: TaskRecord) => {
+    editOutputs(task)
+  }, [])
+
+  const handleCardDelete = useCallback((task: TaskRecord) => {
+    handleDelete(task)
+  }, [handleDelete])
 
   const getPagePoint = (clientX: number, clientY: number) => ({
     pageX: clientX + window.scrollX,
@@ -304,23 +363,10 @@ export default function TaskGrid() {
           <div key={task.id} className="task-card-wrapper" data-task-id={task.id}>
             <TaskCard
               task={task}
-              onClick={(e) => {
-                if (Date.now() < suppressClickUntil.current) {
-                  e.preventDefault()
-                  return
-                }
-                suppressClickUntil.current = 0
-                const isCtrl = isMac ? e.metaKey : e.ctrlKey
-                if (isCtrl) {
-                  useStore.getState().toggleTaskSelection(task.id)
-                  return
-                }
-
-                setDetailTaskId(task.id)
-              }}
-              onReuse={() => reuseConfig(task)}
-              onEditOutputs={() => editOutputs(task)}
-              onDelete={() => handleDelete(task)}
+              onClick={getCardClick(task)}
+              onReuse={getCardAction('reuse', task, handleReuse)}
+              onEditOutputs={getCardAction('editOutputs', task, handleEditOutputs)}
+              onDelete={getCardAction('delete', task, handleCardDelete)}
               isSelected={selectedTaskIds.includes(task.id)}
             />
           </div>
