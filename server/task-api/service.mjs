@@ -967,8 +967,10 @@ export class TaskRepository {
           this.db.prepare('INSERT INTO batch_item_jobs (batch_id,item_key,revision,job_id,reason,created_at) VALUES (?,?,?,?,?,?)')
             .run(id, item.itemKey, 0, result.job.id, 'initial', timestamp)
         } catch (error) {
-          if (String(error?.message || '').includes('UNIQUE constraint failed: batch_items.job_id')) {
-            throw Object.assign(new Error(`job ${result.job.id} already belongs to another batch`), {
+          const message = String(error?.message || '')
+          if (message.includes('UNIQUE constraint failed: batch_items.job_id')
+            || message.includes('UNIQUE constraint failed: batch_item_jobs.job_id')) {
+            throw Object.assign(new Error(`job ${result.job.id} already belongs to another batch (item ${item.itemKey}); use a batch-level idempotency key unique to this attempt`), {
               statusCode: 409,
               code: 'JOB_ALREADY_BATCHED',
             })

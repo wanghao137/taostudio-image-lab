@@ -578,9 +578,13 @@ async function reconcileEngineToLocal() {
     const { DatabaseSync } = await import('node:sqlite')
     const sqlitePath = resolve(workDir, '..', 'jobs.sqlite')
     const db = new DatabaseSync(sqlitePath, { readOnly: true })
+    // Scope to batches with THIS run's output_root: item keys ("1", "2", …) are
+    // only unique within one pipeline. Without the output_root filter, rows from
+    // an unrelated manifest family (e.g. meigen "75") collide with this run's
+    // entries and would harvest the wrong images into this run's folders.
     const engineRows = db.prepare(
-      'SELECT DISTINCT bi.source_item_key, bi.item_key, bi.batch_id, j.id as job_id, j.source_asset_id, j.final_asset_id, j.request_json FROM batch_items bi JOIN jobs j ON bi.job_id=j.id WHERE j.state=? AND j.source_asset_id IS NOT NULL AND bi.source_item_key IS NOT NULL',
-    ).all('succeeded')
+      "SELECT DISTINCT bi.source_item_key, bi.item_key, bi.batch_id, j.id as job_id, j.source_asset_id, j.final_asset_id, j.request_json FROM batch_items bi JOIN jobs j ON bi.job_id=j.id JOIN batches b ON b.id=bi.batch_id WHERE j.state=? AND j.source_asset_id IS NOT NULL AND bi.source_item_key IS NOT NULL AND b.output_root=?",
+    ).all('succeeded', outputRoot)
     db.close()
     const engineSucceeded = new Map()
     for (const r of engineRows) {
@@ -653,6 +657,9 @@ if (reconciliation.missing.length) {
     try {
       const sourcePath = resolve(directory, `\u5019\u9009-${engRow.job_id}-\u539f\u56fe.png`)
       const finalPath = resolve(directory, `\u5019\u9009-${engRow.job_id}-4K.png`)
+      // The directory may not exist yet when reconciling before the main loop
+      // pre-creates entry folders (or on a fresh output root).
+      await mkdir(directory, { recursive: true })
       // 清理可能残留的候选文件，避免引擎下载因 EEXIST 失败
       for (const stale of [sourcePath, finalPath]) {
         if (existsSync(stale)) await unlink(stale)
@@ -845,8 +852,13 @@ for (const entry of ready) {
 
 if (queuedEntries.length) {
   if (!activeBatch) {
+    // The create idempotency key is scoped to THIS runner attempt (runId).
+    // Job-level keys derive from it, so a fresh attempt creates fresh jobs
+    // instead of resurrecting succeeded jobs from a previous, now-terminal
+    // batch — which would violate batch_item_jobs' UNIQUE(job_id) when linked
+    // into the new batch. logicalKey stays stable for resume-by-lookup.
     const batchResult = await callMcp('image_batch_create', {
-      idempotencyKey: logicalBatchKey,
+      idempotencyKey: `${logicalBatchKey}-${runId}`,
       logicalKey: logicalBatchKey,
       name: displayName,
       outputRoot,
