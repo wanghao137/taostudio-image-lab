@@ -1,4 +1,4 @@
-import type { AgentConversation, AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, TaskParams } from '../types'
+import type { AgentConversation, AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PromptHistoryEntry, TaskParams } from '../types'
 import { normalizeSettings } from './apiProfiles'
 import { normalizeAgentConversations } from './agentConversationState'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
@@ -21,6 +21,8 @@ export interface PersistedAppState {
   agentAssetPanelCollapsed: boolean
   favoriteCollections: FavoriteCollection[]
   defaultFavoriteCollectionId: string | null
+  /** 画廊提示词历史；旧持久化数据可能缺失，恢复时由 normalizePromptHistory 兜底为 [] */
+  promptHistory?: PromptHistoryEntry[]
   supportPromptDismissed: boolean
   supportPromptOpen: boolean
   supportPromptSkippedForImportedData: boolean
@@ -82,6 +84,25 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
   }
 }
 
+export function normalizePromptHistory(value: unknown): PromptHistoryEntry[] {
+  if (!Array.isArray(value)) return []
+  const entries: PromptHistoryEntry[] = []
+  for (const item of value) {
+    if (!isRecord(item) || typeof item.prompt !== 'string' || !item.prompt.trim()) continue
+    entries.push({
+      id: typeof item.id === 'string' ? item.id : `${item.usedAt ?? Date.now()}-${entries.length}`,
+      prompt: item.prompt,
+      size: typeof item.size === 'string' ? item.size : 'auto',
+      quality: item.quality === 'low' || item.quality === 'medium' || item.quality === 'high' ? item.quality : 'auto',
+      output_format: item.output_format === 'jpeg' || item.output_format === 'webp' ? item.output_format : 'png',
+      n: typeof item.n === 'number' && Number.isFinite(item.n) && item.n > 0 ? item.n : 1,
+      usedAt: typeof item.usedAt === 'number' && Number.isFinite(item.usedAt) ? item.usedAt : Date.now(),
+    })
+    if (entries.length >= 20) break
+  }
+  return entries
+}
+
 export function createPersistedState(state: PersistedStateSource, includeLegacyAgentConversations = false): PersistedAppState {
   const settings = normalizeSettings(state.settings)
   const galleryInputDraft = saveGalleryInputDraft(state)
@@ -109,6 +130,7 @@ export function createPersistedState(state: PersistedStateSource, includeLegacyA
     agentAssetPanelCollapsed: state.agentAssetPanelCollapsed,
     favoriteCollections: state.favoriteCollections,
     defaultFavoriteCollectionId: state.defaultFavoriteCollectionId,
+    promptHistory: normalizePromptHistory(state.promptHistory),
     supportPromptDismissed: state.supportPromptDismissed,
     supportPromptOpen: state.supportPromptOpen,
     supportPromptSkippedForImportedData: state.supportPromptSkippedForImportedData,
@@ -191,6 +213,7 @@ export function normalizePersistedState(
       agentAssetPanelCollapsed: Boolean(persistedState.agentAssetPanelCollapsed),
       favoriteCollections,
       defaultFavoriteCollectionId: resolveDefaultFavoriteCollectionId(favoriteCollections, preferredDefaultFavoriteCollectionId),
+      promptHistory: normalizePromptHistory(persistedState.promptHistory),
       supportPromptDismissed: Boolean(persistedState.supportPromptDismissed),
       supportPromptOpen: Boolean(persistedState.supportPromptOpen),
       supportPromptSkippedForImportedData: Boolean(persistedState.supportPromptSkippedForImportedData),

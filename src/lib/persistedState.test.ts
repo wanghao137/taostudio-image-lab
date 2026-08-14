@@ -333,3 +333,28 @@ describe('persisted state codec', () => {
     expect(merged[1].title).toBe('legacy')
   })
 })
+
+describe('normalizePromptHistory', () => {
+  it('sanitizes malformed entries and caps at 20', async () => {
+    const { normalizePromptHistory } = await import('./persistedState')
+    const malformed = [
+      { prompt: 'ok prompt', size: '1024x1024', usedAt: 1 },
+      { prompt: '', usedAt: 2 },
+      { nope: true },
+      'garbage',
+    ]
+    const result = normalizePromptHistory(malformed)
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ prompt: 'ok prompt', quality: 'auto', output_format: 'png', n: 1 })
+
+    const many = Array.from({ length: 30 }, (_, i) => ({ prompt: `p${i}`, usedAt: i }))
+    expect(normalizePromptHistory(many)).toHaveLength(20)
+  })
+
+  it('is idempotent for already-normalized entries', async () => {
+    const { normalizePromptHistory } = await import('./persistedState')
+    const once = normalizePromptHistory([{ id: 'a', prompt: 'x', size: 'auto', quality: 'high', output_format: 'png', n: 2, usedAt: 5 }])
+    const twice = normalizePromptHistory(once)
+    expect(twice).toEqual(once)
+  })
+})

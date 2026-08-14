@@ -14,6 +14,7 @@ import type {
   MaskDraft,
   TaskRecord,
   FavoriteCollection,
+  PromptHistoryEntry,
   ResponsesOutputItem,
   StoredImage,
   StoredImageThumbnail,
@@ -23,7 +24,7 @@ import type {
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
 import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
-import { remapImageMentionsForOrder, replaceImageMentionsForApi } from './lib/promptImageMentions'
+import { remapImageMentionsForOrder, replaceImageMentionsForApi, stripImageMentionMarkers } from './lib/promptImageMentions'
 import {
   getAllTasks,
   putTask as dbPutTask,
@@ -163,6 +164,7 @@ taskClearChannel?.addEventListener('message', (event: MessageEvent) => {
   customRecoveryAbortControllers.clear()
   for (const timer of openAIWatchdogTimers.values()) clearTimeout(timer)
   openAIWatchdogTimers.clear()
+  clearTaskPersistRetryTimers()
   for (const controller of agentRoundControllers.values()) controller.abort()
   agentRoundControllers.clear()
   agentRecoveryContinuations.clear()
@@ -439,6 +441,10 @@ interface AppState {
   // 任务列表
   tasks: TaskRecord[]
   setTasks: (t: TaskRecord[]) => void
+  /** 画廊提示词历史（最近 20 条，持久化到 localStorage），用于一键回填 */
+  promptHistory: PromptHistoryEntry[]
+  recordPromptHistory: (prompt: string, params: TaskParams) => void
+  clearPromptHistory: () => void
   favoriteCollections: FavoriteCollection[]
   setFavoriteCollections: (collections: FavoriteCollection[]) => void
   defaultFavoriteCollectionId: string | null
@@ -942,6 +948,25 @@ export const useStore = create<AppState>()(
           ? { supportPromptSkippedForImportedData: false }
           : {}),
       })),
+      promptHistory: [],
+      recordPromptHistory: (prompt, params) => {
+        const trimmed = prompt.trim()
+        if (!trimmed) return
+        set((state) => {
+          const deduped = state.promptHistory.filter((entry) => entry.prompt !== trimmed)
+          const entry: PromptHistoryEntry = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            prompt: trimmed,
+            size: params.size,
+            quality: params.quality,
+            output_format: params.output_format,
+            n: params.n,
+            usedAt: Date.now(),
+          }
+          return { promptHistory: [entry, ...deduped].slice(0, 20) }
+        })
+      },
+      clearPromptHistory: () => set({ promptHistory: [] }),
       favoriteCollections: [createDefaultFavoriteCollection()],
       setFavoriteCollections: (favoriteCollections) => set((state) => {
         const nextCollections = ensureDefaultFavoriteCollection(normalizeFavoriteCollections(favoriteCollections))
@@ -1142,11 +1167,56 @@ function getPersistableTask(task: TaskRecord): TaskRecord {
   return rawResponsePayload === task.rawResponsePayload ? task : { ...task, rawResponsePayload }
 }
 
+// 任务持久化失败重试：IndexedDB 写入失败（配额/瞬态锁）时 UI 与磁盘会静默分叉，
+// 刷新后画廊部分消失。这里统一兜底：指数退避重试，最终失败弹一次去重提示。
+let taskPersistFailedNotified = false
+const taskPersistRetryQueue = new Map<string, { attempts: number; timer: ReturnType<typeof setTimeout> }>()
+const TASK_PERSIST_MAX_ATTEMPTS = 3
+
+function clearTaskPersistRetryTimers() {
+  for (const { timer } of taskPersistRetryQueue.values()) clearTimeout(timer)
+  taskPersistRetryQueue.clear()
+  taskPersistFailedNotified = false
+}
+
+function notifyTaskPersistFailedOnce() {
+  if (taskPersistFailedNotified) return
+  taskPersistFailedNotified = true
+  useStore.getState().showToast(
+    '部分任务记录未能写入本地存储，刷新前请先导出备份；若持续出现请检查浏览器存储空间。',
+    'error',
+  )
+}
+
+function scheduleTaskPersistRetry(task: TaskRecord) {
+  const existing = taskPersistRetryQueue.get(task.id)
+  const attempts = existing ? existing.attempts + 1 : 1
+  if (existing) clearTimeout(existing.timer)
+  if (attempts > TASK_PERSIST_MAX_ATTEMPTS) {
+    taskPersistRetryQueue.delete(task.id)
+    notifyTaskPersistFailedOnce()
+    return
+  }
+  const timer = setTimeout(() => {
+    taskPersistRetryQueue.delete(task.id)
+    const latest = useStore.getState().tasks.find((item) => item.id === task.id)
+    // 任务已不在 store：被删除或被清空，绝不能用陈旧快照写回（复活 bug）。
+    if (!latest) return
+    void putTask(latest)
+  }, attempts * attempts * 1000)
+  taskPersistRetryQueue.set(task.id, { attempts, timer })
+}
+
 function putTask(task: TaskRecord): Promise<IDBValidKey> {
   // 数据已被用户清除：丢弃飞行中写入，避免把已清除的任务重新写回 IndexedDB。
   if (tasksCleared) return Promise.resolve(task.id)
   const generation = task.storageGeneration ?? taskStorageGeneration
   return dbPutTask(getPersistableTask({ ...task, storageGeneration: generation }), generation)
+    .catch((err: unknown) => {
+      if (err instanceof StorageQuotaError) throw err // 配额已有专门的内存钉住处理
+      scheduleTaskPersistRetry(task)
+      return task.id
+    })
 }
 
 async function refreshTaskStorageGeneration() {
@@ -1862,6 +1932,11 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   if (Object.keys(normalizedParamPatch).length) {
     useStore.getState().setParams(normalizedParamPatch)
   }
+
+  // 记录提示词历史（画廊模式的一键回填来源）。
+  // 剥离图片提及标记：历史回填后 @图N 若按索引绑定到当前不相关的图，
+  // 会对错误的图发起计费编辑请求；纯文本化最安全。
+  useStore.getState().recordPromptHistory(stripImageMentionMarkers(prompt), taskParams)
 
   const taskId = genId()
   const task: TaskRecord = {
@@ -2848,7 +2923,12 @@ async function executeAgentRound(
       }
     }
     const createProviderImageParams = (hasInputImages: boolean) =>
-      normalizeParamsForSettings(createFinalImageParams(hasInputImages), imageRequestSettings, { hasInputImages })
+      normalizeParamsForSettings(createFinalImageParams(hasInputImages), imageRequestSettings, {
+        hasInputImages,
+        // 与画廊路径同款请求尺寸收口：Agent 多轮串行图像调用超时暴露更高，
+        // 不应绕过 4K→1K 的原生档收口（本地放大行为不受影响）。
+        capRequestSize: imageProfile.provider !== 'fal' && !isAsyncCustomProviderTask(imageRequestSettings, imageProfile.provider, hasInputImages),
+      })
     const finalImageParams = createFinalImageParams(round.inputImageIds.length > 0)
     const imageParams = createProviderImageParams(round.inputImageIds.length > 0)
     const taskApiConfig = readLocalImageTaskApiConfig()
@@ -3966,6 +4046,9 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     )
     const providerParams = normalizeParamsForSettings(task.params, requestSettings, {
       hasInputImages: inputDataUrls.length > 0,
+      // 4K 资产请求侧收口：网关原生能力 ~1.5MP（2026-08-14 探针实测），
+      // 请求更大尺寸买不到像素；本地放大仍按 task.params.size 到 4K。
+      capRequestSize: taskProvider !== 'fal' && !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0),
     })
 
     const result = await callImageApi({
@@ -4985,6 +5068,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     customRecoveryTimers.clear()
     for (const timer of openAIWatchdogTimers.values()) clearTimeout(timer)
     openAIWatchdogTimers.clear()
+    clearTaskPersistRetryTimers()
     // 中止所有进行中的 Agent 生成轮次，使其飞行中的流式回调不再创建/更新任务。
     for (const controller of agentRoundControllers.values()) controller.abort()
     agentRoundControllers.clear()
@@ -5328,8 +5412,18 @@ export async function importData(input: File | File[], options: ImportOptions = 
         }
       }
 
+      let failedTaskImports = 0
       for (const task of importedTasks) {
-        await putTask(normalizeImportedTaskLocalAutoSave(task))
+        try {
+          // 导入走直写：putTask 的失败重试包装会把写失败吞成成功，
+          // 导入场景必须如实感知（否则展示"导入成功"但任务缺失）。
+          await dbPutTask(getPersistableTask(normalizeImportedTaskLocalAutoSave(task)), taskStorageGeneration)
+        } catch {
+          failedTaskImports += 1
+        }
+      }
+      if (failedTaskImports > 0) {
+        useStore.getState().showToast(`导入完成，但 ${failedTaskImports} 个任务写入本地存储失败（空间不足？），建议清理空间后重试导入。`, 'error')
       }
 
       const tasks = await getAllTasks()

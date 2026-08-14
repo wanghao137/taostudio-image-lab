@@ -26,6 +26,7 @@ import ViewportTooltip from './ViewportTooltip'
 import { CloseIcon } from './icons'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
+const PromptHistoryPopoverLazy = lazy(() => import('./input/PromptHistoryPopover'))
 
 function getTaskFavoriteCollectionIds(task: TaskRecord) {
   return getTaskFavoriteCollectionIdsForState(task, useStore.getState().defaultFavoriteCollectionId)
@@ -763,6 +764,8 @@ export default function InputBar() {
     })
   }, [])
   const [showSizePicker, setShowSizePicker] = useState(false)
+  const [showPromptHistory, setShowPromptHistory] = useState(false)
+  const promptHistoryAnchorRef = useRef<HTMLDivElement>(null)
   const [showMobileUploadMenu, setShowMobileUploadMenu] = useState(false)
   const [maskPreviewUrl, setMaskPreviewUrl] = useState('')
   const [imageDragIndex, setImageDragIndex] = useState<number | null>(null)
@@ -2518,16 +2521,49 @@ export default function InputBar() {
 
           {/* 常驻操作行：参数切换钮 + （原桌面布局的）上传与生成按钮 */}
           <div className="mt-3 hidden sm:flex items-center justify-between gap-2">
-            {/* 尺寸快接胶囊（高频） */}
-            <button
-              type="button"
-              onClick={() => { dismissAllTooltips(); setShowSizePicker(true) }}
-              className="rounded-xl border border-gray-200/60 bg-white/50 px-3 py-2 font-mono text-xs text-left shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]"
-              title="选择尺寸"
-              aria-label="选择尺寸"
-            >
-              {params.size}
-            </button>
+            {/* 尺寸快接胶囊（高频） + 提示词历史 */}
+            <div className="relative flex items-center gap-2" ref={promptHistoryAnchorRef}>
+              <button
+                type="button"
+                onClick={() => { dismissAllTooltips(); setShowSizePicker(true) }}
+                className="rounded-xl border border-gray-200/60 bg-white/50 px-3 py-2 font-mono text-xs text-left shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:hover:bg-white/[0.06]"
+                title="选择尺寸"
+                aria-label="选择尺寸"
+              >
+                {params.size}
+              </button>
+              <button
+                type="button"
+                onClick={() => { dismissAllTooltips(); setShowPromptHistory((prev) => !prev) }}
+                className="flex items-center gap-1.5 rounded-xl border border-gray-200/60 bg-white/50 px-3 py-2 text-xs font-medium text-gray-500 shadow-sm transition-all duration-200 hover:bg-white hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-400 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
+                title="提示词历史：回填最近提交的提示词与参数"
+                aria-label="提示词历史"
+                aria-expanded={showPromptHistory}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                历史
+              </button>
+              {showPromptHistory && (
+                <Suspense fallback={null}>
+                  <PromptHistoryPopoverLazy
+                    anchorRef={promptHistoryAnchorRef}
+                    onClose={() => setShowPromptHistory(false)}
+                    onPick={(entry) => {
+                      setPrompt(entry.prompt)
+                      setParams({
+                        size: entry.size,
+                        quality: entry.quality,
+                        output_format: entry.output_format,
+                        n: entry.n,
+                      })
+                      setShowPromptHistory(false)
+                    }}
+                  />
+                </Suspense>
+              )}
+            </div>
 
             <div className="flex items-center gap-2">
               <button

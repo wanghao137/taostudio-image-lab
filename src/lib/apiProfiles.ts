@@ -550,6 +550,7 @@ export function normalizeApiProfile(input: unknown, fallback?: Partial<ApiProfil
     responseFormatB64Json: record.responseFormatB64Json === true ? true : undefined,
     streamImages,
     streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, defaults.streamPartialImages),
+    nativeLargeOutput: record.nativeLargeOutput === true ? true : undefined,
     providerDrafts: normalizeProviderDrafts(record.providerDrafts, customProviderIds),
   }
 }
@@ -742,6 +743,7 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
     apiProxy: typeof record.apiProxy === 'boolean' ? record.apiProxy : profile.apiProxy,
     streamImages: profile.provider === 'openai' && typeof record.streamImages === 'boolean' ? record.streamImages : profile.streamImages,
     streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, profile.streamPartialImages),
+    nativeLargeOutput: record.nativeLargeOutput === true ? true : profile.nativeLargeOutput === true ? true : undefined,
   }
 }
 

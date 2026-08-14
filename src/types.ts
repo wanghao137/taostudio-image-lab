@@ -84,6 +84,9 @@ export interface ApiProfile {
   responseFormatB64Json?: boolean
   streamImages?: boolean
   streamPartialImages?: number
+  /** 请求尺寸收口开关：设为 true 表示服务商真实支持大尺寸原生输出，
+   * 跳过 exact_size 大目标的请求尺寸收口（默认收口到 ~1.5MP 原生档）。 */
+  nativeLargeOutput?: boolean
   providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages'>>>>
 }
 
@@ -155,6 +158,17 @@ export interface TaskParams {
   moderation: 'auto' | 'low'
   n: number
   transparent_output: boolean
+}
+
+/** 画廊提示词历史条目：提交生成时记录，供一键回填提示词与参数。 */
+export interface PromptHistoryEntry {
+  id: string
+  prompt: string
+  size: string
+  quality: TaskParams['quality']
+  output_format: TaskParams['output_format']
+  n: number
+  usedAt: number
 }
 
 export const DEFAULT_PARAMS: TaskParams = {
