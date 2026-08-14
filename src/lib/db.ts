@@ -247,6 +247,31 @@ export function putAgentConversation(conversation: AgentConversation, expectedGe
   )
 }
 
+export function deleteAgentConversation(id: string, expectedGeneration?: number): Promise<undefined> {
+  if (expectedGeneration === undefined) {
+    return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.delete(id))
+  }
+
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_AGENT_CONVERSATIONS, STORE_META], 'readwrite')
+        const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+        const metaStore = tx.objectStore(STORE_META)
+        const generationRequest = metaStore.get(TASK_GENERATION_KEY)
+        generationRequest.onsuccess = () => {
+          const currentGeneration = Number(generationRequest.result?.value ?? 0)
+          if (currentGeneration !== expectedGeneration) return
+          conversationStore.delete(id)
+        }
+        generationRequest.onerror = () => reject(generationRequest.error)
+        tx.oncomplete = () => resolve(undefined)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error)
+      }),
+  )
+}
+
 export function clearAgentConversations(expectedGeneration?: number): Promise<undefined> {
   if (expectedGeneration === undefined) {
     return dbTransaction(STORE_AGENT_CONVERSATIONS, 'readwrite', (s) => s.clear())

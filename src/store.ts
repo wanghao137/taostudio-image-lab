@@ -34,6 +34,7 @@ import {
   getTaskGeneration,
   getAllAgentConversations,
   putAgentConversation as dbPutAgentConversation,
+  deleteAgentConversation as dbDeleteAgentConversation,
   replaceAgentConversations,
   clearAgentConversations as dbClearAgentConversations,
   getLocalAutoSaveDirectoryHandle,
@@ -1121,6 +1122,11 @@ export const useStore = create<AppState>()(
 let lastStoredAgentConversations = useStore.getState().agentConversations
 let agentConversationPersistRunning = false
 let agentConversationPersistQueued = false
+/** 每个会话 id 最近落盘的内容引用，用于按条 diff——替代旧的全量 replace
+ * （旧方式在流式期间每个文本 delta 都重写整库，且双标签页 last-writer-wins 互删）。 */
+const storedConversationById = new Map<string, AgentConversation>()
+/** initStore 落盘与 diff 表同步之间的窗口：期间触发的变更排队，同步完成后放行。 */
+let agentConversationSyncPending = false
 
 async function flushAgentConversationsToIndexedDB() {
   if (agentConversationPersistRunning) {
@@ -1138,7 +1144,32 @@ async function flushAgentConversationsToIndexedDB() {
       if (tasksCleared) return
       const conversations = useStore.getState().agentConversations
       const generation = taskStorageGeneration
-      await replaceStoredAgentConversations(conversations, generation)
+
+      // 按条 diff：新增/变更的 put，消失的 delete。
+      const seenIds = new Set<string>()
+      for (const conversation of conversations) {
+        seenIds.add(conversation.id)
+        if (storedConversationById.get(conversation.id) === conversation) continue
+        try {
+          await dbPutAgentConversation(getPersistableAgentConversation(conversation), generation)
+          storedConversationById.set(conversation.id, conversation)
+        } catch (err) {
+          if (tasksCleared) return
+          console.warn('会话持久化失败，将在下次变更时重试', err)
+          // 失败的条目从 diff 表移除，下一轮 flush 重试
+          storedConversationById.delete(conversation.id)
+        }
+      }
+      for (const id of [...storedConversationById.keys()]) {
+        if (seenIds.has(id)) continue
+        try {
+          await dbDeleteAgentConversation(id)
+        } catch {
+          // 删除失败保留 diff 记录，下一轮重试
+          continue
+        }
+        storedConversationById.delete(id)
+      }
       lastStoredAgentConversations = conversations
     } while (agentConversationPersistQueued || useStore.getState().agentConversations !== lastStoredAgentConversations)
   } finally {
@@ -1148,12 +1179,28 @@ async function flushAgentConversationsToIndexedDB() {
 
 useStore.subscribe((state) => {
   if (state.agentConversations === lastStoredAgentConversations) return
-  if (!agentConversationPersistenceReady) {
+  if (!agentConversationPersistenceReady || agentConversationSyncPending) {
     agentConversationPersistQueued = true
     return
   }
   void flushAgentConversationsToIndexedDB()
 })
+
+// 关标签/刷新前的尽力而为兜底：flush 是异步写，硬关闭时最后一段流式内容
+// 仍可能丢失（IndexedDB 事务通常能在 pagehide 后完成，但无保证）；
+// visibilitychange→hidden（移动端切后台/切标签）最可靠——此时页面仍活着，
+// flush 一定能跑完。
+if (typeof window !== 'undefined') {
+  const flushBeforeExit = () => {
+    if (agentConversationPersistenceReady && !tasksCleared) {
+      void flushAgentConversationsToIndexedDB()
+    }
+  }
+  window.addEventListener('pagehide', flushBeforeExit)
+  window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushBeforeExit()
+  })
+}
 
 // ===== Actions =====
 
@@ -1635,6 +1682,7 @@ export async function initStore() {
   const activeAgentConversationId = useStore.getState().activeAgentConversationId && loadedAgentConversations.some((conversation) => conversation.id === useStore.getState().activeAgentConversationId)
     ? useStore.getState().activeAgentConversationId
     : loadedAgentConversations[0]?.id ?? null
+  let seededFrom: AgentConversation[]
   if (loadedAgentConversations.length > 0 || legacyAgentConversations.length > 0) {
     useStore.setState((state) => {
       const agentInputDrafts = cleanStaleAgentInputDrafts(
@@ -1650,9 +1698,22 @@ export async function initStore() {
       }
     })
     await replaceStoredAgentConversations(loadedAgentConversations)
+    seededFrom = loadedAgentConversations
   } else {
     useStore.setState({ agentConversationsLoaded: true })
+    seededFrom = useStore.getState().agentConversations
   }
+  // 按条 diff 表的种子必须是「实际落盘的那个快照」的引用。若从 await 之后的
+  // 当前 state 取种子，replace 事务期间到达的变更会被误标为已存（永不重试），
+  // 删除则复活为孤儿行。种子后若 state 引用不同（窗口期有变更），下方 queued
+  // flush 会按条写真正的增量。
+  agentConversationSyncPending = true
+  storedConversationById.clear()
+  for (const conversation of seededFrom) {
+    storedConversationById.set(conversation.id, conversation)
+  }
+  lastStoredAgentConversations = seededFrom
+  agentConversationSyncPending = false
   const shouldRewritePersistedLocalState = agentConversationMigrationPending
   agentConversationPersistenceReady = true
   agentConversationMigrationPending = false
@@ -5099,6 +5160,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     try {
       await dbClearAgentConversations(taskStorageGeneration)
       useStore.setState({ agentConversations: [], activeAgentConversationId: null })
+      storedConversationById.clear()
       const remaining = await getAllAgentConversations()
       if (remaining.length > 0) {
         clearAgentConversationsFailed = true

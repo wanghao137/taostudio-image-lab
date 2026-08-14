@@ -1438,6 +1438,62 @@ describe('agent conversation persistence', () => {
     await clearAgentConversations()
   })
 
+  it('persists changed conversations per-entry instead of replacing the whole store', async () => {
+    const dbModule = await import('./lib/db')
+    const putSpy = vi.spyOn(dbModule, 'putAgentConversation')
+    const replaceSpy = vi.spyOn(dbModule, 'replaceAgentConversations')
+
+    const conversationA = agentConversation({ id: 'convo-per-entry-a', title: 'A', updatedAt: 1 })
+    const conversationB = agentConversation({ id: 'convo-per-entry-b', title: 'B', updatedAt: 1 })
+    useStore.setState({ agentConversations: [conversationA, conversationB], showToast: vi.fn() })
+    await initStore()
+    await waitForAssertion(() => expect(useStore.getState().agentConversationsLoaded).toBe(true))
+    putSpy.mockClear()
+    replaceSpy.mockClear()
+
+    // A 更新（引用变化）、B 不变：按条 diff 应只写 A，不整库替换。
+    const updatedA = { ...conversationA, title: 'A2', updatedAt: 2 }
+    useStore.setState({ agentConversations: [updatedA, conversationB] })
+    await waitForAssertion(() => expect(putSpy).toHaveBeenCalledTimes(1))
+    expect(putSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'convo-per-entry-a' }), expect.any(Number))
+    expect(replaceSpy).not.toHaveBeenCalled()
+
+    const stored = await dbModule.getAllAgentConversations()
+    expect(stored.find((c) => c.id === 'convo-per-entry-a')?.title).toBe('A2')
+    expect(stored.some((c) => c.id === 'convo-per-entry-b')).toBe(true)
+
+    putSpy.mockRestore()
+    replaceSpy.mockRestore()
+  })
+
+  it('captures conversations changed during the initStore replace window', async () => {
+    const dbModule = await import('./lib/db')
+    const putSpy = vi.spyOn(dbModule, 'putAgentConversation')
+    // replace 期间挂起一个微任务，模拟大库落盘窗口
+    const replaceSpy = vi.spyOn(dbModule, 'replaceAgentConversations').mockImplementation(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        // 窗口期内：用户把 A 改名（新引用，经 setState 进入 store）
+        useStore.setState((state) => ({
+          agentConversations: state.agentConversations.map((c) =>
+            c.id === 'convo-window-a' ? { ...c, title: 'A-窗口期修改' } : c),
+        }))
+        // 原始 replace 语义：整表写入 mock 存储（由 vi.mock 工厂处理，这里仅模拟窗口）
+      },
+    )
+
+    const conversationA = agentConversation({ id: 'convo-window-a', title: 'A', updatedAt: 1 })
+    useStore.setState({ agentConversations: [conversationA], showToast: vi.fn() })
+    await initStore()
+
+    // 窗口期修改必须被 queued flush 按条写盘，而不是被种子误标为已存
+    const storedConversations = await dbModule.getAllAgentConversations()
+    expect(storedConversations.find((c) => c.id === 'convo-window-a')?.title).toBe('A-窗口期修改')
+
+    replaceSpy.mockRestore()
+    putSpy.mockRestore()
+  })
+
   it('omits agent conversations from localStorage state', () => {
     const conversation = agentConversation({
       rounds: [{
