@@ -45,6 +45,172 @@ export function isHttpUrl(value: unknown): value is string {
   return typeof value === 'string' && /^https?:\/\//i.test(value)
 }
 
+// ===== 结构化 API 错误 =====
+
+export type ApiErrorStage = 'request' | 'poll' | 'stream' | 'parse'
+
+export class ApiError extends Error {
+  readonly status?: number
+  readonly providerCode?: string
+  readonly retryable: boolean
+  readonly stage: ApiErrorStage
+  /** 上游 Retry-After 毫秒数（若响应提供了）。 */
+  readonly retryAfterMs?: number
+  /** 上游原始响应体的摘要（不含 base64 图片数据）。 */
+  readonly rawPayloadSummary?: string
+
+  constructor(options: {
+    message: string
+    status?: number
+    providerCode?: string
+    retryable?: boolean
+    stage?: ApiErrorStage
+    retryAfterMs?: number
+    rawPayloadSummary?: string
+    cause?: unknown
+  }) {
+    super(options.message)
+    this.name = 'ApiError'
+    // ES2020 目标没有 Error cause 构造签名，手动挂接（保留原始错误链）。
+    if (options.cause !== undefined && !('cause' in this)) {
+      ;(this as { cause?: unknown }).cause = options.cause
+    }
+    this.status = options.status
+    this.providerCode = options.providerCode
+    this.retryable = options.retryable ?? isRetryableHttpStatus(options.status)
+    this.stage = options.stage ?? 'request'
+    this.retryAfterMs = options.retryAfterMs
+    this.rawPayloadSummary = options.rawPayloadSummary
+  }
+}
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError
+}
+
+/** 408/429/5xx 及网络层失败值得自动重试；4xx 其余是调用方问题，重试无意义。 */
+export function isRetryableHttpStatus(status: number | undefined): boolean {
+  if (status === undefined) return false
+  return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+export function isNetworkError(error: unknown): boolean {
+  return error instanceof TypeError
+}
+
+/** 标记「fetch 调用本身抛出」的网络错误（区别于响应消费阶段的 TypeError）。 */
+export class NetworkFetchError extends ApiError {
+  constructor(message: string, cause?: unknown) {
+    super({ message, retryable: true, stage: 'request', cause })
+    this.name = 'NetworkFetchError'
+  }
+}
+
+/** 包装 fetch：只有 fetch 本身失败（未收到响应）才算可重试网络错误；
+ * 响应消费阶段的 TypeError（response.json()/流读取）在服务端可能已计费，
+ * 一律不自动重试，避免双重消费。 */
+export async function fetchWithRetryClassification(input: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new NetworkFetchError(err.message || '网络请求失败', err)
+    }
+    throw err
+  }
+}
+
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+// ===== 瞬态失败重试 =====
+
+export interface TransientRetryOptions {
+  /** 最多重试次数（不含首次尝试）。 */
+  maxRetries?: number
+  /** 基础退避毫秒，指数递增并加抖动。 */
+  baseDelayMs?: number
+  /** 单次退避上限。 */
+  maxDelayMs?: number
+  /** 判定哪些错误值得重试；默认 408/429/5xx/网络 TypeError。 */
+  shouldRetry?: (error: unknown, attempt: number) => boolean
+  signal?: AbortSignal
+  /** 供测试注入的等待函数。 */
+  sleepFn?: (ms: number, signal?: AbortSignal) => Promise<void>
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void
+}
+
+export function defaultTransientRetryDelay(attempt: number, retryAfterMs?: number, baseDelayMs = 1000, maxDelayMs = 15000): number {
+  if (retryAfterMs !== undefined && retryAfterMs > 0 && retryAfterMs <= 120_000) return Math.min(retryAfterMs, maxDelayMs * 4)
+  const exponential = baseDelayMs * 2 ** (attempt - 1)
+  const jitter = Math.random() * 0.3 * exponential
+  return Math.min(exponential + jitter, maxDelayMs)
+}
+
+export function parseRetryAfterMs(response: Response | undefined): number | undefined {
+  const value = response?.headers?.get('retry-after')
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
+  const date = Date.parse(value)
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now())
+  return undefined
+}
+
+function defaultShouldRetry(error: unknown): boolean {
+  if (isApiError(error)) return error.retryable
+  // 只有 NetworkFetchError（fetch 本身失败）可重试；裸 TypeError 来自
+  // 响应消费/转换阶段，服务端可能已计费，不自动重试。
+  return error instanceof NetworkFetchError
+}
+
+export const transientRetrySleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const timeoutId = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timeoutId)
+      reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+
+/**
+ * 有界瞬态失败重试：覆盖 408/429/5xx 与网络层 TypeError。
+ * 长耗时图像请求（尤其 4K）目前一次网关抖动就整体失败；这里是
+ * 请求层的统一兜底。超时 AbortError 不重试（由上层超时机制统一管辖）。
+ */
+export async function withTransientRetry<T>(
+  operation: () => Promise<T>,
+  options: TransientRetryOptions = {},
+): Promise<T> {
+  const maxRetries = options.maxRetries ?? 2
+  const shouldRetry = options.shouldRetry ?? defaultShouldRetry
+  const sleep = options.sleepFn ?? transientRetrySleep
+
+  let attempt = 0
+  while (true) {
+    try {
+      return await operation()
+    } catch (error) {
+      if (isAbortError(error)) throw error
+      attempt += 1
+      if (attempt > maxRetries || !shouldRetry(error, attempt)) throw error
+      const retryAfterMs = isApiError(error) ? error.retryAfterMs : undefined
+      const delayMs = defaultTransientRetryDelay(attempt, retryAfterMs, options.baseDelayMs, options.maxDelayMs)
+      options.onRetry?.(error, attempt, delayMs)
+      await sleep(delayMs, options.signal)
+    }
+  }
+}
+
 export function isDataUrl(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('data:')
 }

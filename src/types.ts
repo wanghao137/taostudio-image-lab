@@ -204,6 +204,8 @@ export interface RefusalRecoveryRecord {
     prompt_file: string | null
     result: 'success' | 'refused'
     refusal_summary: string | null
+    /** 第一次失败的原始错误信息（区分真审核拒绝与网关误判） */
+    first_error?: string
   }
   rewrite: {
     trigger_category: RefusalRecoveryTriggerCategory | null
@@ -318,6 +320,8 @@ export interface TaskRecord {
   streamPartialImageIds?: string[]
   /** API 返回的原始图片 HTTP URL（非 base64 时记录） */
   rawImageUrls?: string[]
+  /** 存储配额不足导致输出图只保留在内存缓存、未写入 IndexedDB（刷新后会丢失） */
+  outputPersistWarning?: boolean
   /** 发生解析错误时的原始响应 JSON */
   rawResponsePayload?: string
   status: TaskStatus

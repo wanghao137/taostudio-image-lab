@@ -1,4 +1,8 @@
 const TARGET_HEADER = 'x-taostudio-api-base-url'
+const PROXY_TOKEN_HEADER = 'x-taostudio-proxy-token'
+const DEFAULT_ALLOWED_ORIGIN_HOSTS = ['image.taostudioai.com']
+// 开发服务器 host:true，LAN/IPv6 localhost 源也应放行（任意端口）。
+const LOCAL_ORIGIN_PATTERN = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'content-encoding',
@@ -51,6 +55,30 @@ function isTruthy(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase())
 }
 
+function getProxyToken(env) {
+  return String(env.IMAGE_API_PROXY_TOKEN || env.API_PROXY_TOKEN || '').trim()
+}
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return diff === 0
+}
+
+// Token auth is opt-in: when IMAGE_API_PROXY_TOKEN is configured every request
+// (except CORS preflights) must present a matching x-taostudio-proxy-token
+// header. Without a configured token the proxy stays open for relay use, but
+// server-side credential injection stays disabled (see createForwardHeaders).
+function checkProxyToken(request, env) {
+  const expected = getProxyToken(env)
+  if (!expected) return { tokenAuthEnabled: false, authorized: true }
+  const presented = String(request.headers.get(PROXY_TOKEN_HEADER) ?? '').trim()
+  return { tokenAuthEnabled: true, authorized: timingSafeEqual(presented, expected) }
+}
+
 function normalizeHostname(hostname) {
   return hostname.trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/\.$/, '')
 }
@@ -93,20 +121,23 @@ function isPrivateOrLocalHostname(hostname) {
 function getDynamicTargetErrorMessage(targetUrl, env, defaultTargetUrl) {
   const allowedHosts = getAllowedHosts(env, defaultTargetUrl)
   const hostname = targetUrl.hostname.toLowerCase()
-  if (allowedHosts.has(hostname)) return ''
 
   if (isPrivateOrLocalHostname(hostname)) {
     return 'API proxy target host is local or private. Use a public HTTPS API base URL, or run the app locally to reach a local service.'
   }
 
-  const allowPublicTargets = isTruthy(env.IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS)
-  const allowDynamicTargets = isTruthy(env.IMAGE_API_PROXY_ALLOW_DYNAMIC_TARGETS)
-  if (!allowPublicTargets && !allowDynamicTargets) {
-    return 'API proxy target host is not allowed.'
-  }
-
+  // 所有动态目标（含白名单主机）一律要求 HTTPS：白名单只放宽主机名，
+  // 不放宽协议——http 会让注入的凭证明文过网。
   if (targetUrl.protocol !== 'https:') {
     return 'API proxy dynamic targets must use HTTPS.'
+  }
+
+  if (!allowedHosts.has(hostname)) {
+    const allowPublicTargets = isTruthy(env.IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS)
+    const allowDynamicTargets = isTruthy(env.IMAGE_API_PROXY_ALLOW_DYNAMIC_TARGETS)
+    if (!allowPublicTargets && !allowDynamicTargets) {
+      return 'API proxy target host is not allowed.'
+    }
   }
 
   return ''
@@ -161,33 +192,54 @@ function buildUpstreamUrl(targetUrl, routePath, requestUrl) {
   return upstreamUrl
 }
 
-function createCorsHeaders(request) {
-  return {
-    'Access-Control-Allow-Origin': request.headers.get('origin') || '*',
+function createCorsHeaders(request, env) {
+  const headers = {
     'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': request.headers.get('access-control-request-headers') ||
-      'authorization,content-type,accept,x-taostudio-api-base-url',
+    'Access-Control-Allow-Headers': 'authorization,content-type,accept,x-taostudio-api-base-url,x-taostudio-proxy-token',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   }
+
+  // Reflect only explicitly allowed origins instead of echoing any Origin.
+  // Non-browser clients (curl, node scripts) are unaffected by CORS.
+  const allowedHosts = new Set([
+    ...DEFAULT_ALLOWED_ORIGIN_HOSTS,
+    ...splitList(env.IMAGE_API_PROXY_ALLOWED_ORIGINS).map((origin) => origin.replace(/^https?:\/\//, '').toLowerCase()),
+  ])
+  const origin = request.headers.get('origin')?.trim().toLowerCase() || ''
+  if (!origin) return headers
+  let originHost = ''
+  try {
+    originHost = new URL(origin).hostname.toLowerCase()
+  } catch {
+    return headers
+  }
+  if (allowedHosts.has(originHost) || LOCAL_ORIGIN_PATTERN.test(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin
+  }
+  return headers
 }
 
-function jsonResponse(request, status, payload) {
+function jsonResponse(request, status, payload, env) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
-      ...createCorsHeaders(request),
+      ...createCorsHeaders(request, env),
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
     },
   })
 }
 
-function createForwardHeaders(request, body, contentTypeOverride, env) {
+function createForwardHeaders(request, body, contentTypeOverride, env, canInjectCredentials) {
   const headers = new Headers()
   const authorization = request.headers.get('authorization')?.trim() || ''
-  const fallbackAuthorization = env.IMAGE_API_PROXY_AUTHORIZATION ||
-    env.API_PROXY_AUTHORIZATION
+  // Server-held credentials are only injected for token-authenticated callers.
+  // An open (unauthenticated) proxy must never attach the owner's key to
+  // anonymous traffic — that is the credit-burning vector.
+  const fallbackAuthorization = canInjectCredentials
+    ? (env.IMAGE_API_PROXY_AUTHORIZATION || env.API_PROXY_AUTHORIZATION)
+    : ''
   const resolvedAuthorization = (!authorization || authorization === 'Bearer') ? fallbackAuthorization : authorization
   if (resolvedAuthorization) headers.set('authorization', resolvedAuthorization)
 
@@ -217,11 +269,13 @@ async function readRequestBody(request) {
   }
 }
 
-function copyResponseHeaders(upstreamResponse, request, diagnostics) {
-  const headers = new Headers(createCorsHeaders(request))
+function copyResponseHeaders(upstreamResponse, request, diagnostics, env) {
+  const headers = new Headers(createCorsHeaders(request, env))
   upstreamResponse.headers.forEach((value, name) => {
     const lowerName = name.toLowerCase()
     if (HOP_BY_HOP_HEADERS.has(lowerName)) return
+    // CORS 由本代理的 allowlist 决定，上游不得覆盖（否则可注入任意 Origin 放行）。
+    if (lowerName.startsWith('access-control-')) return
     headers.set(name, value)
   })
   headers.set('Cache-Control', 'no-store')
@@ -235,25 +289,30 @@ export default {
   async fetch(request, env) {
     const requestUrl = new URL(request.url)
     if (!requestUrl.pathname.startsWith('/api-proxy')) {
-      return jsonResponse(request, 404, { error: { message: 'Not found.' } })
+      return jsonResponse(request, 404, { error: { message: 'Not found.' } }, env)
     }
 
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
-        headers: createCorsHeaders(request),
+        headers: createCorsHeaders(request, env),
       })
+    }
+
+    const { tokenAuthEnabled, authorized } = checkProxyToken(request, env)
+    if (!authorized) {
+      return jsonResponse(request, 401, { error: { message: 'API proxy token is missing or invalid.' } }, env)
     }
 
     const target = resolveTargetUrl(request, env)
     if (target.errorStatus) {
-      return jsonResponse(request, target.errorStatus, { error: { message: target.errorMessage } })
+      return jsonResponse(request, target.errorStatus, { error: { message: target.errorMessage } }, env)
     }
 
     const routePath = getRoutePath(requestUrl)
     const upstreamUrl = buildUpstreamUrl(target.targetUrl, routePath, requestUrl)
     const { body, contentTypeOverride } = await readRequestBody(request)
-    const forwardHeaders = createForwardHeaders(request, body, contentTypeOverride, env)
+    const forwardHeaders = createForwardHeaders(request, body, contentTypeOverride, env, tokenAuthEnabled && authorized)
 
     try {
       const upstreamResponse = await fetch(upstreamUrl, {
@@ -269,14 +328,14 @@ export default {
           path: upstreamUrl.pathname,
           bodyBytes: body?.byteLength ?? 0,
           contentType: forwardHeaders.get('content-type') || '',
-        }),
+        }, env),
       })
     } catch (error) {
       return jsonResponse(request, 502, {
         error: {
           message: error instanceof Error ? error.message : 'API proxy request failed.',
         },
-      })
+      }, env)
     }
   },
 }

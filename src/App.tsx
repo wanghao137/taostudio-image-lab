@@ -13,6 +13,7 @@ import Toast from './components/Toast'
 import ImageContextMenu from './components/ImageContextMenu'
 import MobileShell from './components/MobileShell'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
+import ErrorBoundary from './components/ErrorBoundary'
 
 // 移动端统计降级：仅保留这三项；桌面端 6 项不变。
 const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
@@ -190,48 +191,21 @@ export default function App() {
     <>
       {isMobile ? (
         <MobileShell onOpenCompose={() => setComposeOpen(true)}>
-          {appMode === 'engine' ? (
-            <Suspense fallback={<div className="min-h-[320px]" />}>
-              <EngineWorkspace />
-            </Suspense>
-          ) : appMode === 'agent' ? (
-            <div className="safe-area-x">
-              <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-                智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
-              </div>
-              <Suspense fallback={null}>
-                <AgentWorkspace />
+          <ErrorBoundary sectionLabel="引擎工作台">
+            {appMode === 'engine' ? (
+              <Suspense fallback={<div className="min-h-[320px]" />}>
+                <EngineWorkspace />
               </Suspense>
-            </div>
-          ) : (
-            <div className="safe-area-x max-w-7xl mx-auto">
-              <GalleryWorkspaceHeader />
-              <SearchBar />
-              {filterFavorite && !activeFavoriteCollectionId ? (
+            ) : appMode === 'agent' ? (
+              <div className="safe-area-x">
+                <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                  智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
+                </div>
                 <Suspense fallback={null}>
-                  <FavoriteCollectionsView />
+                  <AgentWorkspace />
                 </Suspense>
-              ) : (
-                <Suspense fallback={<div className="min-h-[220px]" />}>
-                  <TaskGrid />
-                </Suspense>
-              )}
-            </div>
-          )}
-        </MobileShell>
-      ) : (
-        <>
-          <Header />
-          {appMode === 'engine' ? (
-            <Suspense fallback={<div className="min-h-[320px]" />}>
-              <EngineWorkspace />
-            </Suspense>
-          ) : appMode === 'agent' ? (
-            <Suspense fallback={null}>
-              <AgentWorkspace />
-            </Suspense>
-          ) : (
-            <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">
+              </div>
+            ) : (
               <div className="safe-area-x max-w-7xl mx-auto">
                 <GalleryWorkspaceHeader />
                 <SearchBar />
@@ -245,9 +219,40 @@ export default function App() {
                   </Suspense>
                 )}
               </div>
-            </main>
-          )}
-          {appMode !== 'engine' && <InputBar />}
+            )}
+          </ErrorBoundary>
+        </MobileShell>
+      ) : (
+        <>
+          <Header />
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : appMode === 'agent' ? '智能体工作台' : '画廊'}>
+            {appMode === 'engine' ? (
+              <Suspense fallback={<div className="min-h-[320px]" />}>
+                <EngineWorkspace />
+              </Suspense>
+            ) : appMode === 'agent' ? (
+              <Suspense fallback={null}>
+                <AgentWorkspace />
+              </Suspense>
+            ) : (
+              <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">
+                <div className="safe-area-x max-w-7xl mx-auto">
+                  <GalleryWorkspaceHeader />
+                  <SearchBar />
+                  {filterFavorite && !activeFavoriteCollectionId ? (
+                    <Suspense fallback={null}>
+                      <FavoriteCollectionsView />
+                    </Suspense>
+                  ) : (
+                    <Suspense fallback={<div className="min-h-[220px]" />}>
+                      <TaskGrid />
+                    </Suspense>
+                  )}
+                </div>
+              </main>
+            )}
+            {appMode !== 'engine' && <InputBar />}
+          </ErrorBoundary>
         </>
       )}
 
@@ -258,17 +263,23 @@ export default function App() {
         </Suspense>
       )}
 
-      {/* 模态层：移动/桌面两端共用，保持在 Suspense 里 */}
-      <Suspense fallback={null}>
-        {detailTaskId ? <DetailModal /> : null}
-        {lightboxImageId ? <Lightbox /> : null}
-        {showSettings ? <SettingsModal /> : null}
-        {confirmDialog ? <ConfirmDialog /> : null}
-        {supportPromptOpen ? <SupportPromptModal /> : null}
-        {maskEditorImageId ? <MaskEditorModal /> : null}
-        {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}
-        {isManageCollectionsModalOpen ? <ManageCollectionsModal /> : null}
-      </Suspense>
+      {/* 模态层：移动/桌面两端共用，保持在 Suspense 里；崩溃只炸单个模态不炸整页。
+          key 随活动模态变化：切换查看对象时重置错误态，不让上一个崩溃污染下一个。 */}
+      <ErrorBoundary
+        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : 'none')}
+        sectionLabel="弹窗"
+      >
+        <Suspense fallback={null}>
+          {detailTaskId ? <DetailModal /> : null}
+          {lightboxImageId ? <Lightbox /> : null}
+          {showSettings ? <SettingsModal /> : null}
+          {confirmDialog ? <ConfirmDialog /> : null}
+          {supportPromptOpen ? <SupportPromptModal /> : null}
+          {maskEditorImageId ? <MaskEditorModal /> : null}
+          {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}
+          {isManageCollectionsModalOpen ? <ManageCollectionsModal /> : null}
+        </Suspense>
+      </ErrorBoundary>
       <Toast />
       <ImageContextMenu />
     </>

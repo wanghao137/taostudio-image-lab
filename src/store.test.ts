@@ -115,6 +115,22 @@ vi.mock('./lib/db', () => {
       images.set(id, { id, dataUrl, source, createdAt: Date.now(), width, height })
       return { id, width, height }
     },
+    StorageQuotaError: class StorageQuotaError extends Error {
+      imageId: string
+      width?: number
+      height?: number
+      constructor(options: { imageId: string; width?: number; height?: number }) {
+        super('浏览器存储空间不足，图片未能持久化。')
+        this.name = 'StorageQuotaError'
+        this.imageId = options.imageId
+        this.width = options.width
+        this.height = options.height
+      }
+    },
+    isQuotaExceededError: (error: unknown) => {
+      return Boolean(error && typeof error === 'object' && (error as { name?: unknown }).name === 'QuotaExceededError')
+    },
+    estimateStorage: async () => null,
   }
 })
 vi.mock('./lib/localAutoSaveWriter', () => ({
@@ -249,7 +265,7 @@ import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import * as imageTaskApi from './lib/imageTaskApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
+import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -811,8 +827,91 @@ describe('local auto-save store integration', () => {
     expect(saved.status).toBe('done')
     expect(saved.localAutoSave?.status).toBe('saved')
   })
+
+  it('keeps quota-failed output images in memory and marks the task instead of failing it', async () => {
+    const dbModule = await import('./lib/db')
+    const quotaError = new dbModule.StorageQuotaError({ imageId: 'quota-image-1', width: 1024, height: 1024 })
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,QUOTA'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    const storeImageWithSizeSpy = vi.spyOn(dbModule, 'storeImageWithSize').mockImplementationOnce(async () => {
+      throw quotaError
+    })
+
+    const showToast = vi.fn()
+    useStore.setState({
+      settings: localAutoSaveSettings(false),
+      prompt: '配额测试',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      showToast,
+    })
+
+    try {
+      await submitTask()
+      await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+      const savedTask = useStore.getState().tasks[0]
+      expect(savedTask.outputImages).toEqual(['quota-image-1'])
+      expect(savedTask.outputPersistWarning).toBe(true)
+      expect(showToast).toHaveBeenCalledWith(expect.stringContaining('存储空间不足'), 'error')
+      // 核心断言：图必须真的留在内存（钉在 LRU 之外），否则"未持久化"标记是空话
+      expect(await ensureImageCached('quota-image-1')).toBe('data:image/png;base64,QUOTA')
+    } finally {
+      storeImageWithSizeSpy.mockRestore()
+    }
+  })
 })
 
+
+describe('generation concurrency queue', () => {
+  beforeEach(() => {
+    __resetTasksClearedForTests()
+    vi.mocked(callImageApi).mockReset()
+  })
+
+  it('runs at most 2 gallery generations concurrently and queues the rest', async () => {
+    let inFlight = 0
+    let maxInFlight = 0
+    let released = 0
+    vi.mocked(callImageApi).mockReset().mockImplementation(async () => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      released += 1
+      inFlight -= 1
+      return {
+        images: ['data:image/png;base64,VEVTVP=='],
+        actualParams: {},
+        actualParamsList: [],
+        revisedPrompts: [],
+      }
+    })
+
+    useStore.setState({
+      settings: localAutoSaveSettings(false),
+      tasks: [],
+      inputImages: [],
+      maskDraft: null,
+      prompt: '队列测试',
+      showToast: vi.fn(),
+    })
+
+    // 连续提交 5 个任务：并发上限 2，其余排队
+    for (let i = 0; i < 5; i += 1) {
+      await submitTask()
+    }
+    await waitForAssertion(() => expect(useStore.getState().tasks.filter((item) => item.status === 'done')).toHaveLength(5))
+
+    expect(maxInFlight).toBeLessThanOrEqual(2)
+    expect(released).toBe(5)
+  })
+})
 
 describe('data operation locking', () => {
   it('detects running and recoverable work before import or export', () => {

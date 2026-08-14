@@ -2,9 +2,11 @@ import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type CustomProviderDefi
 import { dataUrlToBlob, imageDataUrlToPngBlob, maskDataUrlToPngBlob } from './canvasImage'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import {
+  ApiError,
   assertImageInputPayloadSize,
   assertMaskEditFileSize,
   appendStreamingFormatHint,
+  fetchWithRetryClassification,
   maybeAppendStreamingHint,
   type CallApiOptions,
   type CallApiResult,
@@ -13,13 +15,16 @@ import {
   getDataUrlDecodedByteSize,
   getDataUrlEncodedByteSize,
   getResponsesImageResultBase64,
+  isApiError,
   isDataUrl,
   isHttpUrl,
   mergeActualParams,
   MIME_MAP,
   normalizeBase64Image,
+  parseRetryAfterMs,
   pickActualParams,
   PROMPT_REWRITE_GUARD_PREFIX,
+  withTransientRetry,
 } from './imageApiShared'
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
 import { prependCodexCliSizePrompt } from './size'
@@ -216,13 +221,14 @@ function createSafetyPromptRewrite(prompt: string, reason: string): SafetyPrompt
   }
 }
 
-function createRefusalRecoveryRecord(rewrite: SafetyPromptRewrite, attempt2Result: RefusalRecoveryRecord['attempt_2']['result']): RefusalRecoveryRecord {
+function createRefusalRecoveryRecord(rewrite: SafetyPromptRewrite, attempt2Result: RefusalRecoveryRecord['attempt_2']['result'], attempt1Error?: unknown): RefusalRecoveryRecord {
   return {
     status: attempt2Result === 'success' ? 'recovered' : 'blocked',
     attempt_1: {
       prompt_file: 'request.prompt',
       result: 'refused',
       refusal_summary: rewrite.reason,
+      first_error: attempt1Error instanceof Error ? attempt1Error.message : undefined,
     },
     rewrite: {
       trigger_category: rewrite.triggerCategory,
@@ -355,7 +361,15 @@ function parseResponsesImageResults(payload: ResponsesApiResponse, fallbackMime:
 
   if (!results.length) {
     const failureMessage = getResponsesImageFailureMessage(output)
-    const err = new Error(failureMessage ?? '接口没有返回可识别的图片数据，请查看原始响应内容确认服务商实际返回的数据结构。如果使用的是中转或兼容接口，建议创建并使用「自定义服务商」配置。')
+    const err = new ApiError({
+      message: failureMessage ?? '接口没有返回可识别的图片数据，请查看原始响应内容确认服务商实际返回的数据结构。如果使用的是中转或兼容接口，建议创建并使用「自定义服务商」配置。',
+      stage: 'parse',
+      // Responses API 的安全拒绝发生在 HTTP 200 内（image_generation_call failed
+      // 或 assistant 拒绝文本），没有 status 可言；按 4xx 语义标记，让拒绝改写
+      // 重试仍能触发。
+      status: 422,
+      retryable: false,
+    })
     ;(err as any).rawResponsePayload = JSON.stringify(payload, null, 2)
     throw err
   }
@@ -687,7 +701,15 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
   const paths = createOpenAICompatiblePaths()
 
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  let timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+
+  // 重试前重置超时窗口：单个 AbortController 覆盖多次尝试会让第一次尝试
+  // 吃掉全部预算（600s 用掉 590s 后重试 10s 即死）。
+  const refreshTimeout = <T>(operation: () => Promise<T>): Promise<T> => {
+    clearTimeout(timeoutId)
+    timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+    return operation()
+  }
 
   const sendRequest = async (prompt: string): Promise<CallApiResult> => {
     let response: Response
@@ -748,7 +770,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
@@ -785,7 +807,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetch(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -799,7 +821,12 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
 
     if (!response.ok) {
       const errorMessage = await getApiErrorMessage(response)
-      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      throw new ApiError({
+        message: maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages),
+        status: response.status,
+        retryAfterMs: parseRetryAfterMs(response),
+        stage: 'request',
+      })
     }
 
     if (profile.streamImages && isEventStreamResponse(response)) {
@@ -811,8 +838,20 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
 
   try {
     try {
-      return await sendRequest(firstPrompt)
+      // 瞬态失败重试：408/429/5xx/网络错误自动退避重试。每次重试重置超时窗口，
+      // 否则一次 600s 预算被首尝试耗尽后重试立即失败。
+      return await withTransientRetry(() => refreshTimeout(() => sendRequest(firstPrompt)), {
+        signal: controller.signal,
+      })
     } catch (err) {
+      // 拒绝改写重试只对「安全审核类 4xx」触发：网关 "Blocked by WAF" 等
+      // 5xx/网络错误曾误触发第二次完整生成（双重消费），必须排除。
+      const isSafetyEligible = isApiError(err)
+        && err.status !== undefined
+        && err.status >= 400
+        && err.status < 500
+        && isSafetyRefusalMessage(err.message)
+      if (!isSafetyEligible) throw err
       const reason = getErrorMessage(err)
       const rewrite = createSafetyPromptRewrite(originalPrompt, reason)
       if (!rewrite) throw err
@@ -820,9 +859,9 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         const retryPrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
           ? prependCodexCliSizePrompt(rewrite.prompt, params.size)
           : rewrite.prompt
-        return withRefusalRecovery(await sendRequest(retryPrompt), rewrite)
+        return withRefusalRecovery(await refreshTimeout(() => sendRequest(retryPrompt)), rewrite)
       } catch (retryErr) {
-        attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused'))
+        attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused', err))
       }
     }
   } finally {
@@ -1031,6 +1070,9 @@ async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: C
   return response.json()
 }
 
+/** 自定义异步任务轮询的总时长上限。 */
+const CUSTOM_POLL_MAX_DURATION_MS = 30 * 60 * 1000
+
 async function pollCustomTaskResult(
   profile: ApiProfile,
   poll: CustomProviderPollMapping,
@@ -1041,14 +1083,28 @@ async function pollCustomTaskResult(
   const proxyConfig = readClientDevProxyConfig()
   const requestHeaders = createRequestHeaders(profile)
   let isFirstPoll = true
+  // 有界轮询：坏网关持续返回 429/5xx 时 while(true) 会永远轮询。
+  // 上限取「轮询间隔推算的次数」与绝对截止 30 分钟中先到者。
+  const pollIntervalMs = (poll.intervalSeconds ?? 5) * 1000
+  const maxPolls = Math.max(30, Math.min(2000, Math.ceil(CUSTOM_POLL_MAX_DURATION_MS / pollIntervalMs)))
+  const deadline = Date.now() + CUSTOM_POLL_MAX_DURATION_MS
+  let pollCount = 0
 
   while (true) {
+    pollCount += 1
+    if (pollCount > maxPolls || Date.now() > deadline) {
+      throw new ApiError({
+        message: `异步任务轮询超时：已轮询 ${pollCount - 1} 次（约 ${Math.round((pollCount - 1) * pollIntervalMs / 1000)} 秒）仍未完成。请检查服务商状态或稍后重试。`,
+        retryable: false,
+        stage: 'poll',
+      })
+    }
     if (isFirstPoll) {
       isFirstPoll = false
     } else if (signal) {
-      await sleep((poll.intervalSeconds ?? 5) * 1000, signal)
+      await sleep(pollIntervalMs, signal)
     } else {
-      await new Promise((resolve) => setTimeout(resolve, (poll.intervalSeconds ?? 5) * 1000))
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
     }
 
     const taskPath = appendQuery(buildTaskPath(poll.path, taskId), poll.query)
@@ -1093,10 +1149,11 @@ export async function getCustomQueuedImageResult(
   customProvider: CustomProviderDefinition,
   taskId: string,
   params: TaskParams,
+  signal?: AbortSignal,
 ): Promise<CallApiResult> {
   if (!customProvider.poll) throw new Error('自定义异步任务缺少 poll 配置')
   const mime = MIME_MAP[params.output_format] || 'image/png'
-  return pollCustomTaskResult(profile, customProvider.poll, taskId, mime)
+  return pollCustomTaskResult(profile, customProvider.poll, taskId, mime, signal)
 }
 
 async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile, customProvider: CustomProviderDefinition): Promise<CallApiResult> {
@@ -1199,7 +1256,13 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
   const requestHeaders = createRequestHeaders(profile)
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  let timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  // 同 images 模式：重试前重置超时窗口，避免第一次尝试吃掉全部预算。
+  const refreshTimeout = <T>(operation: () => Promise<T>): Promise<T> => {
+    clearTimeout(timeoutId)
+    timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+    return operation()
+  }
 
   try {
     if (opts.maskDataUrl) {
@@ -1223,7 +1286,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       }
       if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
 
-      const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+      const response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -1236,7 +1299,12 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
 
       if (!response.ok) {
         const errorMessage = await getApiErrorMessage(response)
-        throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+        throw new ApiError({
+          message: maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages),
+          status: response.status,
+          retryAfterMs: parseRetryAfterMs(response),
+          stage: 'request',
+        })
       }
 
       if (profile.streamImages && isEventStreamResponse(response)) {
@@ -1259,8 +1327,18 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
     }
 
     try {
-      return await sendRequest(requestPrompt, opts.settings.allowPromptRewrite)
+      return await withTransientRetry(
+        () => refreshTimeout(() => sendRequest(requestPrompt, opts.settings.allowPromptRewrite)),
+        { signal: controller.signal },
+      )
     } catch (err) {
+      // 同 images 模式：仅安全审核类 4xx 触发改写重试，网关 5xx/网络错误不再误判。
+      const isSafetyEligible = isApiError(err)
+        && err.status !== undefined
+        && err.status >= 400
+        && err.status < 500
+        && isSafetyRefusalMessage(err.message)
+      if (!isSafetyEligible) throw err
       const reason = getErrorMessage(err)
       const rewrite = createSafetyPromptRewrite(prompt, reason)
       if (!rewrite) throw err
@@ -1268,9 +1346,9 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
         const retryPrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
           ? prependCodexCliSizePrompt(rewrite.prompt, params.size)
           : rewrite.prompt
-        return withRefusalRecovery(await sendRequest(retryPrompt, true), rewrite)
+        return withRefusalRecovery(await refreshTimeout(() => sendRequest(retryPrompt, true)), rewrite)
       } catch (retryErr) {
-        attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused'))
+        attachRefusalRecoveryRecord(retryErr, createRefusalRecoveryRecord(rewrite, 'refused', err))
       }
     }
   } finally {

@@ -773,13 +773,44 @@ describe('callImageApi', () => {
       inputImageDataUrls: [],
     })
 
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(result.images).toEqual([
-      'data:image/png;base64,aW1hZ2Ut1',
-      'data:image/png;base64,aW1hZ2Ut3',
-    ])
-    expect(result.failedRequests).toEqual([{ requestIndex: 1, error: 'Failed to fetch' }])
-    expect(result.actualParams).toMatchObject({ n: 2 })
+    // 第 2 次调用是网络层 TypeError（瞬态失败）——按新重试语义会被退避重试，
+    // 第 4 次调用成功补上该槽位，因此没有 failedRequests。
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(result.images).toHaveLength(3)
+    expect(result.failedRequests ?? []).toEqual([])
+    expect(result.actualParams).toMatchObject({ n: 3 })
+  })
+
+  it('keeps failed concurrent slots when transient retries are exhausted', async () => {
+    // 槽位 0（第 1、3、4 次调用）连续 502 三次 → 重试耗尽记为 failedRequests；
+    // 槽位 1（第 2 次调用）一次成功。
+    let slot0Attempts = 0
+    let calls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      calls += 1
+      const isSlot0Retry = calls === 1 || calls >= 3
+      if (isSlot0Retry) {
+        slot0Attempts += 1
+        return new Response(JSON.stringify({ error: { message: 'Bad gateway' } }), { status: 502 })
+      }
+      return new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2UtMi9TTE9U' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+
+    const result = await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', codexCli: true },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 2 },
+      inputImageDataUrls: [],
+    })
+
+    expect(slot0Attempts).toBe(3) // 1 次原始 + 2 次重试
+    expect(result.images).toEqual(['data:image/png;base64,aW1hZ2UtMi9TTE9U'])
+    expect(result.failedRequests?.[0]?.requestIndex).toBe(0)
   })
 
   it('streams Responses API partial images and resolves the completed response image', async () => {
@@ -850,13 +881,11 @@ describe('callImageApi', () => {
       inputImageDataUrls: [],
     })
 
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-    expect(result.images).toEqual([
-      'data:image/png;base64,aW1hZ2Ut1',
-      'data:image/png;base64,aW1hZ2Ut2',
-    ])
-    expect(result.failedRequests).toEqual([{ requestIndex: 2, error: 'Failed to fetch' }])
-    expect(result.actualParams).toMatchObject({ n: 2 })
+    // 第 3 次调用是网络层 TypeError（瞬态失败）——重试后第 4 次成功补上槽位。
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    expect(result.images).toHaveLength(3)
+    expect(result.failedRequests ?? []).toEqual([])
+    expect(result.actualParams).toMatchObject({ n: 3 })
   })
 
   it('parses Responses API image result objects in gallery mode', async () => {

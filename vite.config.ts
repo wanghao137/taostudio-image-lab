@@ -1,4 +1,4 @@
-import { defineConfig, type Plugin } from 'vite'
+import { defineConfig, type Plugin } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'fs'
 import { Readable } from 'stream'
@@ -261,6 +261,21 @@ export default defineConfig(({ command }) => {
       host: true,
       port: 9527,
       strictPort: true,
+    },
+    test: {
+      // 只跑本仓库的测试；.upstream/ 缓存里上游仓库自己的测试文件不属于本项目，
+      // 混入会虚增通过数并让本地与 CI 的测试集合不一致。
+      include: [
+        'src/**/*.test.ts',
+        'src/**/*.test.tsx',
+        'scripts/**/*.test.mjs',
+        'server/**/*.test.mjs',
+        'workers/**/*.test.mjs',
+        'api/**/*.test.{mjs,js,ts}',
+      ],
+      exclude: ['**/node_modules/**', '.upstream/**', 'dist/**'],
+      // Windows 上 forks 池偶发 worker 启动超时会静默丢整个测试文件；threads 池更稳。
+      pool: 'threads',
     },
   }
 })

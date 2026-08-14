@@ -430,6 +430,48 @@ export function putImage(image: StoredImage): Promise<IDBValidKey> {
   return dbTransaction(STORE_IMAGES, 'readwrite', (s) => s.put(image))
 }
 
+// ===== Storage quota =====
+
+export class StorageQuotaError extends Error {
+  /** 配额失败前算好的图片 id，调用方可据此把图留在内存缓存里。 */
+  imageId: string
+  width?: number
+  height?: number
+
+  constructor(options: { imageId: string; width?: number; height?: number }) {
+    super('浏览器存储空间不足，图片未能持久化。')
+    this.name = 'StorageQuotaError'
+    this.imageId = options.imageId
+    this.width = options.width
+    this.height = options.height
+  }
+}
+
+/** IndexedDB 写入失败是否属于配额耗尽（浏览器抛 QuotaExceededError，Firefox 抛 QueryInterface 错误名）。 */
+export function isQuotaExceededError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const record = error as { name?: unknown; message?: unknown; code?: unknown }
+  if (record.name === 'QuotaExceededError' || record.code === 22) return true
+  // Firefox: DOMException named NS_ERROR_DOM_QUOTA_REACHED
+  if (typeof record.message === 'string' && /quota/i.test(record.message)) return true
+  return false
+}
+
+/** 估算当前站点存储用量；不可用时返回 null。 */
+export async function estimateStorage(): Promise<{ usage: number; quota: number } | null> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
+      const estimate = await navigator.storage.estimate()
+      if (typeof estimate.usage === 'number' && typeof estimate.quota === 'number') {
+        return { usage: estimate.usage, quota: estimate.quota }
+      }
+    }
+  } catch {
+    // 估算失败不应影响任何主流程
+  }
+  return null
+}
+
 export function deleteImage(id: string): Promise<undefined> {
   return openDB().then(
     (db) =>
@@ -504,22 +546,38 @@ export async function storeImageWithSize(dataUrl: string, source: NonNullable<St
   const existing = await getImage(id)
   if (!existing) {
     const thumbnail = await safeCreateImageThumbnail(dataUrl)
-    await putImage({
-      id,
-      dataUrl,
-      createdAt: Date.now(),
-      source,
-      width: thumbnail.width,
-      height: thumbnail.height,
-    })
-    if (thumbnail.thumbnailDataUrl) {
-      await putImageThumbnail({
+    try {
+      await putImage({
         id,
-        thumbnailDataUrl: thumbnail.thumbnailDataUrl,
+        dataUrl,
+        createdAt: Date.now(),
+        source,
         width: thumbnail.width,
         height: thumbnail.height,
-        thumbnailVersion: THUMBNAIL_VERSION,
       })
+    } catch (err) {
+      // 配额耗尽时不能让上层把已经生成的图整张丢弃——把 id/尺寸带回去，
+      // 调用方可据此把图留在内存缓存并提示用户导出。
+      if (isQuotaExceededError(err)) {
+        throw new StorageQuotaError({ imageId: id, width: thumbnail.width, height: thumbnail.height })
+      }
+      throw err
+    }
+    // 缩略图写入失败（含配额）不视为图片未持久化：原图已落盘即成功，
+    // 缩略图缺失由 backfill 自愈。这里吞掉错误是刻意的。
+    try {
+      if (thumbnail.thumbnailDataUrl) {
+        await putImageThumbnail({
+          id,
+          thumbnailDataUrl: thumbnail.thumbnailDataUrl,
+          width: thumbnail.width,
+          height: thumbnail.height,
+          thumbnailVersion: THUMBNAIL_VERSION,
+        })
+      }
+    } catch (err) {
+      if (!isQuotaExceededError(err)) throw err
+      console.warn('缩略图因存储配额不足未写入，将在空间释放后自动补全', err)
     }
     return { id, width: thumbnail.width, height: thumbnail.height }
   }

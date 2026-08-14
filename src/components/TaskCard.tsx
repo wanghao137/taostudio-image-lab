@@ -535,6 +535,15 @@ export default function TaskCard({
               />
             </svg>
           )}
+          {/* 未持久化警示：配额失败的图没有缩略图记录，必须独立于缩略图渲染 */}
+          {task.status === 'done' && task.outputPersistWarning && (
+            <span
+              className="absolute top-1 right-1 z-10 bg-amber-500/90 text-white text-[10px] px-1.5 py-0.5 rounded"
+              title="浏览器存储空间不足，此图仅保留在内存中，刷新后会丢失，请尽快导出"
+            >
+              未持久化
+            </span>
+          )}
           {/* 运行中显示耗时，完成后显示封面图比例与分辨率标签 */}
           <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
             {showRunningTimer || task.status !== 'done' || !coverRatio || !coverSize ? (

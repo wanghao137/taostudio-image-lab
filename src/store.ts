@@ -48,6 +48,7 @@ import {
   clearImages,
   storeImage,
   storeImageWithSize,
+  StorageQuotaError,
 } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
@@ -62,7 +63,7 @@ import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
-import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, scheduleThumbnailBackfill } from './lib/imageCache'
+import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, getCachedImage, getUnpinnedQuotaImageIds, pinQuotaImage, scheduleThumbnailBackfill } from './lib/imageCache'
 import { hasActiveDataOperations } from './lib/dataOperations'
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
@@ -103,6 +104,7 @@ const CUSTOM_RECOVERY_POLL_MS = 10_000
 const SUPPORT_PROMPT_IMAGE_THRESHOLD = 50
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const customRecoveryAbortControllers = new Map<string, AbortController>()
 const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const agentRoundControllers = new Map<string, AbortController>()
 const agentRecoveryContinuations = new Set<string>()
@@ -114,6 +116,37 @@ let agentConversationMigrationPending = false
 // 仅在 initStore（页面加载）和新的用户生成（submitTask/submitAgentMessage/retryTask）时重置。
 let tasksCleared = false
 let taskStorageGeneration = 0
+
+// ===== 生成并发队列 =====
+// 浏览器同源约 6 个 HTTP 连接：>6 个长耗时图像任务并发时，排队任务的超时
+// 时钟已在走但请求发不出去，最终团灭。信号量限制同时在飞的 executeTask。
+const GENERATION_CONCURRENCY = 2
+const generationQueue: Array<() => void> = []
+let activeGenerationCount = 0
+
+export function getGenerationQueueLength(): number {
+  return generationQueue.length + activeGenerationCount
+}
+
+async function withGenerationSlot<T>(operation: (releaseSlot: () => void) => Promise<T>): Promise<T> {
+  if (activeGenerationCount >= GENERATION_CONCURRENCY) {
+    await new Promise<void>((resolve) => generationQueue.push(resolve))
+  }
+  activeGenerationCount += 1
+  let slotReleased = false
+  const releaseSlot = () => {
+    if (slotReleased) return
+    slotReleased = true
+    activeGenerationCount -= 1
+    const next = generationQueue.shift()
+    if (next) next()
+  }
+  try {
+    return await operation(releaseSlot)
+  } finally {
+    releaseSlot()
+  }
+}
 const taskClearChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
   ? new window.BroadcastChannel('taostudio-image-lab-task-clear')
   : null
@@ -126,6 +159,8 @@ taskClearChannel?.addEventListener('message', (event: MessageEvent) => {
   falRecoveryTimers.clear()
   for (const timer of customRecoveryTimers.values()) clearTimeout(timer)
   customRecoveryTimers.clear()
+  for (const controller of customRecoveryAbortControllers.values()) controller.abort()
+  customRecoveryAbortControllers.clear()
   for (const timer of openAIWatchdogTimers.values()) clearTimeout(timer)
   openAIWatchdogTimers.clear()
   for (const controller of agentRoundControllers.values()) controller.abort()
@@ -183,6 +218,22 @@ function getTimeoutStreamingHint(profile?: TimeoutStreamingHintProfile | null) {
 
 function createOpenAITimeoutError(timeoutSeconds: number, profile?: TimeoutStreamingHintProfile | null) {
   return `请求超时：超过 ${timeoutSeconds} 秒仍未完成，请稍后重试或提高超时时间。${getTimeoutStreamingHint(profile)}`
+}
+
+/** 从任务当前生效的 profile 里取超时秒数，供超时文案使用。 */
+function activeProfileTimeoutSeconds(taskId: string, task: TaskRecord): number {
+  const settings = useStore.getState().settings
+  const profile = getTaskApiProfile(settings, task) ?? getActiveApiProfile(settings)
+  return profile.timeout
+}
+
+function getTimeoutHintProfileFor(task: TaskRecord): TimeoutStreamingHintProfile | null {
+  const settings = useStore.getState().settings
+  return getTaskApiProfile(settings, task) ?? {
+    provider: task.apiProvider ?? getActiveApiProfile(settings).provider,
+    streamImages: getActiveApiProfile(settings).streamImages,
+    streamPartialImages: getActiveApiProfile(settings).streamPartialImages,
+  }
 }
 
 function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: string | null | undefined) {
@@ -1124,6 +1175,17 @@ function clearOpenAIWatchdogTimer(taskId: string) {
   openAIWatchdogTimers.delete(taskId)
 }
 
+/** 看门狗宽限：覆盖 lib 层的完整重试预算（1 次原始 + 2 次瞬态重试 + 1 次安全改写，
+ * 每次窗口独立刷新）加退避间隔。lib 超时仍是权威，看门狗只兜底 fetch 挂死。 */
+function getOpenAIWatchdogGraceSeconds(timeoutSeconds: number) {
+  const retryWindows = 4 // 原始 + 2 重试 + 1 改写
+  const backoffHeadroomSeconds = 30
+  return timeoutSeconds * retryWindows + backoffHeadroomSeconds - timeoutSeconds
+}
+
+/** 单次恢复轮询的最长等待；超时后 abort，由恢复调度器决定重试。 */
+const CUSTOM_RECOVERY_POLL_TIMEOUT_MS = 5 * 60 * 1000
+
 function failOpenAITaskIfStillRunning(taskId: string, error: string, now = Date.now()) {
   const task = useStore.getState().tasks.find((item) => item.id === taskId)
   if (!task || !isRunningOpenAITask(task)) return false
@@ -1136,26 +1198,21 @@ function failOpenAITaskIfStillRunning(taskId: string, error: string, now = Date.
   return true
 }
 
-function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number, profile?: TimeoutStreamingHintProfile | null) {
+function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number, profile?: TimeoutStreamingHintProfile | null, startedAtMs?: number) {
   clearOpenAIWatchdogTimer(taskId)
   const task = useStore.getState().tasks.find((item) => item.id === taskId)
   if (!task || !isRunningOpenAITask(task)) return
 
+  // 锚点是请求开始（槽位取得后），不是任务创建——排队等待不应消耗看门狗预算。
+  const startedAt = startedAtMs ?? Date.now()
   const timeoutMs = Math.max(0, timeoutSeconds * 1000)
-  const remainingMs = Math.max(0, timeoutMs - (Date.now() - task.createdAt))
+  const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt))
   const timer = setTimeout(() => {
     openAIWatchdogTimers.delete(taskId)
     const failed = failOpenAITaskIfStillRunning(taskId, createOpenAITimeoutError(timeoutSeconds, profile))
     if (failed) useStore.getState().showToast('OpenAI 任务请求超时', 'error')
   }, remainingMs)
   openAIWatchdogTimers.set(taskId, timer)
-}
-
-function usesConcurrentOpenAIImageRequests(profile: ApiProfile, params: TaskParams) {
-  const n = params.n > 0 ? params.n : 1
-  if (profile.provider !== 'openai' || n <= 1) return false
-  if (profile.apiMode === 'responses') return true
-  return profile.apiMode === 'images' && (profile.codexCli || profile.streamImages)
 }
 
 export function taskHasOutputErrors(task: Pick<TaskRecord, 'outputErrors'>) {
@@ -1427,7 +1484,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.falRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms } = await storeTaskOutputImages(task, result.images)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images)
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -1443,13 +1500,18 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
     exactSizeTransforms,
+    outputPersistWarning: persistFailedCount > 0 || undefined,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
     ...createTaskDonePatch(task, Date.now()),
     falRecoverable: false,
   })
-  useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  if (persistFailedCount > 0) {
+    useStore.getState().showToast(`fal.ai 任务已恢复，但存储空间不足，${persistFailedCount} 张图片仅保留在内存中，请立即导出。`, 'error')
+  } else {
+    useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  }
   if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
   else void continueRecoveredAgentRound(task.id)
 }
@@ -2096,16 +2158,28 @@ async function storeGeneratedOutputImage(
   let outputDataUrl = dataUrl
   let exactSizeOriginalImageId = ''
   let exactSizeTransform: ExactSizeTransformRecord | undefined
+  let persistFailed = false
   const targetSize = getExactImageSizeTarget(params)
 
   if (targetSize) {
     const resized = await resizeImageDataUrlToExactSize(outputDataUrl, targetSize, params.output_format, 'cover')
     if (resized.resized) {
       const sourceDataUrl = resized.sourceDataUrl ?? outputDataUrl
-      const original = await storeImageWithSize(sourceDataUrl, 'generated')
-      storedImageIds.push(original.id)
-      cacheImage(original.id, sourceDataUrl)
-      exactSizeOriginalImageId = original.id
+      try {
+        const original = await storeImageWithSize(sourceDataUrl, 'generated')
+        storedImageIds.push(original.id)
+        cacheImage(original.id, sourceDataUrl)
+        exactSizeOriginalImageId = original.id
+      } catch (err) {
+        // 配额不足：原图留在内存缓存；任务继续，稍后统一提示导出。
+        if (err instanceof StorageQuotaError) {
+          pinQuotaImage(err.imageId, sourceDataUrl)
+          exactSizeOriginalImageId = err.imageId
+          persistFailed = true
+        } else {
+          throw err
+        }
+      }
       outputDataUrl = resized.dataUrl
       if (resized.drawPlan) {
         exactSizeTransform = {
@@ -2128,7 +2202,20 @@ async function storeGeneratedOutputImage(
     }
   }
 
-  const stored = await storeImageWithSize(outputDataUrl, 'generated')
+  let stored
+  try {
+    stored = await storeImageWithSize(outputDataUrl, 'generated')
+  } catch (err) {
+    if (err instanceof StorageQuotaError) {
+      // 关键兜底：图已经生成并计费，配额不足不能把图丢掉。
+      // 留在内存缓存（LRU 可能被挤掉，是尽力而为）+ 任务标记未持久化，引导用户立刻导出。
+      pinQuotaImage(err.imageId, outputDataUrl)
+      stored = { id: err.imageId, width: err.width, height: err.height }
+      persistFailed = true
+    } else {
+      throw err
+    }
+  }
   storedImageIds.push(stored.id)
   cacheImage(stored.id, outputDataUrl)
 
@@ -2138,6 +2225,7 @@ async function storeGeneratedOutputImage(
     size: stored,
     exactSizeOriginalImageId,
     exactSizeTransform,
+    persistFailed,
   }
 }
 
@@ -2149,30 +2237,47 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
   const exactSizeOriginalImageIds: string[] = []
   const exactSizeTransforms: Record<string, ExactSizeTransformRecord> = {}
   const storedImageIds: string[] = []
+  let persistFailedCount = 0
   const trackExactSizeOriginalImages = Boolean(getExactImageSizeTarget(task.params))
 
   try {
     for (const dataUrl of images) {
       let outputDataUrl = dataUrl
       if (task.transparentOutput) {
-        const original = await storeImageWithSize(dataUrl, 'generated')
-        storedImageIds.push(original.id)
-        cacheImage(original.id, dataUrl)
+        let originalId: string
+        let originalSize: { width?: number; height?: number }
+        try {
+          const original = await storeImageWithSize(dataUrl, 'generated')
+          storedImageIds.push(original.id)
+          cacheImage(original.id, dataUrl)
+          originalId = original.id
+          originalSize = original
+        } catch (err) {
+          if (err instanceof StorageQuotaError) {
+            pinQuotaImage(err.imageId, dataUrl)
+            originalId = err.imageId
+            originalSize = { width: err.width, height: err.height }
+            persistFailedCount += 1
+          } else {
+            throw err
+          }
+        }
 
         try {
           outputDataUrl = await removeKeyedBackgroundFromDataUrl(dataUrl)
-          transparentOriginalImageIds.push(original.id)
+          transparentOriginalImageIds.push(originalId)
         } catch (err) {
           console.warn('透明背景后处理失败，已回退为原始输出', err)
-          outputIds.push(original.id)
+          outputIds.push(originalId)
           outputDataUrls.push(dataUrl)
-          outputImageSizes.push(original)
+          outputImageSizes.push(originalSize)
           transparentOriginalImageIds.push('')
           continue
         }
       }
 
       const stored = await storeGeneratedOutputImage(outputDataUrl, task.params, storedImageIds)
+      if (stored.persistFailed) persistFailedCount += 1
       outputIds.push(stored.id)
       outputDataUrls.push(stored.dataUrl)
       outputImageSizes.push(stored.size)
@@ -2191,6 +2296,7 @@ async function storeTaskOutputImages(task: TaskRecord, images: string[]) {
       transparentOriginalImageIds: transparentOriginalImageIds.length ? transparentOriginalImageIds : undefined,
       exactSizeOriginalImageIds: exactSizeOriginalImageIds.some(Boolean) ? exactSizeOriginalImageIds : undefined,
       exactSizeTransforms: Object.keys(exactSizeTransforms).length ? exactSizeTransforms : undefined,
+      persistFailedCount,
     }
   } catch (err) {
     await deleteUnreferencedImageIds(storedImageIds)
@@ -2867,6 +2973,7 @@ async function executeAgentRound(
         outputImages: [stored.id],
         exactSizeOriginalImages: stored.exactSizeOriginalImageId ? [stored.exactSizeOriginalImageId] : undefined,
         exactSizeTransforms: stored.exactSizeTransform ? { [stored.id]: stored.exactSizeTransform } : undefined,
+        outputPersistWarning: stored.persistFailed || undefined,
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -2875,6 +2982,9 @@ async function executeAgentRound(
         ...createTaskDonePatch(latestBeforeUpdate, Date.now()),
         agentToolAction: image.action,
       })
+      if (stored.persistFailed) {
+        useStore.getState().showToast('存储空间不足，此图仅保留在内存中，刷新后会丢失——请立即导出。', 'error')
+      }
       useStore.getState().setTaskStreamPreview(taskId)
       return { taskId, committed: true }
     }
@@ -3498,6 +3608,7 @@ async function executeAgentRound(
           outputImages: [stored.id],
           exactSizeOriginalImages: stored.exactSizeOriginalImageId ? [stored.exactSizeOriginalImageId] : undefined,
           exactSizeTransforms: stored.exactSizeTransform ? { [stored.id]: stored.exactSizeTransform } : undefined,
+          outputPersistWarning: stored.persistFailed || undefined,
           actualParams,
           actualParamsByImage: { [stored.id]: actualParams },
           revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -3777,6 +3888,23 @@ async function executeAgentRound(
 }
 
 async function executeTask(taskId: string) {
+  // 并发槽在拿到任务快照之前不入队：找不到任务/配置的任务不应占用槽位。
+  const { settings } = useStore.getState()
+  const task = useStore.getState().tasks.find((t) => t.id === taskId)
+  if (!task) return
+  const taskProfile = getTaskApiProfile(settings, task)
+  if (!taskProfile && task.apiProfileId) {
+    updateTaskInStore(taskId, {
+      ...createTaskErrorPatch(task, '找不到此任务所使用的 API 配置。', Date.now()),
+      falRecoverable: false,
+      customRecoverable: false,
+    })
+    return
+  }
+  await withGenerationSlot((releaseSlot) => executeTaskWithSlot(taskId, releaseSlot))
+}
+
+async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
   const { settings } = useStore.getState()
   const task = useStore.getState().tasks.find((t) => t.id === taskId)
   if (!task) return
@@ -3801,10 +3929,18 @@ async function executeTask(taskId: string) {
 
   if (
     taskProvider !== 'fal' &&
-    !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0) &&
-    !usesConcurrentOpenAIImageRequests(activeProfile, task.params)
+    !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0)
   ) {
-    scheduleOpenAIWatchdog(taskId, activeProfile.timeout, activeProfile)
+    // 看门狗是兜底护栏而非第二只超时表：lib 层请求超时（含瞬态重试、每次
+    // 重试刷新窗口）是权威；看门狗按「请求开始」计时，且宽限覆盖整个重试
+    // 预算，避免 lib 还在重试时提前判死、丢弃晚到的成功结果（白烧额度）。
+    const requestStartedAt = Date.now()
+    scheduleOpenAIWatchdog(
+      taskId,
+      activeProfile.timeout + getOpenAIWatchdogGraceSeconds(activeProfile.timeout),
+      activeProfile,
+      requestStartedAt,
+    )
   }
 
   try {
@@ -3846,6 +3982,8 @@ async function executeTask(taskId: string) {
           falEndpoint: request.endpoint,
           falRecoverable: false,
         })
+        // 已转入 provider 侧队列等待（恢复定时器接管）：释放浏览器连接槽位。
+        releaseSlot?.()
       },
       onCustomTaskEnqueued: (request) => {
         customTaskInfo = request
@@ -3853,6 +3991,7 @@ async function executeTask(taskId: string) {
           customTaskId: request.taskId,
           customRecoverable: false,
         })
+        releaseSlot?.()
       },
       onPartialImage: (partial) => {
         useStore.getState().setTaskStreamPreview(taskId, partial.image, partial.requestIndex)
@@ -3867,7 +4006,7 @@ async function executeTask(taskId: string) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms } = await storeTaskOutputImages(task, result.images)
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images)
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const resolvedActualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
@@ -3923,6 +4062,7 @@ async function executeTask(taskId: string) {
       exactSizeOriginalImages: exactSizeOriginalImageIds,
       exactSizeTransforms,
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
+      outputPersistWarning: persistFailedCount > 0 || undefined,
       streamPartialImageIds: undefined,
       rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
       actualParams,
@@ -3939,10 +4079,12 @@ async function executeTask(taskId: string) {
     void deleteUnreferencedImageIds(partialImageIdsToClean)
 
     const failedCount = result.failedRequests?.length ?? 0
-    const completionMessage = failedCount > 0
-      ? `生成完成：成功 ${outputIds.length} 张，失败 ${failedCount} 张`
-      : `生成完成，共 ${outputIds.length} 张图片`
-    useStore.getState().showToast(completionMessage, failedCount > 0 ? 'error' : 'success')
+    const completionMessage = persistFailedCount > 0
+      ? `生成完成，但浏览器存储空间不足，${persistFailedCount} 张图片仅保留在内存中，刷新后会丢失——请立即导出或清理空间。`
+      : failedCount > 0
+        ? `生成完成：成功 ${outputIds.length} 张，失败 ${failedCount} 张`
+        : `生成完成，共 ${outputIds.length} 张图片`
+    useStore.getState().showToast(completionMessage, persistFailedCount > 0 || failedCount > 0 ? 'error' : 'success')
     if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
     const currentMask = useStore.getState().maskDraft
     if (
@@ -3978,7 +4120,12 @@ async function executeTask(taskId: string) {
       })
       scheduleCustomRecovery(taskId)
     } else {
-      let errorMessage = err instanceof Error ? err.message : String(err)
+      // lib 层超时（AbortError）原样抛出时消息是浏览器 jargon；翻译成
+      // 与看门狗一致的用户文案。
+      const isTimeoutAbort = typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError'
+      let errorMessage = isTimeoutAbort
+        ? createOpenAITimeoutError(activeProfileTimeoutSeconds(taskId, latestTask), getTimeoutHintProfileFor(latestTask))
+        : err instanceof Error ? err.message : String(err)
       const settings = useStore.getState().settings
       const profile = getTaskApiProfile(settings, latestTask)
       const usesApiProxy = profile?.apiProxy ?? settings.apiProxy
@@ -4931,7 +5078,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.customRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms } = await storeTaskOutputImages(task, result.images)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images)
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -4947,13 +5094,18 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
     exactSizeTransforms,
+    outputPersistWarning: persistFailedCount > 0 || undefined,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
     revisedPromptByImage: undefined,
     ...createTaskDonePatch(task, Date.now()),
     customRecoverable: false,
   })
-  useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  if (persistFailedCount > 0) {
+    useStore.getState().showToast(`自定义异步任务已恢复，但存储空间不足，${persistFailedCount} 张图片仅保留在内存中，请立即导出。`, 'error')
+  } else {
+    useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+  }
   if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
   else void continueRecoveredAgentRound(task.id)
 }
@@ -4970,8 +5122,15 @@ async function recoverCustomTask(taskId: string) {
     return
   }
 
+  // 恢复轮询有自己的中止器：单次 poll fetch 不再可能无限挂起，
+  // clearData/任务删除时也可取消。
+  const controller = new AbortController()
+  customRecoveryAbortControllers.set(taskId, controller)
+  const perPollTimeout = setTimeout(() => controller.abort(), CUSTOM_RECOVERY_POLL_TIMEOUT_MS)
   try {
-    const result = await getCustomQueuedImageResult(profile, customProvider, task.customTaskId, task.params)
+    // 恢复轮询同样有 30 分钟上限（pollCustomTaskResult 内部强制），
+    // 不再出现坏网关下的无限轮询。
+    const result = await getCustomQueuedImageResult(profile, customProvider, task.customTaskId, task.params, controller.signal)
     clearCustomRecoveryTimer(taskId)
     await completeRecoveredCustomTask(task, result)
   } catch (err) {
@@ -4983,6 +5142,9 @@ async function recoverCustomTask(taskId: string) {
       customRecoverable: false,
     })
     if (isAgentTask(task)) void continueRecoveredAgentRound(taskId)
+  } finally {
+    clearTimeout(perPollTimeout)
+    customRecoveryAbortControllers.delete(taskId)
   }
 }
 
@@ -4999,6 +5161,10 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
     if (options.exportTasks && hasActiveDataOperations(state.tasks, state.agentConversations)) throw new Error('当前有任务正在进行，请完成或停止后再导出。')
     const tasks = options.exportTasks ? await getAllTasks() : []
     const imageIds = options.exportTasks ? await getAllImageIds() : []
+    // 配额失败仅存内存的图（钉在 imageCache 的 pinnedQuotaImages）：必须并入导出，
+    // 否则「请立即导出」的指引救不回这些已计费的图。
+    const pinnedIds = options.exportTasks ? getUnpinnedQuotaImageIds().filter((id) => !imageIds.includes(id)) : []
+    if (pinnedIds.length) imageIds.push(...pinnedIds)
     const { settings, agentConversations, favoriteCollections, defaultFavoriteCollectionId } = state
     const exportedAt = Date.now()
     const params = {
@@ -5013,8 +5179,12 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
     }
     const imageSizes = []
     for (const id of imageIds) {
-      const image = await getImage(id)
-      if (!image) continue
+      let image = await getImage(id)
+      if (!image) {
+        const pinnedDataUrl = getCachedImage(id)
+        if (!pinnedIds.includes(id) || !pinnedDataUrl) continue
+        image = { id, dataUrl: pinnedDataUrl, createdAt: exportedAt, source: 'generated' }
+      }
       const thumbnail = await getImageThumbnail(id)
       imageSizes.push({ id, bytes: getExportImageEstimatedBytes(image, thumbnail) })
     }
@@ -5025,8 +5195,12 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
       const images: StoredImage[] = []
       const thumbnailsByImageId = new Map<string, StoredImageThumbnail>()
       for (const id of plan[index].imageIds) {
-        const image = await getImage(id)
-        if (!image) continue
+        let image = await getImage(id)
+        if (!image) {
+          const pinnedDataUrl = getCachedImage(id)
+          if (!pinnedIds.includes(id) || !pinnedDataUrl) continue
+          image = { id, dataUrl: pinnedDataUrl, createdAt: exportedAt, source: 'generated' }
+        }
         images.push(image)
         const thumbnail = await getImageThumbnail(id)
         if (!thumbnail?.thumbnailDataUrl) continue

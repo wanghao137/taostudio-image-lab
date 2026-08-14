@@ -13,6 +13,9 @@ type ImageThumbnail = {
 }
 
 const imageCache = new Map<string, string>()
+// 配额耗尽时未写入 IndexedDB 的图：钉在缓存外层，永不参与 LRU 淘汰——
+// 它们是仅存副本，被淘汰即永久丢失。
+const pinnedQuotaImages = new Map<string, string>()
 const thumbnailCache = new Map<string, ImageThumbnail>()
 const thumbnailBackfillIds = new Map<string, 'visible' | 'background'>()
 const thumbnailBackfillRunningIds = new Set<string>()
@@ -24,6 +27,8 @@ const MAX_THUMBNAIL_CACHE_ENTRIES = 80
 const MAX_THUMBNAIL_BACKFILL_CONCURRENT = 4
 
 export function getCachedImage(id: string): string | undefined {
+  const pinned = pinnedQuotaImages.get(id)
+  if (pinned) return pinned
   const dataUrl = imageCache.get(id)
   if (dataUrl) {
     imageCache.delete(id)
@@ -32,7 +37,20 @@ export function getCachedImage(id: string): string | undefined {
   return dataUrl
 }
 
+/** 钉住一张仅存在于内存的配额失败图（不参与 LRU 淘汰），返回是否新钉入。 */
+export function pinQuotaImage(id: string, dataUrl: string): boolean {
+  if (pinnedQuotaImages.has(id)) return false
+  pinnedQuotaImages.set(id, dataUrl)
+  return true
+}
+
+export function getUnpinnedQuotaImageIds(): string[] {
+  return [...pinnedQuotaImages.keys()]
+}
+
 export function cacheImage(id: string, dataUrl: string) {
+  // 一旦同 id 的图成功写盘（例如重试后），解除钉住。
+  pinnedQuotaImages.delete(id)
   imageCache.delete(id)
   imageCache.set(id, dataUrl)
   while (imageCache.size > MAX_IMAGE_CACHE_ENTRIES) {
@@ -44,6 +62,7 @@ export function cacheImage(id: string, dataUrl: string) {
 
 export function deleteCachedImage(id: string) {
   imageCache.delete(id)
+  pinnedQuotaImages.delete(id)
 }
 
 function getCachedThumbnail(id: string) {
@@ -78,6 +97,7 @@ export function deleteImageCacheEntry(id: string) {
 
 export function clearImageCaches() {
   imageCache.clear()
+  pinnedQuotaImages.clear()
   thumbnailCache.clear()
   thumbnailBackfillIds.clear()
 }

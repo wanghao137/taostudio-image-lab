@@ -10,6 +10,7 @@
     }
   ],
   "vars": {
-    "IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS": "true"
+    "IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS": "false",
+    "IMAGE_API_PROXY_ALLOWED_HOSTS": "www.ydn99.com"
   }
 }
