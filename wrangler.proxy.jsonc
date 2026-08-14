@@ -3,12 +3,12 @@
   "name": "taostudio-image-api-proxy",
   "main": "workers/api-proxy.js",
   "compatibility_date": "2026-05-07",
-  "routes": [
-    {
-      "pattern": "image-proxy.taostudioai.com",
-      "custom_domain": true
-    }
-  ],
+  // 自定义域 image-proxy.taostudioai.com 已在 Cloudflare 侧绑定到本 Worker，
+  // wrangler 不会删除未在配置中声明的既有绑定，因此这里不再声明 routes——
+  // CI 的部署令牌只需账户级权限（Workers Scripts:Edit），无需 Zone 级
+  // Workers Routes:Edit，deploy 全绿。若将来需要重建绑定：把 routes 加回来
+  // （"pattern": "image-proxy.taostudioai.com", "custom_domain": true），
+  // 并给令牌补 区域·taostudioai.com·Workers 路由·编辑 权限。
   "vars": {
     "IMAGE_API_PROXY_ALLOW_PUBLIC_TARGETS": "false",
     "IMAGE_API_PROXY_ALLOWED_HOSTS": "www.ydn99.com"
