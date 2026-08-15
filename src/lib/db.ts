@@ -61,6 +61,8 @@ function dbTransaction<T>(
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
+        // 事务结束即关连接：泄漏的打开连接会阻塞 deleteDatabase（重建逃生门）
+        const closeDb = () => { try { db.close() } catch { /* already closed */ } }
         const tx = db.transaction(storeName, mode)
         const store = tx.objectStore(storeName)
         const req = fn(store)
@@ -76,14 +78,16 @@ function dbTransaction<T>(
           result = req.result
         }
         req.onerror = () => fail(req.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => {
+          closeDb()
           if (!settled) {
             settled = true
             resolve(result)
           }
         }
-        tx.onerror = () => fail(tx.error)
-        tx.onabort = () => fail(tx.error)
+        tx.onerror = () => { closeDb(); fail(tx.error) }
+        tx.onabort = () => { closeDb(); fail(tx.error) }
       }),
   )
 }
@@ -112,8 +116,11 @@ export function putTask(task: TaskRecord, expectedGeneration?: number): Promise<
           taskStore.put(task)
         }
         generationRequest.onerror = () => reject(generationRequest.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(task.id)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -141,8 +148,11 @@ export function clearTasksAndAdvanceGeneration(): Promise<number> {
           taskStore.clear()
         }
         generationRequest.onerror = () => reject(generationRequest.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(nextGeneration)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -166,8 +176,11 @@ export function deleteTask(id: string, expectedGeneration?: number): Promise<und
           taskStore.delete(id)
         }
         generationRequest.onerror = () => reject(generationRequest.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -205,8 +218,11 @@ export function commitTaskDeletion(
           }
           generationRequest.onerror = () => reject(generationRequest.error)
         }
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -240,8 +256,11 @@ export function putAgentConversation(conversation: AgentConversation, expectedGe
           conversationStore.put(conversation)
         }
         generationRequest.onerror = () => reject(generationRequest.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(conversation.id)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -265,8 +284,11 @@ export function deleteAgentConversation(id: string, expectedGeneration?: number)
           conversationStore.delete(id)
         }
         generationRequest.onerror = () => reject(generationRequest.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -290,8 +312,11 @@ export function clearAgentConversations(expectedGeneration?: number): Promise<un
           conversationStore.clear()
         }
         generationRequest.onerror = () => reject(generationRequest.error)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -321,8 +346,11 @@ export function replaceAgentConversations(conversations: AgentConversation[], ex
           }
           generationRequest.onerror = () => reject(generationRequest.error)
         }
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -485,7 +513,9 @@ function migrateOneImageRecord(id: string): Promise<boolean> {
           }
         }
         getReq.onerror = () => reject(getReq.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
+        try { db.close() } catch { /* already closed */ }
         tx.onabort = () => reject(tx.error)
       }),
   )
@@ -616,7 +646,9 @@ export function deleteImage(id: string): Promise<undefined> {
         const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
         tx.objectStore(STORE_IMAGES).delete(id)
         tx.objectStore(STORE_THUMBNAILS).delete(id)
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
       }),
   )
@@ -629,7 +661,9 @@ export function clearImages(): Promise<undefined> {
         const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
         tx.objectStore(STORE_IMAGES).clear()
         tx.objectStore(STORE_THUMBNAILS).clear()
+        try { db.close() } catch { /* already closed */ }
         tx.oncomplete = () => resolve(undefined)
+        try { db.close() } catch { /* already closed */ }
         tx.onerror = () => reject(tx.error)
       }),
   )

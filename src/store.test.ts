@@ -6496,7 +6496,7 @@ describe('clearData', () => {
     await clearData({ clearTasks: true, clearConfig: false })
 
     expect(useStore.getState().showToast).toHaveBeenCalledWith(
-      '部分数据清空失败，请刷新页面后重试',
+      '部分数据清空失败，可重试清空；若持续失败请使用「重建数据库」',
       'error',
     )
   })
@@ -6507,7 +6507,7 @@ describe('clearData', () => {
     await clearData({ clearTasks: true, clearConfig: false })
 
     expect(useStore.getState().showToast).toHaveBeenCalledWith(
-      '部分数据清空失败，请刷新页面后重试',
+      '部分数据清空失败，可重试清空；若持续失败请使用「重建数据库」',
       'error',
     )
   })
@@ -6520,7 +6520,7 @@ describe('clearData', () => {
 
     expect(useStore.getState().showToast).toHaveBeenCalledWith('所选数据已清空', 'success')
     expect(useStore.getState().showToast).not.toHaveBeenCalledWith(
-      '部分数据清空失败，请刷新页面后重试',
+      '部分数据清空失败，可重试清空；若持续失败请使用「重建数据库」',
       'error',
     )
   })
@@ -6694,5 +6694,68 @@ describe('clearData', () => {
     // fresh-task 仍在，旧任务未复活
     expect(useStore.getState().tasks.length).toBe(1)
     expect(useStore.getState().tasks[0].id).toBe('fresh-task')
+  })
+})
+
+describe('image cleanup plan (#20)', () => {
+  const NOW = 2_000_000_000_000
+  const OLD = NOW - 40 * 24 * 60 * 60 * 1000
+
+  it('counts failed-task partials and stale original copies, excluding protected outputs', async () => {
+    const { getCleanupPlan } = await import('./store')
+    const tasks: TaskRecord[] = [
+      task({
+        id: 'cleanup-failed',
+        status: 'error',
+        createdAt: NOW,
+        streamPartialImageIds: ['partial-1', 'partial-2'],
+      }),
+      task({
+        id: 'cleanup-stale',
+        status: 'done',
+        createdAt: OLD,
+        transparentOriginalImages: ['trans-copy-1'],
+        exactSizeOriginalImages: ['exact-copy-1', 'exact-copy-2'],
+        outputImages: ['exact-copy-1'], // 受保护：同时是输出图
+      }),
+      task({
+        id: 'cleanup-fresh',
+        status: 'done',
+        createdAt: NOW,
+        transparentOriginalImages: ['fresh-copy'], // 未满 30 天，不算
+      }),
+    ]
+    const plan = getCleanupPlan(tasks, NOW)
+    expect(plan.failedPartialCount).toBe(2)
+    // trans-copy-1 + exact-copy-2（exact-copy-1 受保护被排除）
+    expect(plan.staleOriginalCopyCount).toBe(2)
+    expect(plan.taskCount).toBe(2)
+  })
+
+  it('runImageCleanup removes orphaned images and strips task references', async () => {
+    const dbModule = await import('./lib/db')
+    const { runImageCleanup } = await import('./store')
+    const deleteSpy = vi.spyOn(dbModule, 'deleteImage')
+
+    const tasks: TaskRecord[] = [
+      task({
+        id: 'cleanup-target',
+        status: 'error',
+        createdAt: NOW,
+        streamPartialImageIds: ['partial-a'],
+        outputImages: ['out-a'],
+      }),
+    ]
+    useStore.setState({ tasks, showToast: vi.fn() })
+    const removed = await runImageCleanup(useStore.getState().tasks)
+
+    expect(removed).toBe(1)
+    expect(deleteSpy).toHaveBeenCalledWith('partial-a')
+    expect(deleteSpy).not.toHaveBeenCalledWith('out-a')
+    const updated = useStore.getState().tasks.find((t) => t.id === 'cleanup-target')
+    expect(updated?.streamPartialImageIds).toBeUndefined()
+    expect(updated?.outputImages).toEqual(['out-a'])
+
+    deleteSpy.mockRestore()
   })
 })

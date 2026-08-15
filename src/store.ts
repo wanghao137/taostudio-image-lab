@@ -5259,9 +5259,203 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 
   const failed = clearTasksFailed || clearAgentConversationsFailed || clearImagesFailed || clearConfigFailed
   showToast(
-    failed ? '部分数据清空失败，请刷新页面后重试' : '所选数据已清空',
+    failed ? '部分数据清空失败，可重试清空；若持续失败请使用「重建数据库」' : '所选数据已清空',
     failed ? 'error' : 'success',
   )
+}
+
+// ===== 可清理项驱逐（#20）=====
+
+export interface CleanupPlan {
+  /** 失败任务遗留的流式中间图数量 */
+  failedPartialCount: number
+  /** 老于 30 天任务的可丢弃副本（透明处理前原图 / 精确尺寸处理前原图）数量 */
+  staleOriginalCopyCount: number
+  /** 相关任务数 */
+  taskCount: number
+}
+
+/** 涉及任务引用的所有图片 id（清理候选对照，防止误删仍被输出的图）。 */
+function collectProtectedImageIds(tasks: TaskRecord[]): Set<string> {
+  const protectedIds = new Set<string>()
+  for (const task of tasks) {
+    for (const id of task.outputImages ?? []) protectedIds.add(id)
+    for (const id of task.inputImageIds ?? []) protectedIds.add(id)
+    if (task.maskImageId) protectedIds.add(task.maskImageId)
+  }
+  return protectedIds
+}
+
+const CLEANUP_STALE_TASK_AGE_MS = 30 * 24 * 60 * 60 * 1000
+
+/** 计算可清理项（不执行删除）。partial 图属失败任务遗留；副本图须任务老于 30 天。 */
+export function getCleanupPlan(tasks: TaskRecord[], now = Date.now()): CleanupPlan {
+  const failedPartialIds = new Set<string>()
+  const staleCopyIds = new Set<string>()
+  const relatedTaskIds = new Set<string>()
+
+  for (const task of tasks) {
+    const failed = task.status === 'error'
+    if (failed && task.streamPartialImageIds?.length) {
+      for (const id of task.streamPartialImageIds) {
+        if (id) {
+          failedPartialIds.add(id)
+          relatedTaskIds.add(task.id)
+        }
+      }
+    }
+    const stale = now - task.createdAt > CLEANUP_STALE_TASK_AGE_MS
+    if (stale) {
+      for (const id of task.transparentOriginalImages ?? []) {
+        if (id) {
+          staleCopyIds.add(id)
+          relatedTaskIds.add(task.id)
+        }
+      }
+      for (const id of task.exactSizeOriginalImages ?? []) {
+        if (id) {
+          staleCopyIds.add(id)
+          relatedTaskIds.add(task.id)
+        }
+      }
+    }
+  }
+
+  // 交集防护：同一张图若同时是任何任务的输出/输入/遮罩，绝不清
+  const protectedIds = collectProtectedImageIds(tasks)
+  for (const id of [...failedPartialIds]) if (protectedIds.has(id)) failedPartialIds.delete(id)
+  for (const id of [...staleCopyIds]) if (protectedIds.has(id)) staleCopyIds.delete(id)
+
+  return {
+    failedPartialCount: failedPartialIds.size,
+    staleOriginalCopyCount: staleCopyIds.size,
+    taskCount: relatedTaskIds.size,
+  }
+}
+
+/**
+ * 执行清理：删除失败任务 partial 图与老任务副本图，并从任务记录里移除对应
+ * 引用（任务本体与输出图保留）。返回删除的图片数量。
+ */
+export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
+  const protectedIds = collectProtectedImageIds(tasks)
+  const now = Date.now()
+  const taskPatches: Array<{ taskId: string; patch: Partial<TaskRecord> }> = []
+
+  for (const task of tasks) {
+    const patch: Partial<TaskRecord> = {}
+    if (task.status === 'error' && task.streamPartialImageIds?.length) {
+      const keep = task.streamPartialImageIds.filter((id) => !id || protectedIds.has(id))
+      if (keep.length !== task.streamPartialImageIds.length) {
+        patch.streamPartialImageIds = keep.length ? keep : undefined
+      }
+    }
+    const stale = now - task.createdAt > CLEANUP_STALE_TASK_AGE_MS
+    if (stale) {
+      if (task.transparentOriginalImages?.length) {
+        const keep = task.transparentOriginalImages.filter((id) => !id || protectedIds.has(id))
+        if (keep.length !== task.transparentOriginalImages.length) {
+          patch.transparentOriginalImages = keep.length ? keep : undefined
+        }
+      }
+      if (task.exactSizeOriginalImages?.length) {
+        const keep = task.exactSizeOriginalImages.filter((id) => !id || protectedIds.has(id))
+        if (keep.length !== task.exactSizeOriginalImages.length) {
+          patch.exactSizeOriginalImages = keep.length ? keep : undefined
+        }
+      }
+    }
+    if (Object.keys(patch).length) taskPatches.push({ taskId: task.id, patch })
+  }
+
+  // 先重算受影响图（按补丁后的引用视图），删除真正孤立者
+  const patchedTasks = tasks.map((task) => {
+    const entry = taskPatches.find((p) => p.taskId === task.id)
+    return entry ? { ...task, ...entry.patch } : task
+  })
+  const stillReferenced = collectProtectedImageIds(patchedTasks)
+  // 输入图/遮罩引用也要纳入防护（collectProtectedImageIds 已含），再排除保留引用
+  for (const task of patchedTasks) {
+    for (const id of task.streamPartialImageIds ?? []) stillReferenced.add(id)
+    for (const id of task.transparentOriginalImages ?? []) stillReferenced.add(id)
+    for (const id of task.exactSizeOriginalImages ?? []) stillReferenced.add(id)
+  }
+
+  // 候选 = 清理前引用集 - 清理后引用集（真正孤立的图）
+  const before = new Set<string>()
+  for (const task of tasks) {
+    for (const id of task.streamPartialImageIds ?? []) if (id) before.add(id)
+    for (const id of task.transparentOriginalImages ?? []) if (id) before.add(id)
+    for (const id of task.exactSizeOriginalImages ?? []) if (id) before.add(id)
+  }
+  const candidateIds = new Set<string>()
+  for (const id of before) {
+    if (!stillReferenced.has(id)) candidateIds.add(id)
+  }
+
+  // 先删再剥：只有真正删除成功的引用才从任务记录里剥离——删除失败而
+  // 剥了引用会造成永久孤儿（下次清理再也扫不到它）。
+  const deletedIds = new Set<string>()
+  for (const id of candidateIds) {
+    try {
+      await deleteImage(id)
+      deleteImageCacheEntry(id)
+      deletedIds.add(id)
+    } catch {
+      // 删除失败：保留任务引用，下次清理可重试
+    }
+  }
+
+  const appliedPatches: Array<{ taskId: string; patch: Partial<TaskRecord> }> = []
+  for (const { taskId, patch } of taskPatches) {
+    const original = tasks.find((t) => t.id === taskId)
+    if (!original) continue
+    const applied: Partial<TaskRecord> = {}
+    if (patch.streamPartialImageIds !== undefined || patch.streamPartialImageIds === undefined && original.streamPartialImageIds) {
+      const keep = (original.streamPartialImageIds ?? []).filter((id) => patch.streamPartialImageIds?.includes(id) || !deletedIds.has(id))
+      const next = keep.length ? keep : undefined
+      if (next === undefined || keep.length !== original.streamPartialImageIds?.length) applied.streamPartialImageIds = next
+    }
+    if (original.transparentOriginalImages?.length) {
+      const keep = original.transparentOriginalImages.filter((id) => patch.transparentOriginalImages?.includes(id) || !deletedIds.has(id))
+      const next = keep.length ? keep : undefined
+      if (keep.length !== original.transparentOriginalImages.length) applied.transparentOriginalImages = next
+    }
+    if (original.exactSizeOriginalImages?.length) {
+      const keep = original.exactSizeOriginalImages.filter((id) => patch.exactSizeOriginalImages?.includes(id) || !deletedIds.has(id))
+      const next = keep.length ? keep : undefined
+      if (keep.length !== original.exactSizeOriginalImages.length) applied.exactSizeOriginalImages = next
+    }
+    if (Object.keys(applied).length) appliedPatches.push({ taskId, patch: applied })
+  }
+  for (const { taskId, patch } of appliedPatches) {
+    updateTaskInStore(taskId, patch)
+  }
+  return deletedIds.size
+}
+
+/**
+ * clearData 逃生门：删除整个 IndexedDB 数据库并重置内存态。
+ * 用于存储损坏 / 反复清空失败的最后手段。
+ * 注意：先停掉本页全部后台写入器（重试定时器、清空标志），再请求删除；
+ * 若删除被打开的连接阻止（其他标签页 / 未 GC 的泄漏连接），明确报错
+ * 而不是假成功——被阻止时数据库并未删除。
+ */
+export async function rebuildDatabase(): Promise<void> {
+  if (typeof indexedDB === 'undefined') throw new Error('当前环境不支持 IndexedDB')
+  // 停掉本页写入器，避免删除请求被本页新事务持续阻塞/复活
+  tasksCleared = true
+  clearTaskPersistRetryTimers()
+  clearImageCaches()
+
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase('gpt-image-playground')
+    request.onsuccess = () => resolve()
+    request.onerror = () => reject(request.error ?? new Error('删除数据库失败'))
+    request.onblocked = () => reject(new Error('数据库正被其他标签页或后台任务占用，请关闭其他标签页后重试'))
+  })
+
+  useStore.setState({ tasks: [], agentConversations: [], activeAgentConversationId: null })
 }
 
 /** 重置数据清除标志，仅供单元测试在 beforeEach 中调用。 */
