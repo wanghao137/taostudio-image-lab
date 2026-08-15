@@ -1,5 +1,5 @@
 import type { TaskParams } from '../types'
-import { canvasToBlob, loadImage } from './canvasImage'
+import { loadImage } from './canvasImage'
 import { blobToDataUrl } from './dataUrl'
 import { parseImageSize, type ImageSize } from './size'
 import {
@@ -9,6 +9,12 @@ import {
   formatExactRatio,
   ratioMatchesExactly,
 } from '../../packages/image-job-core/index.mjs'
+import { resizeImageHighQuality } from './imageResizer'
+
+const canvasToBlob = (canvas: HTMLCanvasElement, mime: string, quality?: number): Promise<Blob> =>
+  new Promise((resolve, reject) => {
+    canvas.toBlob((b) => b ? resolve(b) : reject(new Error('canvas export failed')), mime, quality)
+  })
 
 const OUTPUT_MIME_BY_FORMAT: Record<TaskParams['output_format'], string> = {
   png: 'image/png',
@@ -127,36 +133,31 @@ export async function resizeImageDataUrlToExactSize(
     }
   }
 
-  const canonicalSource = getExactImageCanonicalSourceSize(rawSource, target)
-  const sourceNormalized = rawSource.width !== canonicalSource.width || rawSource.height !== canonicalSource.height
-  let sourceDataUrl = dataUrl
-  let sourceDrawable: CanvasImageSource = image
-  let normalizationPlan: ExactSizeDrawPlan | undefined
-
-  if (sourceNormalized) {
-    normalizationPlan = computeExactSizeDrawPlan(rawSource, canonicalSource, fitMode)
-    const sourceCanvas = createResizeCanvas(image, canonicalSource, normalizationPlan)
-    sourceDataUrl = await exportCanvas(sourceCanvas, outputFormat)
-    sourceDrawable = sourceCanvas
-  }
-
-  const drawPlan = computeExactSizeDrawPlan(canonicalSource, target, fitMode)
-  const outputDataUrl = canonicalSource.width === target.width && canonicalSource.height === target.height
-    ? sourceDataUrl
-    : await exportCanvas(createResizeCanvas(sourceDrawable, target, drawPlan), outputFormat)
+  // 单次重采样：raw → target（lanczos3 Worker，cover 裁切内建）。
+  // 旧路径在比例不匹配时先规格化到 1K 再放大（两次重采样，中间还可能降规格），
+  // 细节损失且 canvas 平滑近似双线性——已废弃。
+  // sourceDataUrl 语义升级：直接保留 provider 原始输出（raw），供详情页
+  // 查看/下载原生底图，而不是 1K 重编码版。
+  const drawPlan = computeExactSizeDrawPlan(rawSource, target, fitMode)
+  const outputDataUrl = outputFormat === 'png'
+    ? await resizeImageHighQuality(dataUrl, target.width, target.height, fitMode)
+    : await exportCanvas(
+        createResizeCanvas(image, target, drawPlan),
+        outputFormat,
+      )
 
   return {
     dataUrl: outputDataUrl,
-    sourceDataUrl,
+    sourceDataUrl: dataUrl,
     width: target.width,
     height: target.height,
     resized: true,
-    sourceWidth: canonicalSource.width,
-    sourceHeight: canonicalSource.height,
+    sourceWidth: rawSource.width,
+    sourceHeight: rawSource.height,
     rawSourceWidth: rawSource.width,
     rawSourceHeight: rawSource.height,
-    sourceNormalized,
+    sourceNormalized: false,
     drawPlan,
-    normalizationPlan,
+    normalizationPlan: undefined,
   }
 }
