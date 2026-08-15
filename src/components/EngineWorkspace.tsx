@@ -175,6 +175,32 @@ function HumanReviewBadge({
   return <span className={`rounded px-2 py-1 text-[10px] font-medium ${style}`}>{label}</span>
 }
 
+// 轮询相等性短路：3 秒一次的轮询每次都生成全新对象数组，会让 2900 行的
+// 工作台在批次运行期间整树重渲染。比较会影响展示的关键字段，未变则不 setState。
+function imageJobsEqual(a: ImageJobV1[], b: ImageJobV1[]) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]
+    const y = b[i]
+    if (x.id !== y.id || x.state !== y.state || x.updatedAt !== y.updatedAt
+      || x.attempts !== y.attempts || x.routeAttempts !== y.routeAttempts
+      || x.cancelRequested !== y.cancelRequested
+      || x.finalAssetId !== y.finalAssetId || x.error?.message !== y.error?.message) return false
+  }
+  return true
+}
+
+function imageBatchesEqual(a: ImageBatchSummaryV1[], b: ImageBatchSummaryV1[]) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i]
+    const y = b[i]
+    if (x.id !== y.id || x.state !== y.state || x.updatedAt !== y.updatedAt
+      || JSON.stringify(x.stats) !== JSON.stringify(y.stats)) return false
+  }
+  return true
+}
+
 function ReviewThumbnail({
   config,
   assetId,
@@ -842,7 +868,7 @@ export default function EngineWorkspace() {
         cursor: cursor || undefined,
         state: filter === 'all' ? undefined : filter,
       })
-      setJobStats(result.stats)
+      setJobStats((current) => JSON.stringify(current) === JSON.stringify(result.stats) ? current : result.stats)
       const fetchedIds = new Set(result.items.map((job) => job.id))
       let nextJobs: ImageJobV1[]
       let resolvedCursor: string | null
@@ -868,18 +894,34 @@ export default function EngineWorkspace() {
           ? null
           : (nextCursor ?? result.nextCursor)
       }
-      setJobs(nextJobs)
+      setJobs((current) => imageJobsEqual(current, nextJobs) ? current : nextJobs)
       setNextCursor(resolvedCursor)
       setWorkspaceError(null)
       if (selectedJobId) {
-        const selectionVersion = inspectorSelectionRef.current.version
-        const detail = await getImageJob(targetConfig, selectedJobId)
-        const selection = inspectorSelectionRef.current
+        // 终态任务且列表里它的 updatedAt 未变：跳过详情拉取——否则检查器
+        // 每 3 秒被新对象引用重渲染一次，相等性守卫全被绕过。
+        const listedJob = result.items.find((job) => job.id === selectedJobId)
+          ?? nextJobs.find((job) => job.id === selectedJobId)
+        const selectedSnapshot = selectedJob
         if (
-          selection.version === selectionVersion
-          && selection.kind === 'job'
-          && selection.id === selectedJobId
-        ) setSelectedJob(detail)
+          selectedSnapshot
+          && listedJob
+          && (listedJob.state === 'succeeded' || listedJob.state === 'failed' || listedJob.state === 'cancelled')
+          && listedJob.updatedAt === selectedSnapshot.updatedAt
+        ) {
+          // 详情未变，跳过
+        } else {
+          const selectionVersion = inspectorSelectionRef.current.version
+          const detail = await getImageJob(targetConfig, selectedJobId)
+          const selection = inspectorSelectionRef.current
+          if (
+            selection.version === selectionVersion
+            && selection.kind === 'job'
+            && selection.id === selectedJobId
+          ) {
+            setSelectedJob((current) => current && imageJobsEqual([current], [detail]) ? current : detail)
+          }
+        }
       }
     } catch (error) {
       setWorkspaceError(errorMessage(error))
@@ -1010,7 +1052,7 @@ export default function EngineWorkspace() {
           }
         }
       }
-      setBatches(next)
+      setBatches((current) => imageBatchesEqual(current, next) ? current : next)
     } catch (error) {
       setWorkspaceError(errorMessage(error))
     }

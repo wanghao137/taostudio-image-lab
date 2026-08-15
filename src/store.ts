@@ -579,12 +579,24 @@ async function deleteStoredImageIfUnreferenced(imageId: string) {
     return
   }
 
+  // 删除期间被新引用：恢复。恢复写盘若失败（配额/IO），原图不能就此永久
+  // 丢失——钉进内存缓存保底并告警，用户仍可导出。
   if (image) {
-    await putImage(image)
-    cacheImage(image.id, image.dataUrl)
+    try {
+      await putImage(image)
+      cacheImage(image.id, image.dataUrl)
+    } catch (err) {
+      console.error('恢复被引用图片失败，已保留内存副本', err)
+      pinQuotaImage(image.id, image.dataUrl)
+      useStore.getState().showToast('一张被引用的图片在清理时险些丢失，已保留内存副本，请尽快导出。', 'error')
+    }
   }
   if (thumbnail) {
-    await putImageThumbnail(thumbnail)
+    try {
+      await putImageThumbnail(thumbnail)
+    } catch {
+      // 缩略图可自愈，失败无影响。
+    }
     cacheThumbnail(thumbnail.id, {
       dataUrl: thumbnail.thumbnailDataUrl,
       width: thumbnail.width,
@@ -1488,6 +1500,10 @@ function getApiRequestNetworkErrorHint(
     return `提示：请求等待约 120 秒后被断开，这通常是 Cloudflare 等 CDN/网关的超时限制，而非接口本身报错。如果使用 Cloudflare，可考虑升级套餐或使用不经过 CDN 的直连地址。${getTimeoutStreamingHint(profile)}`
   }
 
+  if (usesApiProxy && elapsedSeconds >= 290 && elapsedSeconds <= 320) {
+    return `提示：请求等待约 300 秒后被断开——这是 Vercel 函数的执行时长上限（Hobby 套餐 300 秒）。若前端部署在 Vercel 且走 /api-proxy 同源回退代理，超过 300 秒的 4K 请求必然被掐断：请改用 Cloudflare Worker 代理（image-proxy.taostudioai.com）、直连接口，或调低超时前完成。${getTimeoutStreamingHint(profile)}`
+  }
+
   return `提示：请求等待较长时间后被断开，通常是反向代理或网关的超时限制，而非接口本身报错。可检查代理超时设置，或降低图片尺寸/质量后重试。${getTimeoutStreamingHint(profile)}`
 }
 
@@ -1790,12 +1806,31 @@ export async function initStore() {
   // 只枚举 key 清理孤立图片，避免启动时把所有 4K 原图读进内存。
   const imageIds = await getAllImageIds()
   const referencedImageIds: string[] = []
+  // 新鲜度保护：另一标签页可能刚把生成图写盘、任务记录尚未落库——从本页看
+  // 是"孤儿"但实际在途。10 分钟内创建的孤儿跳过，留给下次清扫处理。
+  const ORPHAN_GRACE_MS = 10 * 60 * 1000
+  let skippedFreshOrphans = 0
   for (const imgId of imageIds) {
     if (referencedIds.has(imgId)) {
       referencedImageIds.push(imgId)
-    } else {
-      await deleteImage(imgId)
+      continue
     }
+    let createdAt: number | undefined
+    try {
+      createdAt = (await getImage(imgId))?.createdAt
+    } catch {
+      // 读失败时保守跳过：宁可多留一个孤儿也不冒删错的风险。
+      skippedFreshOrphans += 1
+      continue
+    }
+    if (createdAt !== undefined && Date.now() - createdAt < ORPHAN_GRACE_MS) {
+      skippedFreshOrphans += 1
+      continue
+    }
+    await deleteImage(imgId)
+  }
+  if (skippedFreshOrphans > 0) {
+    console.info(`孤儿清扫跳过 ${skippedFreshOrphans} 张新鲜/不可读图片（将在下次启动时复查）`)
   }
   scheduleThumbnailBackfill(referencedImageIds)
 
@@ -4068,6 +4103,9 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     ? { taskId: task.customTaskId }
     : null
 
+  // 锚点统一：错误提示与看门狗都用「槽位取得时刻」（请求开始），不含并发
+  // 队列等待——否则排队 240s + 60s 失败会被错归因为 300s Vercel 上限。
+  const requestStartedAt = Date.now()
   if (
     taskProvider !== 'fal' &&
     !isAsyncCustomProviderTask(requestSettings, taskProvider, task.inputImageIds.length > 0)
@@ -4075,7 +4113,6 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     // 看门狗是兜底护栏而非第二只超时表：lib 层请求超时（含瞬态重试、每次
     // 重试刷新窗口）是权威；看门狗按「请求开始」计时，且宽限覆盖整个重试
     // 预算，避免 lib 还在重试时提前判死、丢弃晚到的成功结果（白烧额度）。
-    const requestStartedAt = Date.now()
     scheduleOpenAIWatchdog(
       taskId,
       activeProfile.timeout + getOpenAIWatchdogGraceSeconds(activeProfile.timeout),
@@ -4280,7 +4317,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
         streamImages: activeProfile.streamImages,
         streamPartialImages: activeProfile.streamPartialImages,
       }
-      const networkErrorHint = getApiRequestNetworkErrorHint(err, latestTask.createdAt, usesApiProxy, hintProfile)
+      const networkErrorHint = getApiRequestNetworkErrorHint(err, requestStartedAt, usesApiProxy, hintProfile)
       if (networkErrorHint && !errorMessage.includes(IMAGE_FETCH_CORS_HINT)) {
         errorMessage += `\n${networkErrorHint}`
       }
