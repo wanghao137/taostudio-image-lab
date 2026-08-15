@@ -1857,7 +1857,7 @@ export default function EngineWorkspace() {
                     type="button"
                     key={item.itemKey}
                     onClick={() => item.job && handleSelectJob(item.job)}
-                    className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === item.job?.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
+                    className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors [content-visibility:auto] [contain-intrinsic-size:68px] hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === item.job?.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
                   >
                     <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
                       <ReviewThumbnail config={config} assetId={item.job?.finalAssetId || null} label={`条目 ${item.itemKey}`} interactive={false} />
@@ -2571,7 +2571,7 @@ function BatchInspector({
             return (
               <article
                 key={item.itemKey}
-                className={`overflow-hidden border text-xs ${
+                className={`overflow-hidden border text-xs [content-visibility:auto] [contain-intrinsic-size:auto_220px] ${
                   focusedItemKey === item.itemKey
                     ? 'border-blue-400 ring-2 ring-blue-400/40'
                     : item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'

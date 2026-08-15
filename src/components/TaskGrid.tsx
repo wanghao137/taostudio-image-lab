@@ -18,6 +18,14 @@ export default function TaskGrid() {
   const clearSelection = useStore((s) => s.clearSelection)
   const rootRef = useRef<HTMLDivElement>(null)
   const gridRef = useRef<HTMLDivElement>(null)
+  // 增量渲染：初始 60 张 + 滚动哨兵每次追加 60——500+ 任务的画廊不再全量
+  // 渲染 DOM；配合卡片 content-visibility 让屏幕外内容跳过 layout/paint。
+  const RENDER_BATCH = 60
+  const [renderLimit, setRenderLimit] = useState(RENDER_BATCH)
+  const sentinelRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    setRenderLimit(RENDER_BATCH)
+  }, [searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId])
   const [selectionBox, setSelectionBox] = useState<{ startPageX: number; startPageY: number; currentPageX: number; currentPageY: number } | null>(null)
   const dragStart = useRef<{ pageX: number; pageY: number } | null>(null)
   const lastClientPoint = useRef<{ x: number; y: number } | null>(null)
@@ -39,6 +47,23 @@ export default function TaskGrid() {
     activeFavoriteCollectionId,
     defaultFavoriteCollectionId,
   }), [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
+
+  // 哨兵是否还需挂载（还有未渲染的卡片）
+  const hasMoreToRender = filteredTasks.length > renderLimit
+  // 哨兵条件渲染（还有更多时才挂载），effect 必须随其出现/重挂重连观察器——
+  // 空依赖会在 filter 切换后观察已卸载的旧哨兵，无限滚动静默失效。
+  useEffect(() => {
+    if (!hasMoreToRender) return
+    const sentinel = sentinelRef.current
+    if (!sentinel) return
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setRenderLimit((limit) => limit + RENDER_BATCH)
+      }
+    }, { rootMargin: '800px 0px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasMoreToRender, renderLimit])
 
   const handleDelete = useCallback((task: typeof tasks[0]) => {
     setConfirmDialog({
@@ -348,8 +373,12 @@ export default function TaskGrid() {
       className="relative min-h-[50vh]"
     >
       <div ref={gridRef} className="grid grid-cols-1 gap-3 pb-10 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:gap-5">
-        {filteredTasks.map((task) => (
-          <div key={task.id} className="task-card-wrapper" data-task-id={task.id}>
+        {filteredTasks.slice(0, renderLimit).map((task) => (
+          <div
+            key={task.id}
+            className="task-card-wrapper [content-visibility:auto] [contain-intrinsic-size:auto_162px]"
+            data-task-id={task.id}
+          >
             <TaskCard
               task={task}
               onClick={getCardClick(task)}
@@ -361,6 +390,16 @@ export default function TaskGrid() {
           </div>
         ))}
       </div>
+      {hasMoreToRender && (
+        <button
+          type="button"
+          ref={sentinelRef}
+          onClick={() => setRenderLimit((limit) => limit + RENDER_BATCH)}
+          className="w-full py-6 text-center text-xs text-stone-400 transition-colors hover:text-stone-600 dark:text-stone-500 dark:hover:text-stone-300"
+        >
+          加载更早任务…（{renderLimit} / {filteredTasks.length}）
+        </button>
+      )}
       {selectionBox && (
         <div
           className="fixed bg-blue-500/20 border border-blue-500/50 pointer-events-none z-[30]"
