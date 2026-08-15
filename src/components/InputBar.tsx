@@ -5,6 +5,7 @@ import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteIma
 import { type TaskRecord } from '../types'
 import { getActiveAgentRounds } from '../lib/agentConversationState'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState } from '../lib/favoriteState'
+import { filterAndSortTasks } from '../lib/taskFilters'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
@@ -29,6 +30,7 @@ const SizePickerModal = lazy(() => import('./SizePickerModal'))
 const PromptHistoryPopoverLazy = lazy(() => import('./input/PromptHistoryPopover'))
 
 function getTaskFavoriteCollectionIds(task: TaskRecord) {
+  // 调用点全部在事件回调内（点击时执行），getState 实时读取即为最新值。
   return getTaskFavoriteCollectionIdsForState(task, useStore.getState().defaultFavoriteCollectionId)
 }
 
@@ -550,22 +552,12 @@ export default function InputBar() {
   } = useImageComposer()
 
   const getFilteredTasks = useCallback(() => {
-    const tasks = getTasks()
-    const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
-    const q = searchQuery.trim().toLowerCase()
-
-    return sorted.filter((t) => {
-      if (filterFavorite) {
-        if (!t.isFavorite) return false
-        if (activeFavoriteCollectionId && activeFavoriteCollectionId !== ALL_FAVORITES_COLLECTION_ID && !getTaskFavoriteCollectionIds(t).includes(activeFavoriteCollectionId)) return false
-      }
-      const matchStatus = filterStatus === 'all' || t.status === filterStatus
-      if (!matchStatus) return false
-
-      if (!q) return true
-      const prompt = (t.prompt || '').toLowerCase()
-      const paramStr = JSON.stringify(t.params).toLowerCase()
-      return prompt.includes(q) || paramStr.includes(q)
+    return filterAndSortTasks(getTasks(), {
+      searchQuery,
+      filterStatus,
+      filterFavorite,
+      activeFavoriteCollectionId,
+      defaultFavoriteCollectionId: useStore.getState().defaultFavoriteCollectionId,
     })
   }, [getTasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId])
 
@@ -779,6 +771,26 @@ export default function InputBar() {
   const [showSizePicker, setShowSizePicker] = useState(false)
   const [showPromptHistory, setShowPromptHistory] = useState(false)
   const promptHistoryAnchorRef = useRef<HTMLDivElement>(null)
+
+  // `/` 快捷聚焦提示词输入框（表单/编辑态/任何模态打开时不触发——
+  // 否则会把焦点设到遮罩后面，后续输入进不可见的输入框）
+  const hasBlockingOverlay = useStore((s) => Boolean(
+    s.detailTaskId || s.lightboxImageId || s.showSettings || s.confirmDialog
+    || s.maskEditorImageId || (s.favoritePickerTaskIds?.length ?? 0) > 0 || s.isManageCollectionsModalOpen,
+  ))
+  useEffect(() => {
+    if (hasBlockingOverlay) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      if (useStore.getState().appMode === 'engine') return
+      e.preventDefault()
+      textareaRef.current?.focus()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [hasBlockingOverlay])
   const [showMobileUploadMenu, setShowMobileUploadMenu] = useState(false)
   const [maskPreviewUrl, setMaskPreviewUrl] = useState('')
   const [imageDragIndex, setImageDragIndex] = useState<number | null>(null)

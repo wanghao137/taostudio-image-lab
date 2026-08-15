@@ -1662,14 +1662,14 @@ export default function EngineWorkspace() {
   }
 
   return (
-    <main className="h-[calc(100vh-4rem)] overflow-hidden bg-[#f4f1ec] text-stone-900 dark:bg-[#11100e] dark:text-stone-100">
+    <main className="h-[calc(100vh-4rem)] supports-[height:100dvh]:h-[calc(100dvh-4rem)] overflow-hidden bg-[#f4f1ec] text-stone-900 dark:bg-[#11100e] dark:text-stone-100">
       <p className="sr-only" aria-live="polite">{statusAnnouncement}</p>
       <div data-selectable-text="" className="mx-auto flex h-full max-w-[1500px] flex-col px-3 py-4 sm:px-6 sm:py-6">
         <header className="flex flex-col gap-4 border-b border-stone-300 pb-5 dark:border-white/10 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <div className="flex items-center gap-2 text-xs font-medium uppercase text-emerald-700 dark:text-emerald-300">
               <Activity className="h-3.5 w-3.5" />
-              引擎在线 · Contract {capabilities.contractVersion}
+              引擎在线 · 协议 v{capabilities.contractVersion}
             </div>
             <h1 className="mt-2 text-2xl font-semibold tracking-normal">图像资产流水线</h1>
             <p className="mt-1 max-w-2xl text-sm text-stone-500 dark:text-stone-400">
@@ -1964,6 +1964,7 @@ export default function EngineWorkspace() {
               />
             ) : selectedBatch ? (
               <BatchInspector
+                key={selectedBatch.id}
                 batch={selectedBatch}
                 config={config}
                 busy={busy}
@@ -2053,7 +2054,7 @@ function NewJobForm({
     <form data-engine-editor onSubmit={onSubmit}>
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-[10px] font-medium uppercase text-[#df7b57]">Submit</div>
+          <div className="text-[10px] font-medium text-[#df7b57]">单次生成</div>
           <h2 className="mt-1 text-lg font-semibold">新建流水线任务</h2>
         </div>
         <button type="button" onClick={onClose} className="p-2 text-stone-400 hover:text-stone-800 dark:hover:text-white" aria-label="关闭">
@@ -2210,7 +2211,7 @@ function NewBatchForm({
     <form data-engine-editor onSubmit={onSubmit}>
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-[10px] font-medium uppercase text-[#356c82]">Batch</div>
+          <div className="text-[10px] font-medium text-[#356c82]">批量任务</div>
           <h2 className="mt-1 text-lg font-semibold">新建批次</h2>
         </div>
         <button type="button" onClick={onClose} className="p-2 text-stone-400 hover:text-stone-800 dark:hover:text-white" aria-label="关闭">
@@ -2349,6 +2350,15 @@ function BatchInspector({
   const [reviewFilter, setReviewFilter] = useState<'all' | 'warnings' | 'not_run' | 'pending' | 'approved' | 'rejected' | 'failed' | 'cancelled'>('pending')
   // P2-12: Free-text search within batch items by prompt text
   const [itemSearch, setItemSearch] = useState('')
+  // 删除批次二次确认：首次点击进入待确认态，3 秒未确认复位（替代原生 confirm）
+  const [deleteArmed, setDeleteArmed] = useState(false)
+  useEffect(() => {
+    if (!deleteArmed) return
+    const timer = setTimeout(() => setDeleteArmed(false), 3000)
+    return () => clearTimeout(timer)
+  }, [deleteArmed])
+  // 审查键盘遍历（J/K/Enter/X）状态；监听器在 reviewItems 声明后注册
+  const [focusedItemKey, setFocusedItemKey] = useState<string | null>(null)
   const autoAcceptedCount = useMemo(
     () => batch.items.filter((item) => item.humanReviewStatus === 'approved' && item.humanReview?.actor === 'system').length,
     [batch.items],
@@ -2383,6 +2393,39 @@ function BatchInspector({
     const prompt = (item.job.request.input.prompt || '').toLowerCase()
     return prompt.includes(itemSearch.trim().toLowerCase())
   }), [batch.items, reviewFilter, itemSearch])
+  const focusedItem = useMemo(
+    () => reviewItems.find((item) => item.itemKey === focusedItemKey) ?? null,
+    [reviewItems, focusedItemKey],
+  )
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      // Enter 在聚焦按钮上会原生触发 click——同时处理会双动作（如归档+误审）。
+      if (e.key === 'Enter' && target?.closest('button, a, select, [role="button"]')) return
+      // 资产 Lightbox 打开时（全屏覆盖层）不处理——否则在放大图
+      // 后台静默审查当前条目。
+      if (document.querySelector('[data-engine-lightbox]')) return
+      const idx = focusedItem ? reviewItems.findIndex((it) => it.itemKey === focusedItem.itemKey) : -1
+      if (e.key === 'j' || e.key === 'J') {
+        e.preventDefault()
+        const next = reviewItems[Math.min(idx + 1, reviewItems.length - 1)] ?? reviewItems[0]
+        if (next) setFocusedItemKey(next.itemKey)
+      } else if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault()
+        const prev = reviewItems[Math.max(idx - 1, 0)] ?? reviewItems[0]
+        if (prev) setFocusedItemKey(prev.itemKey)
+      } else if (focusedItem && (e.key === 'Enter' || e.key === 'x' || e.key === 'X') && !busy) {
+        e.preventDefault()
+        onReview(focusedItem.itemKey, e.key === 'Enter' ? 'accepted' : 'rejected')
+        // 审完自动跳到下一个待审查条目
+        const next = reviewItems[idx + 1] ?? reviewItems.find((it) => it.humanReviewStatus === 'pending' && it.itemKey !== focusedItem.itemKey)
+        setFocusedItemKey(next?.itemKey ?? null)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [busy, focusedItem, onReview, reviewItems])
   return (
     <div>
       <button
@@ -2395,7 +2438,7 @@ function BatchInspector({
       </button>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10px] font-medium uppercase text-stone-400">Batch detail</div>
+          <div className="text-[10px] font-medium text-stone-400">批次详情</div>
           <h2 className="mt-1 break-all font-mono text-sm font-semibold">{batch.name || batch.id}</h2>
           {batch.automation.enabled && (
             <div className="mt-2 text-[10px] font-medium text-[#356c82] dark:text-[#8ec5d7]">
@@ -2436,7 +2479,7 @@ function BatchInspector({
         <p className="mt-2 text-[10px] leading-4 opacity-75">只保存成功产物；失败、取消项保留在 batch-manifest.json 中，不会伪装成已交付。</p>
       </div>
       <div className="mt-5" aria-label="批次质量漏斗">
-        <div className="grid grid-cols-5 gap-1.5">
+        <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-5">
           {funnel.map((stage) => {
             const percentage = batch.stats.total ? Math.round((stage.value / batch.stats.total) * 100) : 0
             return (
@@ -2529,9 +2572,11 @@ function BatchInspector({
               <article
                 key={item.itemKey}
                 className={`overflow-hidden border text-xs ${
-                  item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'
+                  focusedItemKey === item.itemKey
+                    ? 'border-blue-400 ring-2 ring-blue-400/40'
+                    : item.qaStatus === 'needs_review' || item.qaStatus === 'failed' || item.qaStatus === 'not_run'
                     ? 'border-amber-300 bg-amber-50/30 dark:border-amber-400/30 dark:bg-amber-400/[0.04]'
-                    : item.humanReviewStatus === 'approved'
+                      : item.humanReviewStatus === 'approved'
                       ? 'border-emerald-200 bg-emerald-50/30 dark:border-emerald-400/20 dark:bg-emerald-400/[0.03]'
                       : 'border-stone-300 bg-white/45 dark:border-white/10 dark:bg-white/[0.02]'
                 }`}
@@ -2640,13 +2685,38 @@ function BatchInspector({
             </button>
           ) : null
         })()}
+        {(() => {
+          const rejectablePending = batch.items.filter((it: ImageBatchItemV1) => it.humanReviewStatus === 'pending' && it.job.state === 'succeeded')
+          return rejectablePending.length > 0 ? (
+            <button type="button" onClick={() => onBulkReview(rejectablePending, 'rejected')} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-red-300 px-3 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-400/30 dark:text-red-300">
+              <X className="h-4 w-4" />批量拒绝 {rejectablePending.length} 项
+            </button>
+          ) : null
+        })()}
         {batch.state === 'completed' && (
           <>
             <button type="button" onClick={() => onArchiveBatch(batch.id)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-stone-300 px-3 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/10 dark:text-stone-300">
               归档
             </button>
-            <button type="button" onClick={() => { if (confirm('确定删除此批次？此操作不可撤销。')) onDeleteBatch(batch.id) }} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-red-300 px-3 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40 dark:border-red-400/30 dark:text-red-300">
-              删除
+            <button
+              type="button"
+              onClick={() => {
+                if (!deleteArmed) {
+                  setDeleteArmed(true)
+                  return
+                }
+                setDeleteArmed(false)
+                onDeleteBatch(batch.id)
+              }}
+              disabled={busy}
+              aria-label={deleteArmed ? '再次点击确认删除批次' : '删除批次'}
+              className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium disabled:opacity-40 ${
+                deleteArmed
+                  ? 'border-red-500 bg-red-500 text-white'
+                  : 'border-red-300 text-red-600 hover:bg-red-50 dark:border-red-400/30 dark:text-red-300'
+              }`}
+            >
+              {deleteArmed ? '确认删除（不可撤销）' : '删除'}
             </button>
           </>
         )}
@@ -2699,7 +2769,7 @@ function JobInspector({
       </button>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10px] font-medium uppercase text-stone-400">Job detail</div>
+          <div className="text-[10px] font-medium text-stone-400">任务详情</div>
           <h2 className="mt-1 break-all font-mono text-sm font-semibold">{job.id}</h2>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -2915,6 +2985,7 @@ function EngineAssetLightbox({
   return (
     <div
       ref={dialogRef}
+      data-engine-lightbox
       className="fixed inset-0 z-[100] flex flex-col bg-black/[0.94] text-white backdrop-blur-sm"
       role="dialog"
       aria-modal="true"

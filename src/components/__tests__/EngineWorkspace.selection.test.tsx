@@ -223,13 +223,13 @@ describe('EngineWorkspace inspector selection', () => {
 
     await expandArchivedBatches()
     fireEvent.click(await screen.findByRole('button', { name: /Selection test batch/ }, { timeout: 10_000 }))
-    expect(await screen.findByText('Batch detail')).toBeTruthy()
+    expect(await screen.findByText('批次详情')).toBeTruthy()
 
     // The batch task queue loads asynchronously; wait for the item row to appear.
     fireEvent.click(await screen.findByRole('button', { name: /Selection test image/ }, { timeout: 10_000 }))
 
-    expect(await screen.findByText('Job detail')).toBeTruthy()
-    expect(screen.queryByText('Batch detail')).toBeNull()
+    expect(await screen.findByText('任务详情')).toBeTruthy()
+    expect(screen.queryByText('批次详情')).toBeNull()
   }, 20_000)
 
   it('ignores a stale batch detail response after a job is selected', async () => {
@@ -244,13 +244,13 @@ describe('EngineWorkspace inspector selection', () => {
     // Items load independently of the delayed summary, so the batch-item row
     // is clickable while the summary fetch is still pending.
     fireEvent.click(await screen.findByRole('button', { name: /Selection test image/ }, { timeout: 10_000 }))
-    expect(await screen.findByText('Job detail')).toBeTruthy()
+    expect(await screen.findByText('任务详情')).toBeTruthy()
 
     resolveBatch((({ items: _items, events: _events, ...summary }) => summary)(batch) as ImageBatchV1)
 
     await waitFor(() => {
-      expect(screen.queryByText('Batch detail')).toBeNull()
-      expect(screen.getByText('Job detail')).toBeTruthy()
+      expect(screen.queryByText('批次详情')).toBeNull()
+      expect(screen.getByText('任务详情')).toBeTruthy()
     })
   })
 

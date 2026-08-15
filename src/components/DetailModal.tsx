@@ -126,6 +126,32 @@ export default function DetailModal() {
   useCloseOnEscape(Boolean(task), () => setDetailTaskId(null))
   usePreventBackgroundScroll(Boolean(task), [modalRef, rawUrlsModalRef, rawResponseModalRef])
 
+  // 方向键轮播（子模态/Lightbox 叠加时不劫持——否则一个键同时动两层轮播）
+  const lightboxImageId = useStore((s) => s.lightboxImageId)
+  useEffect(() => {
+    if (!task || lightboxImageId) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (showRawUrlsModal || showRawResponseModal) return
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      const count = task.status === 'running'
+        ? streamPreviewItems.length
+        : task.outputErrors?.length
+        ? Math.max(task.params.n, task.outputImages.length + task.outputErrors.length)
+        : task.outputImages.length
+      if (count <= 1) return
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        setImageIndex((i) => (i - 1 + count) % count)
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        setImageIndex((i) => (i + 1) % count)
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [lightboxImageId, showRawUrlsModal, showRawResponseModal, streamPreviewItems.length, task])
+
   // Reset index when task changes
   useEffect(() => {
     setImageIndex(0)

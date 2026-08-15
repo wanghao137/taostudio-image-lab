@@ -193,9 +193,16 @@ export default function App() {
         <MobileShell onOpenCompose={() => setComposeOpen(true)}>
           <ErrorBoundary sectionLabel="引擎工作台">
             {appMode === 'engine' ? (
-              <Suspense fallback={<div className="min-h-[320px]" />}>
-                <EngineWorkspace />
-              </Suspense>
+              <>
+                <div className="safe-area-x">
+                  <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                    引擎工作台信息密度较高，建议在桌面端使用以获得更好体验。
+                  </div>
+                </div>
+                <Suspense fallback={<div className="min-h-[320px]" />}>
+                  <EngineWorkspace />
+                </Suspense>
+              </>
             ) : appMode === 'agent' ? (
               <div className="safe-area-x">
                 <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
