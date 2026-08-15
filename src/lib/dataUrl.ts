@@ -14,13 +14,21 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-export function dataUrlToBytes(dataUrl: string): { ext: string; bytes: Uint8Array } {
-  const match = dataUrl.match(/^data:image\/(\w+);base64,/)
-  const ext = match?.[1] ?? 'png'
+export function dataUrlToBytes(dataUrl: string): { ext: string; bytes: Uint8Array; mime: string } {
+  const match = dataUrl.match(/^data:([^;]+);base64,/)
+  const mime = match?.[1] ?? 'image/png'
+  const ext = mime.split('/')[1] ?? 'png'
   const binary = atob(dataUrl.replace(/^data:[^;]+;base64,/, ''))
   const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return { ext, bytes }
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return { ext, bytes, mime }
+}
+
+/** 同步 dataUrl → Blob（存储边界使用；比 fetch(dataUrl) 版更快且无网络栈参与）。 */
+export function dataUrlToBlob(dataUrl: string, fallbackType = 'image/png'): Blob {
+  const { bytes, mime } = dataUrlToBytes(dataUrl)
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+  return new Blob([buffer], { type: mime || fallbackType })
 }
 
 export function bytesToDataUrl(bytes: Uint8Array, filePath: string): string {

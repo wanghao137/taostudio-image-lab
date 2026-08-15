@@ -131,6 +131,9 @@ vi.mock('./lib/db', () => {
       return Boolean(error && typeof error === 'object' && (error as { name?: unknown }).name === 'QuotaExceededError')
     },
     estimateStorage: async () => null,
+    migrateImagesToBlobs: async () => ({ migrated: 0, skipped: 0 }),
+    getImageMetadata: async (id: string) => images.get(id) as { createdAt?: number } | undefined,
+    getImageRecord: async (id: string) => images.get(id),
   }
 })
 vi.mock('./lib/localAutoSaveWriter', () => ({

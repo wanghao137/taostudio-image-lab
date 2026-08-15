@@ -259,7 +259,11 @@ function getJsonEstimatedBytes(value: unknown) {
 }
 
 export function getExportImageEstimatedBytes(image: StoredImage, thumbnail?: StoredImageThumbnail) {
-  return getDataUrlDecodedByteSize(image.dataUrl)
+  // blob 记录直接用二进制尺寸：导出 sizing 循环高频调用，避免 Blob→dataUrl 全量转换
+  const imageBytes = image.blob instanceof Blob
+    ? image.blob.size
+    : getDataUrlDecodedByteSize(image.dataUrl)
+  return imageBytes
     + (thumbnail?.thumbnailDataUrl ? getDataUrlDecodedByteSize(thumbnail.thumbnailDataUrl) : 0)
     + ZIP_ENTRY_OVERHEAD_BYTES * (thumbnail?.thumbnailDataUrl ? 2 : 1)
 }

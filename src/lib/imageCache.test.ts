@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const db = vi.hoisted(() => ({
   CURRENT_THUMBNAIL_VERSION: 2,
   getImage: vi.fn(),
+  getImageMetadata: vi.fn(),
   getImageThumbnail: vi.fn(),
   getStoredFreshImageThumbnail: vi.fn(),
 }))
@@ -25,6 +26,7 @@ describe('imageCache', () => {
     clearImageCaches()
     vi.clearAllMocks()
     db.getImage.mockResolvedValue(undefined)
+    db.getImageMetadata.mockResolvedValue(undefined)
     db.getImageThumbnail.mockResolvedValue(undefined)
     db.getStoredFreshImageThumbnail.mockResolvedValue(undefined)
   })
@@ -125,7 +127,7 @@ describe('imageCache', () => {
 
   it('prioritizes visible thumbnail backfills and notifies subscribers', async () => {
     vi.useFakeTimers()
-    db.getImage.mockResolvedValue({ width: 1000, height: 1000 })
+    db.getImageMetadata.mockResolvedValue({ width: 1000, height: 1000 })
     db.getImageThumbnail.mockImplementation(async (id: string) => ({
       thumbnailDataUrl: `${id}-thumbnail`,
       width: 1000,
@@ -140,7 +142,7 @@ describe('imageCache', () => {
     await vi.advanceTimersByTimeAsync(250)
     await vi.waitFor(() => expect(db.getImageThumbnail).toHaveBeenCalledTimes(2))
 
-    expect(db.getImage.mock.calls.map(([id]) => id)).toEqual(['visible', 'background'])
+    expect(db.getImageMetadata.mock.calls.map(([id]) => id)).toEqual(['visible', 'background'])
     expect(db.getImageThumbnail.mock.calls.map(([id]) => id)).toEqual(['visible', 'background'])
     expect(onThumbnail).toHaveBeenCalledWith({
       dataUrl: 'visible-thumbnail',
@@ -152,7 +154,7 @@ describe('imageCache', () => {
 
   it('allows a failed thumbnail backfill to be scheduled again', async () => {
     vi.useFakeTimers()
-    db.getImage.mockResolvedValue({ width: 1000, height: 1000 })
+    db.getImageMetadata.mockResolvedValue({ width: 1000, height: 1000 })
     db.getImageThumbnail
       .mockRejectedValueOnce(new Error('thumbnail failed'))
       .mockResolvedValueOnce({

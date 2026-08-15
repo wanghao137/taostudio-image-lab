@@ -426,6 +426,12 @@ export interface AgentConversation {
 export interface StoredImage {
   id: string
   dataUrl: string
+  /**
+   * 存储层内部字段：IndexedDB 新格式以 Blob 存二进制（省 ~25-33% 空间）。
+   * 上层不应读写它——getImage 返回时 dataUrl 已填充、blob 已清空；
+   * putImage 写入时若带 blob 则直接落盘不再转换。
+   */
+  blob?: Blob
   /** 图片首次存储时间（ms） */
   createdAt?: number
   /** 图片来源：用户上传 / API 生成 / 遮罩 */

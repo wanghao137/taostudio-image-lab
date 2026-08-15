@@ -41,6 +41,8 @@ import {
   putLocalAutoSaveDirectoryHandle,
   clearLocalAutoSaveDirectoryHandle,
   getImage,
+  getImageMetadata,
+  getImageRecord,
   getStoredImageThumbnail,
   getImageThumbnail,
   getAllImageIds,
@@ -50,6 +52,7 @@ import {
   clearImages,
   storeImage,
   storeImageWithSize,
+  migrateImagesToBlobs,
   StorageQuotaError,
 } from './lib/db'
 import { callImageApi } from './lib/api'
@@ -1817,7 +1820,8 @@ export async function initStore() {
     }
     let createdAt: number | undefined
     try {
-      createdAt = (await getImage(imgId))?.createdAt
+      // 轻量读取：blob 记录不做 dataUrl 转换（清扫只需时间戳）
+      createdAt = (await getImageMetadata(imgId))?.createdAt
     } catch {
       // 读失败时保守跳过：宁可多留一个孤儿也不冒删错的风险。
       skippedFreshOrphans += 1
@@ -1929,6 +1933,15 @@ export async function initStore() {
 
   // 启动后尝试恢复本地自动保存的会话级权限（若有目录已选且权限降级为 prompt）
   void restoreLocalAutoSavePermissionOnUserActivation()
+  // 存量 base64 图片后台迁移为 Blob（省 ~25-33% 空间）：让步式、幂等、
+  // 不阻塞启动；迁移期间的新写入本就是 Blob 格式。
+  void migrateImagesToBlobs()
+    .then(({ migrated }) => {
+      if (migrated > 0) console.info(`图片存储迁移完成：${migrated} 张已转为 Blob`)
+    })
+    .catch((error) => {
+      console.warn('图片存储迁移未完成（下次启动会继续）', error)
+    })
 }
 
 /** 提交新任务 */
@@ -5362,14 +5375,15 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
     }
     const imageSizes = []
     for (const id of imageIds) {
-      let image = await getImage(id)
+      // sizing 走原始记录（blob.size 直读），不触发 Blob→dataUrl 全量转换
+      let image = await getImageRecord(id)
       if (!image) {
         const pinnedDataUrl = getCachedImage(id)
         if (!pinnedIds.includes(id) || !pinnedDataUrl) continue
         image = { id, dataUrl: pinnedDataUrl, createdAt: exportedAt, source: 'generated' }
       }
       const thumbnail = await getImageThumbnail(id)
-      imageSizes.push({ id, bytes: getExportImageEstimatedBytes(image, thumbnail) })
+      imageSizes.push({ id, bytes: getExportImageEstimatedBytes(image as StoredImage, thumbnail) })
     }
     const plan = getExportZipPlan(params, imageSizes)
     const backupId = `${exportedAt}`

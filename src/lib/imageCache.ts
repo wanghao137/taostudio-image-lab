@@ -1,6 +1,7 @@
 import {
   CURRENT_THUMBNAIL_VERSION,
   getImage,
+  getImageMetadata,
   getImageThumbnail,
   getStoredFreshImageThumbnail,
 } from './db'
@@ -184,9 +185,11 @@ async function getNextThumbnailBackfillBatch() {
   const candidates = getOrderedThumbnailBackfillIds().slice(0, MAX_THUMBNAIL_BACKFILL_CONCURRENT)
   if (candidates.length === 0) return []
 
+  // 只读元数据做并发分级——不做 Blob→dataUrl 全量转换（否则每张 4K 图
+  // 启动期都要在主线程编一次码，纯为算并发数，白白卡顿）。
   const sizes = await Promise.all(candidates.map(async (id) => {
-    const image = await getImage(id)
-    return { width: image?.width, height: image?.height }
+    const metadata = await getImageMetadata(id)
+    return { width: metadata?.width, height: metadata?.height }
   }))
   const concurrency = getThumbnailConcurrencyForBatch(sizes)
   const selected = candidates.slice(0, concurrency)

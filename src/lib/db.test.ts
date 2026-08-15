@@ -12,6 +12,7 @@ import {
   getTaskGeneration,
   getAllAgentConversations,
   getAllImageIds,
+  getAllRawImageRecords,
   getAllTasks,
   getImage,
   getImageThumbnail,
@@ -196,5 +197,39 @@ describe('db — real IndexedDB transaction semantics (fake-indexeddb)', () => {
     )
 
     expect(await getAllTasks()).toEqual([])
+  })
+})
+
+describe('db — Blob image storage', () => {
+  beforeEach(async () => {
+    await clearImages()
+  })
+
+  it('stores images as Blob internally and returns dataUrl on read (round-trip)', async () => {
+    const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    await putImage({ id: 'blob-img-1', dataUrl, source: 'generated' })
+
+    // 内部记录应为 blob 格式（无 dataUrl 字符串）
+    const raw = await getAllRawImageRecords()
+    const record = raw.find((img) => img.id === 'blob-img-1') as unknown as { blob?: Blob; dataUrl?: string }
+    expect(record?.blob).toBeInstanceOf(Blob)
+    expect(record?.dataUrl).toBeUndefined()
+
+    // 读出时 dataUrl 恢复且与原始一致
+    const restored = await getImage('blob-img-1')
+    expect(restored?.dataUrl).toBe(dataUrl)
+  })
+
+  it('migration is idempotent for already-blob records', async () => {
+    const { migrateImagesToBlobs } = await import('./db')
+    const dataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+    await putImage({ id: 'blob-img-2', dataUrl })
+    const first = await migrateImagesToBlobs()
+    const second = await migrateImagesToBlobs()
+    expect(first.migrated).toBe(0) // putImage 已是 blob 格式
+    expect(second.migrated).toBe(0)
+    expect(second.skipped).toBeGreaterThanOrEqual(1)
+    // 迁移后仍可正常读出
+    expect((await getImage('blob-img-2'))?.dataUrl).toBe(dataUrl)
   })
 })
