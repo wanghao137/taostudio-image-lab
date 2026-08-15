@@ -26,7 +26,6 @@
     "package-lock.json",
     "public/brand",
     "public/manifest.webmanifest",
-    "scripts/upgrade-upstream.mjs",
     "scripts/upgrade-upstream-v2.mjs",
     "scripts/upgrade-upstream-v2.test.mjs",
     "scripts/verify-ui.mjs",

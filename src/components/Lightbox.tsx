@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { createInputImageFromFile, deleteImageIfUnreferenced, useStore } from '../store'
-import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogTrap } from '../hooks/useDialogTrap'
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
@@ -40,7 +40,6 @@ export default function Lightbox() {
   const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
 
   const close = useCallback(() => setLightboxImageId(null), [setLightboxImageId])
-  useCloseOnEscape(Boolean(lightboxImageId), close)
   usePreventBackgroundScroll(Boolean(lightboxImageId))
 
   // 图片加载
@@ -254,6 +253,12 @@ interface LightboxInnerProps {
 /** 内部组件：保证挂载时 DOM 已经存在，所有 ref / effect 都可靠 */
 function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, currentIndex, total, onPrev, onNext, showInputActions, editDisabled, onReplace, onEdit }: LightboxInnerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  // 共享对话框原语：Esc + 焦点陷阱（画廊 Lightbox 此前是三套放大器中唯一没有陷阱的）
+  const trapRef = useDialogTrap({ active: true, onClose })
+  const dialogRef = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node
+    ;(trapRef as { current: HTMLDivElement | null }).current = node
+  }, [trapRef])
   const openedAtRef = useRef(Date.now())
   const editHint = useHintTooltip({ enabled: () => editDisabled })
 
@@ -688,8 +693,11 @@ function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, current
 
   return (
     <div
-      ref={containerRef}
+      ref={dialogRef}
       data-lightbox-root
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片放大预览"
       className="fixed inset-0 z-[60] flex items-center justify-center select-none max-sm:items-end max-sm:p-0"
       style={{ cursor: isZoomed ? (isDragging ? 'grabbing' : 'grab') : 'pointer' }}
       onClick={onClick}

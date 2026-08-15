@@ -105,7 +105,7 @@ The preference is stored in browser `localStorage` under `taostudio.imageLab.the
 
 The Task API is currently a local reference service and is not deployed with the Vercel frontend.
 
-The YouMind real-provider regression harness is available through `npm run test:youmind -- <output-directory> <skill-directory>`. After generation, run `npm run verify:youmind -- <output-directory>` to re-read every source/final PNG and verify signatures, hashes, dimensions, inherited ratios, and transparent-edge safety.
+The YouMind real-provider regression harness is available through `（YouMind 战役已完成，脚本已移除；需要时从 git 历史找回）`. After generation, run `` to re-read every source/final PNG and verify signatures, hashes, dimensions, inherited ratios, and transparent-edge safety.
 
 ## Verification
 

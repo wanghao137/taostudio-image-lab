@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
+import { useDialogTrap } from '../hooks/useDialogTrap'
 import {
   Activity,
   ArrowLeft,
@@ -2917,7 +2918,6 @@ function EngineAssetLightbox({
   const [position, setPosition] = useState({ x: 0, y: 0 })
   const [drag, setDrag] = useState<{ pointerId: number; x: number; y: number } | null>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
-  const dialogRef = useRef<HTMLDivElement>(null)
   const src = mode === 'source' ? sourceUrl : finalUrl
 
   const resetView = useCallback(() => {
@@ -2927,36 +2927,16 @@ function EngineAssetLightbox({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
       if (event.key === '0') resetView()
       if (event.key === '+' || event.key === '=') setScale((value) => Math.min(4, value + 0.25))
       if (event.key === '-') setScale((value) => Math.max(0.5, value - 0.25))
-      // Focus trap: keep Tab navigation within the dialog so screen-reader and
-      // keyboard users cannot wander into the page behind the modal overlay.
-      if (event.key === 'Tab' && dialogRef.current) {
-        const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        )
-        if (focusables.length === 0) return
-        const first = focusables[0]
-        const last = focusables[focusables.length - 1]
-        const active = document.activeElement as HTMLElement | null
-        if (event.shiftKey && (active === first || !dialogRef.current.contains(active))) {
-          event.preventDefault()
-          last.focus()
-        } else if (!event.shiftKey && active === last) {
-          event.preventDefault()
-          first.focus()
-        }
-      }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onClose, resetView])
+  }, [resetView])
 
-  useEffect(() => {
-    closeButtonRef.current?.focus()
-  }, [])
+  // 共享对话框原语：焦点陷阱 + Esc（替代手写 trap 与初始聚焦 effect）
+  const trapRef = useDialogTrap({ active: true, onClose, initialFocusRef: closeButtonRef })
 
   const selectMode = (nextMode: 'source' | 'final') => {
     setMode(nextMode)
@@ -2984,7 +2964,7 @@ function EngineAssetLightbox({
 
   return (
     <div
-      ref={dialogRef}
+      ref={trapRef}
       data-engine-lightbox
       className="fixed inset-0 z-[100] flex flex-col bg-black/[0.94] text-white backdrop-blur-sm"
       role="dialog"
