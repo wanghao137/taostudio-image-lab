@@ -1,6 +1,9 @@
 import { memo, useEffect, useState } from 'react'
 import type { Components, MathPlugin, StreamdownTranslations } from 'streamdown'
 import type { Components as ReactMarkdownComponents } from 'react-markdown'
+// KaTeX 样式+字体（~380KB）跟随本组件懒加载：数学渲染 JS 已是动态 import，
+// CSS 此前在 main.tsx 无条件加载——大多数会话从不打开 Agent 聊天。
+import 'katex/dist/katex.min.css'
 
 type MarkdownRendererProps = {
   content: string
