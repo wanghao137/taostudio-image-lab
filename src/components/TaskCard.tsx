@@ -461,7 +461,7 @@ function TaskCard({
                     )}
                   </>
                 ) : (
-                  '生成中...'
+                  '生成中…'
                 )}
               </span>
             </div>
