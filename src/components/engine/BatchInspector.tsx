@@ -23,6 +23,7 @@ export default function BatchInspector({
   batch,
   config,
   busy,
+  itemsLoading = false,
   delivery,
   deliveryBusy,
   onSaveDelivery,
@@ -43,6 +44,7 @@ export default function BatchInspector({
   batch: ImageBatchV1
   config: ImageTaskApiConfig
   busy: boolean
+  itemsLoading?: boolean
   delivery?: EngineDeliveryRecord
   deliveryBusy: boolean
   onSaveDelivery: () => void
@@ -161,7 +163,7 @@ export default function BatchInspector({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="rounded-md border border-stone-300 px-2 py-1 text-[11px] font-medium text-stone-600 dark:border-white/10 dark:text-stone-300">
-            {batch.state === 'paused' ? '已暂停' : batch.state === 'completed' ? '已完成' : '运行中'}
+            {batch.state === 'paused' ? '已暂停' : batch.state === 'archived' ? '已归档' : batch.state === 'completed' ? '已完成' : '运行中'}
           </span>
           <button
             type="button"
@@ -360,7 +362,7 @@ export default function BatchInspector({
           })}
           {!reviewItems.length && (
             <div className="col-span-full border border-dashed border-stone-300 px-3 py-8 text-center text-xs text-stone-400 dark:border-white/10">
-              当前筛选下没有条目
+              {itemsLoading ? '正在加载批次条目…' : '当前筛选下没有条目'}
             </div>
           )}
         </div>
@@ -406,11 +408,13 @@ export default function BatchInspector({
             </button>
           ) : null
         })()}
-        {batch.state === 'completed' && (
+        {(batch.state === 'completed' || batch.state === 'archived') && (
           <>
-            <button type="button" onClick={() => onArchiveBatch(batch.id)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-stone-300 px-3 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/10 dark:text-stone-300">
-              归档
-            </button>
+            {batch.state === 'completed' && (
+              <button type="button" onClick={() => onArchiveBatch(batch.id)} disabled={busy} className="inline-flex h-9 items-center gap-2 rounded-md border border-stone-300 px-3 text-xs font-medium text-stone-600 hover:bg-stone-100 disabled:opacity-40 dark:border-white/10 dark:text-stone-300">
+                归档
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {

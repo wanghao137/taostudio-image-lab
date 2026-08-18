@@ -132,6 +132,9 @@ export default function EngineWorkspace() {
   const [batchEventsCursor, setBatchEventsCursor] = useState<string | null>(null)
   const [batchItemsTotal, setBatchItemsTotal] = useState(0)
   const [batchEventsTotal, setBatchEventsTotal] = useState(0)
+  // 批次条目全量拉取中（选中批次到 listAllImageBatchItems 返回之间）。
+  // 没有它，加载期间左侧会误显示"该批次暂无已加载条目"。
+  const [batchItemsLoading, setBatchItemsLoading] = useState(false)
   const [eventTransport, setEventTransport] = useState<'sse' | 'polling'>('polling')
   const [statusAnnouncement, setStatusAnnouncement] = useState('')
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -276,11 +279,14 @@ export default function EngineWorkspace() {
     setSelectedBatch(null)
   }, [beginInspectorSelection])
 
-  const handleSelectJob = useCallback((job: ImageJobV1) => {
+  // fromBatch=true：从"批次条目"列表点开一条任务。此时保留批次选中状态，
+  // 左侧仍是批次条目列表（行高亮），右侧从批次详情切换到该任务详情；关闭
+  // 任务详情即回到批次详情。否则按独立任务处理（清空批次上下文）。
+  const handleSelectJob = useCallback((job: ImageJobV1, options?: { fromBatch?: boolean }) => {
     const selectionVersion = beginInspectorSelection('job', job.id)
     setShowNewJob(false)
     setShowNewBatch(false)
-    setSelectedBatch(null)
+    if (!options?.fromBatch) setSelectedBatch(null)
     setSelectedJob(job)
     void refreshDeliveryRecord('job', job.id)
     if (!config) return
@@ -307,7 +313,11 @@ export default function EngineWorkspace() {
     setBatchEventsCursor(null)
     setBatchItemsTotal(batch.stats.total)
     setBatchEventsTotal(0)
-    if (!config) return
+    setBatchItemsLoading(true)
+    if (!config) {
+      setBatchItemsLoading(false)
+      return
+    }
     // Items load independently of the summary + events so the task queue
     // populates (and batch-item rows become clickable) even when the summary
     // fetch is slow. Each callback guards against a stale selection via the
@@ -329,6 +339,9 @@ export default function EngineWorkspace() {
         setBatchItemsTotal(items.length)
       })
       .catch((error) => { if (!(error instanceof ImageTaskApiError && error.status === 404)) setWorkspaceError(errorMessage(error)) })
+      .finally(() => {
+        if (selectionMatches()) setBatchItemsLoading(false)
+      })
     void Promise.all([
       getImageBatchSummary(config, batch.id),
       listImageBatchEvents(config, batch.id, { limit: 30 }),
@@ -678,6 +691,16 @@ export default function EngineWorkspace() {
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [capabilities, config])
+
+  // 状态筛选下拉切换后立即重查。下拉的 onChange 已把列表清空，若只等下一轮
+  // 轮询（空闲间隔 15s），用户会盯着空列表很久——这正是"要很长时间才能查
+  // 回来数据"的来源之一。首轮（挂载时）跳过：connect 已加载首屏。
+  const appliedFilterRef = useRef(filter)
+  useEffect(() => {
+    if (appliedFilterRef.current === filter) return
+    appliedFilterRef.current = filter
+    if (config) void refreshRef.current(config, null)
+  }, [config, filter])
 
   useEffect(() => {
     let finalObjectUrl: string | null = null
@@ -1376,7 +1399,7 @@ export default function EngineWorkspace() {
                   <button
                     type="button"
                     key={item.itemKey}
-                    onClick={() => item.job && handleSelectJob(item.job)}
+                    onClick={() => item.job && handleSelectJob(item.job, { fromBatch: true })}
                     className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] gap-3 px-2 py-3 text-left transition-colors [content-visibility:auto] [contain-intrinsic-size:68px] hover:bg-white/60 dark:hover:bg-white/[0.03] sm:grid-cols-[44px_minmax(0,1fr)_120px_90px_auto] sm:px-3 ${selectedJob?.id === item.job?.id ? 'bg-white dark:bg-white/[0.04]' : ''}`}
                   >
                     <div className="h-11 w-11 overflow-hidden border border-stone-200 dark:border-white/10">
@@ -1402,7 +1425,7 @@ export default function EngineWorkspace() {
                   </button>
                 ))}
                 {(!selectedBatch.items || !selectedBatch.items.length) && (
-                  <div className="px-4 py-16 text-center text-sm text-stone-400">该批次暂无已加载条目</div>
+                  <div className="px-4 py-16 text-center text-sm text-stone-400">{batchItemsLoading ? '正在加载批次条目…' : '该批次暂无已加载条目'}</div>
                 )}
                 {selectedBatch.items && selectedBatch.items.length > 0 && (
                   <div className="py-3 text-center text-xs text-stone-400">
@@ -1441,7 +1464,7 @@ export default function EngineWorkspace() {
                     </button>
                   ))}
                   {!jobs.length && (
-                    <div className="px-4 py-16 text-center text-sm text-stone-400">当前筛选下没有任务</div>
+                    <div className="px-4 py-16 text-center text-sm text-stone-400">{refreshing ? '正在加载任务…' : '当前筛选下没有任务'}</div>
                   )}
                 </div>
                 {/* Infinite-scroll sentinel */}
@@ -1482,12 +1505,36 @@ export default function EngineWorkspace() {
                 onClose={() => setShowNewJob(false)}
                 onSubmit={handleCreate}
               />
+            ) : selectedJob ? (
+              <JobInspector
+                job={selectedJob}
+                previewUrl={previewUrl}
+                busy={busy}
+                delivery={deliveryRecords[`job:${selectedJob.id}`]}
+                deliveryBusy={deliveryBusy}
+                onOpenPreview={setAssetLightbox}
+                onSaveDelivery={() => void saveJobDelivery(selectedJob, true)}
+                onDownloadDelivery={() => void downloadEngineJob(config, selectedJob).catch((error) => setWorkspaceError(errorMessage(error)))}
+                onCancel={handleCancel}
+                onRetry={handleRetry}
+                onClose={() => {
+                  if (selectedBatch) {
+                    // 从批次条目打开的任务详情：关闭后回到批次详情，批次
+                    // 上下文（左侧列表、选中态）保持不变。
+                    beginInspectorSelection('batch', selectedBatch.id)
+                    setSelectedJob(null)
+                  } else {
+                    clearInspectorSelection()
+                  }
+                }}
+              />
             ) : selectedBatch ? (
               <BatchInspector
                 key={selectedBatch.id}
                 batch={selectedBatch}
                 config={config}
                 busy={busy}
+                itemsLoading={batchItemsLoading}
                 delivery={deliveryRecords[`batch:${selectedBatch.id}`]}
                 deliveryBusy={deliveryBusy}
                 onControl={handleBatchControl}
@@ -1504,20 +1551,6 @@ export default function EngineWorkspace() {
                 onArchiveBatch={handleArchiveBatch}
                 onDeleteBatch={handleDeleteBatch}
                 onPruneAssets={handlePruneAssets}
-              />
-            ) : selectedJob ? (
-              <JobInspector
-                job={selectedJob}
-                previewUrl={previewUrl}
-                busy={busy}
-                delivery={deliveryRecords[`job:${selectedJob.id}`]}
-                deliveryBusy={deliveryBusy}
-                onOpenPreview={setAssetLightbox}
-                onSaveDelivery={() => void saveJobDelivery(selectedJob, true)}
-                onDownloadDelivery={() => void downloadEngineJob(config, selectedJob).catch((error) => setWorkspaceError(errorMessage(error)))}
-                onCancel={handleCancel}
-                onRetry={handleRetry}
-                onClose={clearInspectorSelection}
               />
             ) : (
               <div className="border-y border-stone-300 py-6 dark:border-white/10">

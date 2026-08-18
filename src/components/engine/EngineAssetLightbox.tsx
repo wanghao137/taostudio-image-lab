@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { Move, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { useDialogTrap } from '../../hooks/useDialogTrap'
 
@@ -6,6 +7,11 @@ import { useDialogTrap } from '../../hooks/useDialogTrap'
  * 引擎资产放大预览：原图/4K 双模式切换、滚轮缩放、拖拽平移、双击复位。
  * 从 EngineWorkspace.tsx 提取（拆单体第一步）；使用 useDialogTrap 共享
  * 焦点陷阱 + Esc 栈。
+ *
+ * 必须通过 portal 渲染到 document.body：审查缩略图挂在带
+ * content-visibility:auto 的条目卡片内，而 content-visibility 会计算为
+ * contain:paint，让卡片成为 fixed 后代的 containing block —— 不走 portal
+ * 的话全屏遮罩会被困在卡片小区域里（已在线上复现）。
  */
 export default function EngineAssetLightbox({
   initialMode,
@@ -68,7 +74,7 @@ export default function EngineAssetLightbox({
     setDrag({ pointerId: event.pointerId, x: event.clientX, y: event.clientY })
   }
 
-  return (
+  return createPortal(
     <div
       ref={trapRef}
       data-engine-lightbox
@@ -138,6 +144,7 @@ export default function EngineAssetLightbox({
           />
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

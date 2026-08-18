@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
-import { unlinkSync, existsSync as existsSyncSync } from 'node:fs'
+import { unlinkSync, readdirSync, existsSync as existsSyncSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { basename, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -16,6 +16,21 @@ setGlobalDispatcher(new Agent({ headersTimeout: 900_000, bodyTimeout: 900_000 })
 // Safe existence check that swallows errors from permission issues etc.
 function existsSyncSafe(filePath) {
   try { return existsSyncSync(filePath) } catch { return false }
+}
+
+// Remove a deleted asset's derived renders (thumb-/preview-<assetId>-<w>.webp)
+// from the render cache. Called wherever the asset itself is deleted so the
+// cache directory cannot accumulate orphans the getAsset 404 path can never
+// serve again.
+function removeDerivedCacheSync(assetRoot, assetId) {
+  const cacheDir = join(assetRoot, 'cache')
+  let entries
+  try { entries = readdirSync(cacheDir) } catch { return }
+  for (const entry of entries) {
+    if (entry.startsWith(`thumb-${assetId}-`) || entry.startsWith(`preview-${assetId}-`)) {
+      try { unlinkSync(join(cacheDir, entry)) } catch { /* already gone */ }
+    }
+  }
 }
 import {
   API_MODES,
@@ -488,6 +503,26 @@ async function atomicWrite(path, data) {
   await rename(temporary, path)
 }
 
+// Derived renders (thumbnail / preview) are deterministic per (assetId, width)
+// because assets are immutable once written. Caching them on disk means a
+// 200-item batch review list no longer re-decodes a 10-20MB 4K PNG with sharp
+// on every scroll — the engine was spending seconds of sharp work per pass on
+// repeat renders, which made status polls and the whole workbench feel stuck.
+async function renderDerivedImage({ assetRoot, kind, assetId, width, quality, sourcePath }) {
+  const cacheDir = join(assetRoot, 'cache')
+  const cachePath = join(cacheDir, `${kind}-${assetId}-${width}.webp`)
+  try {
+    return await readFile(cachePath)
+  } catch { /* cache miss — render below */ }
+  const buffer = await sharp(sourcePath)
+    .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality })
+    .toBuffer()
+  await mkdir(cacheDir, { recursive: true })
+  await atomicWrite(cachePath, buffer)
+  return buffer
+}
+
 async function readBody(request, maxBytes = 25 * 1024 * 1024) {
   const chunks = []
   let size = 0
@@ -511,8 +546,11 @@ function safeEqual(left, right) {
 }
 
 export class TaskRepository {
-  constructor(databasePath) {
+  constructor(databasePath, options = {}) {
     this.changeListeners = new Set()
+    // assetRoot is optional (tests construct the repository standalone); prune
+    // paths skip derived-cache cleanup when it is not provided.
+    this.assetRoot = options.assetRoot || null
     this.db = new DatabaseSync(databasePath)
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -1438,11 +1476,16 @@ export class TaskRepository {
       acceptanceCounts[item.acceptanceStatus] += 1
       qaCounts[item.qaStatus] += 1
     })
-    const state = terminal === items.length
-      ? 'completed'
-      : row.control_state === 'paused'
-        ? 'paused'
-        : 'running'
+    // Keep the archived priority in sync with getBatchSummaryFromRow — without
+    // it the full-detail endpoint reports archived batches as completed/running,
+    // and the UI's optimistic post-archive update shows the wrong state.
+    const state = row.control_state === 'archived'
+      ? 'archived'
+      : terminal === items.length
+        ? 'completed'
+        : row.control_state === 'paused'
+          ? 'paused'
+          : 'running'
     const updatedAt = items.reduce(
       (latest, item) => item.job.updatedAt > latest ? item.job.updatedAt : latest,
       row.updated_at,
@@ -1520,8 +1563,10 @@ export class TaskRepository {
   setBatchControlState(id, controlState, reason) {
     const batch = this.getBatch(id)
     if (!batch) return null
-    if (batch.state === 'completed') {
-      throw Object.assign(new Error('completed batch cannot change control state'), {
+    // 归档是终态：否则 getBatch 现在按 control_state 报 'archived'，会绕过
+    // 下面的 completed 守卫，让 pause/resume 静默把归档批次改回运行/暂停。
+    if (batch.state === 'completed' || batch.controlState === 'archived') {
+      throw Object.assign(new Error('terminal batch cannot change control state'), {
         statusCode: 409,
         code: 'BATCH_COMPLETED',
       })
@@ -2012,6 +2057,7 @@ export class TaskRepository {
       const harvestFinal = join(bi.output_path, asset.kind === 'source' ? '原图.png' : '4K.png')
       if (!existsSyncSafe(harvestFinal)) continue
       try { unlinkSync(asset.file_path) } catch { /* file already gone */ }
+      if (this.assetRoot) removeDerivedCacheSync(this.assetRoot, asset.id)
       this.db.prepare('DELETE FROM assets WHERE id=?').run(asset.id)
       removed += 1
     }
@@ -2031,6 +2077,7 @@ export class TaskRepository {
     let removed = 0
     for (const row of orphans) {
       try { unlinkSync(row.file_path) } catch { /* file already gone */ }
+      if (this.assetRoot) removeDerivedCacheSync(this.assetRoot, row.id)
       this.db.prepare('DELETE FROM assets WHERE id=?').run(row.id)
       removed += 1
     }
@@ -2921,7 +2968,7 @@ export async function createTaskApi(options = {}) {
   await mkdir(assetRoot, { recursive: true })
   let repository
   try {
-    repository = new TaskRepository(join(stateDir, 'jobs.sqlite'))
+    repository = new TaskRepository(join(stateDir, 'jobs.sqlite'), { assetRoot })
   } catch (error) {
     await releaseStateLock()
     throw error
@@ -3207,14 +3254,13 @@ export async function createTaskApi(options = {}) {
         if (!asset) return void json(response, 404, { error: { code: 'NOT_FOUND' } })
         const requestedWidth = Number(url.searchParams.get('width') || 320)
         const width = Number.isInteger(requestedWidth) ? Math.max(96, Math.min(requestedWidth, 768)) : 320
-        const buffer = await sharp(asset.filePath)
-          .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 76 })
-          .toBuffer()
+        const buffer = await renderDerivedImage({ assetRoot, kind: 'thumb', assetId: asset.manifest.assetId, width, quality: 76, sourcePath: asset.filePath })
         response.writeHead(200, {
           'content-type': 'image/webp',
           'content-length': buffer.length,
-          'cache-control': 'private, max-age=300',
+          // Assets are immutable → the derived render never changes either.
+          'cache-control': 'private, immutable, max-age=86400',
+          etag: `"thumb-${asset.manifest.sha256}-${width}"`,
         })
         return void response.end(buffer)
       }
@@ -3224,13 +3270,11 @@ export async function createTaskApi(options = {}) {
         if (!asset) return void json(response, 404, { error: { code: 'NOT_FOUND' } })
         // Lightbox-size render of a potentially huge (10-20MB 4K) PNG: a
         // ~1920px webp lands in the low hundreds of KB so the lightbox opens
-        // in ~1s instead of 6-12s waiting for the full original.
+        // in ~1s instead of 6-12s waiting for the full original. Cached on
+        // disk per (assetId, width) — see renderDerivedImage.
         const requestedWidth = Number(url.searchParams.get('width') || 1920)
         const width = Number.isInteger(requestedWidth) ? Math.max(512, Math.min(requestedWidth, 1920)) : 1920
-        const buffer = await sharp(asset.filePath)
-          .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
-          .webp({ quality: 88 })
-          .toBuffer()
+        const buffer = await renderDerivedImage({ assetRoot, kind: 'preview', assetId: asset.manifest.assetId, width, quality: 88, sourcePath: asset.filePath })
         response.writeHead(200, {
           'content-type': 'image/webp',
           'content-length': buffer.length,
