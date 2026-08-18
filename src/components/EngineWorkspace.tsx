@@ -42,6 +42,7 @@ import {
   getImageBatch,
   getImageBatchSummary,
   getImageAssetBlob,
+  getImageAssetPreviewBlob,
   getImageAssetThumbnailBlob,
   getImageJob,
   getImageTaskCapabilities,
@@ -689,7 +690,7 @@ export default function EngineWorkspace() {
       return
     }
     if (finalAssetId) {
-      void getImageAssetBlob(config, finalAssetId)
+      void getImageAssetPreviewBlob(config, finalAssetId)
         .then((blob) => {
           finalObjectUrl = URL.createObjectURL(blob)
           setPreviewUrl(finalObjectUrl)
@@ -699,7 +700,7 @@ export default function EngineWorkspace() {
       setPreviewUrl(null)
     }
     if (sourceAssetId) {
-      void getImageAssetBlob(config, sourceAssetId)
+      void getImageAssetPreviewBlob(config, sourceAssetId)
         .then((blob) => {
           sourceObjectUrl = URL.createObjectURL(blob)
           setSourcePreviewUrl(sourceObjectUrl)

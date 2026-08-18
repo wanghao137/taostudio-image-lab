@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
-  getImageAssetBlob,
+  getImageAssetPreviewBlob,
   getImageAssetThumbnailBlob,
   type ImageTaskApiConfig,
 } from '../../lib/imageTaskApi'
@@ -88,7 +88,10 @@ export default function ReviewThumbnail({
     }
     setFullState('loading')
     try {
-      const blob = await getImageAssetBlob(config, assetId)
+      // Server-rendered ~1920px webp (~hundreds of KB): the lightbox opens in
+      // ~1s. Fetching the 10-20MB original PNG here made the click feel dead
+      // for 6-12s before anything appeared.
+      const blob = await getImageAssetPreviewBlob(config, assetId)
       setFullUrl(URL.createObjectURL(blob))
       setFullState('idle')
       setLightboxOpen(true)

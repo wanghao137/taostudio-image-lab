@@ -3218,6 +3218,27 @@ export async function createTaskApi(options = {}) {
         })
         return void response.end(buffer)
       }
+      const previewMatch = url.pathname.match(/^\/v1\/assets\/([^/]+)\/preview$/)
+      if (request.method === 'GET' && previewMatch) {
+        const asset = repository.getAsset(previewMatch[1])
+        if (!asset) return void json(response, 404, { error: { code: 'NOT_FOUND' } })
+        // Lightbox-size render of a potentially huge (10-20MB 4K) PNG: a
+        // ~1920px webp lands in the low hundreds of KB so the lightbox opens
+        // in ~1s instead of 6-12s waiting for the full original.
+        const requestedWidth = Number(url.searchParams.get('width') || 1920)
+        const width = Number.isInteger(requestedWidth) ? Math.max(512, Math.min(requestedWidth, 1920)) : 1920
+        const buffer = await sharp(asset.filePath)
+          .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 88 })
+          .toBuffer()
+        response.writeHead(200, {
+          'content-type': 'image/webp',
+          'content-length': buffer.length,
+          'cache-control': `private, immutable, max-age=86400`,
+          etag: `"preview-${asset.manifest.sha256}-${width}"`,
+        })
+        return void response.end(buffer)
+      }
       json(response, 404, { error: { code: 'NOT_FOUND' } })
     } catch (error) {
       const statusCode = error?.statusCode || (error instanceof SyntaxError ? 400 : 500)

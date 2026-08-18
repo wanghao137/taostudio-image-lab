@@ -636,6 +636,31 @@ export async function getImageAssetBlob(config: ImageTaskApiConfig, assetId: str
   return blob
 }
 
+// Lightbox-size preview (server-rendered ~1920px webp, a few hundred KB) so
+// "查看大图" opens in ~1s instead of streaming a 10-20MB original PNG.
+const enginePreviewCache = new Map<string, Blob>()
+const MAX_ENGINE_PREVIEW_ENTRIES = 12
+
+export async function getImageAssetPreviewBlob(
+  config: ImageTaskApiConfig,
+  assetId: string,
+  width = 1920,
+): Promise<Blob> {
+  const cacheKey = `${assetId}@${width}`
+  const cached = enginePreviewCache.get(cacheKey)
+  if (cached) {
+    enginePreviewCache.delete(cacheKey)
+    enginePreviewCache.set(cacheKey, cached)
+    return cached
+  }
+  const blob = await (await taskFetch(
+    config,
+    `/v1/assets/${encodeURIComponent(assetId)}/preview?width=${encodeURIComponent(String(width))}`,
+  )).blob()
+  cacheBlob(enginePreviewCache, MAX_ENGINE_PREVIEW_ENTRIES, cacheKey, blob)
+  return blob
+}
+
 export async function getImageAssetThumbnailBlob(
   config: ImageTaskApiConfig,
   assetId: string,

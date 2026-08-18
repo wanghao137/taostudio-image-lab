@@ -456,7 +456,10 @@ await client.connect(transport)
 
 async function callMcp(name, args) {
   const isLeaseOperation = name.startsWith('image_batch_runner_')
-  const timeout = isLeaseOperation ? 15_000 : 1_830_000
+  // Lease ops get 45s: right after a 100-item batch create the engine may be
+  // finalizing its SQLite transaction / WAL checkpoint and briefly stall.
+  // Acquire/heartbeat are owner-idempotent, so a slow call is safe to wait out.
+  const timeout = isLeaseOperation ? 45_000 : 1_830_000
   const pending = client.callTool(
     { name, arguments: args },
     undefined,
