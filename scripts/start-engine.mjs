@@ -27,6 +27,14 @@ const logPath = resolve(logDir, 'engine.log')
 const MAX_LOG_BYTES = 5 * 1024 * 1024 // rotate at ~5 MB
 const RESTART_BACKOFF_MS = 3000
 const MAX_RESTARTS = 10
+// Health probe: the engine can hang with its process alive (event loop
+// blocked by a synchronous call) — TCP accepts but HTTP never responds.
+// A process-exit watcher alone never fires in that state, so probe an
+// unauthenticated 404 route on the listening port and force-kill the child
+// after consecutive failures. 30s × 2 misses ≈ ≤1.5 min hang visibility.
+const HEALTH_PROBE_INTERVAL_MS = 30_000
+const HEALTH_PROBE_FAILURES = 2
+const HEALTH_PORT = Number(process.env.IMAGE_TASK_API_PORT || 9789)
 
 const daemon = process.argv.includes('--daemon')
 
@@ -62,6 +70,17 @@ writeLog('=== TaoStudio Image Engine supervisor starting ===')
 
 let restartCount = 0
 let deliberate = false
+let healthFailures = 0
+
+function scheduleRestart(reason) {
+  if (restartCount >= MAX_RESTARTS) {
+    writeLog(`restart limit (${MAX_RESTARTS}) reached, giving up (${reason})`)
+    process.exit(1)
+  }
+  restartCount += 1
+  writeLog(`restarting in ${RESTART_BACKOFF_MS}ms (attempt ${restartCount}/${MAX_RESTARTS}; ${reason})`)
+  setTimeout(startOnce, RESTART_BACKOFF_MS)
+}
 
 function startOnce() {
   const child = spawn(process.execPath, [cliPath], {
@@ -81,13 +100,7 @@ function startOnce() {
       writeLog('deliberate stop requested, supervisor exiting')
       process.exit(0)
     }
-    if (restartCount >= MAX_RESTARTS) {
-      writeLog(`restart limit (${MAX_RESTARTS}) reached, giving up`)
-      process.exit(1)
-    }
-    restartCount += 1
-    writeLog(`restarting in ${RESTART_BACKOFF_MS}ms (attempt ${restartCount}/${MAX_RESTARTS})`)
-    setTimeout(startOnce, RESTART_BACKOFF_MS)
+    scheduleRestart(`exit code=${code} signal=${signal}`)
   })
 
   child.on('error', (error) => {
@@ -98,6 +111,39 @@ function startOnce() {
 }
 
 let current = startOnce()
+
+// Hang self-healing: probe an unknown path; a healthy engine answers quickly
+// (401/404), a hung one never answers. Two consecutive misses → force kill;
+// the exit handler restarts it.
+async function probeHealth() {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+  try {
+    await fetch(`http://127.0.0.1:${HEALTH_PORT}/v1/health-probe`, { signal: controller.signal })
+    // Any HTTP response (401/404 included) proves the event loop is alive.
+    return true
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+setInterval(() => {
+  if (deliberate || current.killed) return
+  void probeHealth().then((alive) => {
+    if (alive) {
+      healthFailures = 0
+      return
+    }
+    healthFailures += 1
+    writeLog(`health probe miss ${healthFailures}/${HEALTH_PROBE_FAILURES} (pid ${current.pid})`)
+    if (healthFailures >= HEALTH_PROBE_FAILURES) {
+      healthFailures = 0
+      writeLog(`engine unresponsive, force-killing pid ${current.pid} for restart`)
+      current.kill('SIGKILL')
+    }
+  })
+}, HEALTH_PROBE_INTERVAL_MS)
 
 const shutdown = (signal) => {
   writeLog(`supervisor received ${signal}, stopping engine`)

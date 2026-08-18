@@ -690,12 +690,23 @@ export default function EngineWorkspace() {
       return
     }
     if (finalAssetId) {
+      // Progressive: show the ~1920px preview immediately, then upgrade to the
+      // full original so lightbox zoom keeps real 4K detail. The cleanup
+      // revokes whichever URLs were created when the selection changes.
       void getImageAssetPreviewBlob(config, finalAssetId)
         .then((blob) => {
           finalObjectUrl = URL.createObjectURL(blob)
           setPreviewUrl(finalObjectUrl)
         })
         .catch(() => setPreviewUrl(null))
+      void getImageAssetBlob(config, finalAssetId)
+        .then((blob) => {
+          const url = URL.createObjectURL(blob)
+          if (finalObjectUrl) URL.revokeObjectURL(finalObjectUrl)
+          finalObjectUrl = url
+          setPreviewUrl(url)
+        })
+        .catch(() => { /* keep the preview if the original fails */ })
     } else {
       setPreviewUrl(null)
     }
@@ -706,6 +717,14 @@ export default function EngineWorkspace() {
           setSourcePreviewUrl(sourceObjectUrl)
         })
         .catch(() => setSourcePreviewUrl(null))
+      void getImageAssetBlob(config, sourceAssetId)
+        .then((blob) => {
+          const url = URL.createObjectURL(blob)
+          if (sourceObjectUrl) URL.revokeObjectURL(sourceObjectUrl)
+          sourceObjectUrl = url
+          setSourcePreviewUrl(url)
+        })
+        .catch(() => { /* keep the preview if the original fails */ })
     } else {
       setSourcePreviewUrl(null)
     }

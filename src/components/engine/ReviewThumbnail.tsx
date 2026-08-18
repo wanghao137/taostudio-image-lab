@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
+  getImageAssetBlob,
   getImageAssetPreviewBlob,
   getImageAssetThumbnailBlob,
   type ImageTaskApiConfig,
@@ -87,17 +88,28 @@ export default function ReviewThumbnail({
       return
     }
     setFullState('loading')
+    // Progressive two-stage load: open the lightbox with the server-rendered
+    // ~1920px webp (~hundreds of KB, ~1s) so the click responds immediately,
+    // then upgrade to the full-resolution original in the background — the
+    // lightbox supports up to 4x zoom and review needs the real 4K detail.
+    // The [fullUrl] cleanup effect revokes the preview URL on replacement.
+    let opened = false
     try {
-      // Server-rendered ~1920px webp (~hundreds of KB): the lightbox opens in
-      // ~1s. Fetching the 10-20MB original PNG here made the click feel dead
-      // for 6-12s before anything appeared.
-      const blob = await getImageAssetPreviewBlob(config, assetId)
-      setFullUrl(URL.createObjectURL(blob))
+      const previewBlob = await getImageAssetPreviewBlob(config, assetId)
+      setFullUrl(URL.createObjectURL(previewBlob))
       setFullState('idle')
       setLightboxOpen(true)
-    } catch {
-      setFullState('error')
-    }
+      opened = true
+    } catch { /* fall through to the original */ }
+    void getImageAssetBlob(config, assetId)
+      .then((blob) => {
+        setFullUrl(URL.createObjectURL(blob))
+        setFullState('idle')
+        if (!opened) setLightboxOpen(true)
+      })
+      .catch(() => {
+        if (!opened) setFullState('error')
+      })
   }
 
   return (
