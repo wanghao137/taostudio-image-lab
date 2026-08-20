@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Monitor, Moon, Sun } from 'lucide-react'
+import { ExternalLink, Monitor, Moon, Sun } from 'lucide-react'
 import { getFavoriteCollectionTitle, useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { useTooltip } from '../hooks/useTooltip'
@@ -16,6 +16,8 @@ type ThemeMode = 'system' | 'light' | 'dark'
 type ThemeValue = 'light' | 'dark'
 
 const THEME_KEY = 'taostudio.imageLab.theme'
+// 无限画布（独立应用，Vercel 项目 infinite-canvas）入口地址；置空字符串即可隐藏入口。
+const CANVAS_WORKSPACE_URL: string = 'https://canvas.taostudioai.com'
 const HelpModal = lazy(() => import('./HelpModal'))
 const HistoryModal = lazy(() => import('./HistoryModal'))
 
@@ -298,6 +300,18 @@ export default function Header() {
             >
               引擎
             </button>
+            {CANVAS_WORKSPACE_URL !== '' && (
+              <a
+                href={CANVAS_WORKSPACE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="在新标签页打开无限画布（独立应用）"
+                className="flex items-center gap-1 px-4 py-1.5 rounded-lg text-sm transition-colors text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
+              >
+                无限画布
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+              </a>
+            )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <button
