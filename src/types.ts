@@ -16,7 +16,7 @@ export const ZIP_DOWNLOAD_ROUTE_VALUES = [
 ] as const
 export type ZipDownloadRoute = typeof ZIP_DOWNLOAD_ROUTE_VALUES[number]
 export const DEFAULT_ZIP_DOWNLOAD_ROUTES: ZipDownloadRoute[] = ['task-selection', 'favorite-collection-selection']
-export type BuiltInApiProvider = 'openai' | 'fal'
+export type BuiltInApiProvider = 'openai' | 'sb2api-async' | 'fal'
 export type ApiProvider = BuiltInApiProvider | string
 export type CustomProviderTemplate = 'http-image'
 export const DEFAULT_STREAM_PARTIAL_IMAGES = 1
@@ -71,7 +71,11 @@ export interface CustomProviderDefinition {
 
 export interface ApiProfile {
   id: string
+  /** 当前部署指定的默认预置配置。 */
+  isDefault?: boolean
   name: string
+  /** 预置配置的 Markdown 说明。 */
+  description?: string
   provider: ApiProvider
   baseUrl: string
   apiKey: string
@@ -84,10 +88,11 @@ export interface ApiProfile {
   responseFormatB64Json?: boolean
   streamImages?: boolean
   streamPartialImages?: number
+  transparentBackgroundMethod: 'api' | 'local'
   /** 请求尺寸收口开关：设为 true 表示服务商真实支持大尺寸原生输出，
    * 跳过 exact_size 大目标的请求尺寸收口（默认收口到 ~1.5MP 原生档）。 */
   nativeLargeOutput?: boolean
-  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages'>>>>
+  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
 }
 
 export type LocalAutoSaveStatus =

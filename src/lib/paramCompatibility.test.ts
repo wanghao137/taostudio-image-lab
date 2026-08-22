@@ -140,4 +140,37 @@ describe('capRequestSize (non-codexCli exact-size 4K asset requests)', () => {
       { capRequestSize: true },
     ).size).toBe('3456x2304')
   })
+
+  it('applies Codex CLI parameter limits to custom providers', () => {
+    const settings = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      customProviders: [{
+        id: 'custom-provider',
+        name: 'Custom Provider',
+        submit: { path: 'images/generations' },
+      }],
+      profiles: [{
+        ...createDefaultOpenAIProfile(),
+        provider: 'custom-provider',
+        codexCli: true,
+      }],
+    })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2048x2048', quality: 'high' }, settings)).toMatchObject({
+      size: '1024x1024',
+      quality: DEFAULT_PARAMS.quality,
+    })
+  })
+
+  it('does not apply Codex CLI parameter limits to fal.ai', () => {
+    const profile = createDefaultFalProfile({ codexCli: true })
+    const settings = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      codexCli: true,
+      profiles: [profile],
+      activeProfileId: profile.id,
+    })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2048x2048' }, settings).size).toBe('2048x2048')
+  })
 })

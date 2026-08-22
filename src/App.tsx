@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { initStore } from './store'
-import { useStore } from './store'
-import { buildSettingsFromUrlParams, clearUrlSettingParams, hasUrlSettingParams } from './lib/urlSettings'
-import { mergeImportedSettings } from './lib/apiProfiles'
-import { getCustomProviderConfigUrl, loadCustomProviderSettingsFromUrl } from './lib/customProviderConfigUrl'
+import { initStore, restoreExplicitPresetConfig, useStore } from './store'
+import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './lib/urlSettings'
+import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
+import { getCustomProviderConfigUrl, hasEmbeddedDefaultConfig, loadCustomProviderSettingsFromUrl, loadEmbeddedDefaultConfig } from './lib/customProviderConfigUrl'
+import { getDefaultPresetProfileId, getPresetProfileIds, isPresetConfigOnlyEnabled, setPresetConfig } from './lib/presetConfig'
+import type { AppSettings } from './types'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
 import { useIsMobile } from './hooks/useIsMobile'
 import Header from './components/Header'
@@ -18,7 +19,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 // 移动端统计降级：仅保留这三项；桌面端 6 项不变。
 const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
 
-let customProviderConfigUrlImportStarted = false
+let defaultConfigImportStarted = false
 const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
 const EngineWorkspace = lazy(() => import('./components/EngineWorkspace'))
 const TaskGrid = lazy(() => import('./components/TaskGrid'))
@@ -127,7 +128,6 @@ function GalleryWorkspaceHeader() {
 }
 
 export default function App() {
-  const setSettings = useStore((s) => s.setSettings)
   const appMode = useStore((s) => s.appMode)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
@@ -146,35 +146,94 @@ export default function App() {
   useGlobalClickSuppression()
 
   useEffect(() => {
+    if (defaultConfigImportStarted) return
+    defaultConfigImportStarted = true
+
     const searchParams = new URLSearchParams(window.location.search)
-    const nextSettings = buildSettingsFromUrlParams(useStore.getState().settings, searchParams)
+    const customProviderConfigUrl = getCustomProviderConfigUrl()
+    const embeddedDefaultConfig = hasEmbeddedDefaultConfig()
+    const loadDefaultConfig = () => embeddedDefaultConfig
+      ? Promise.resolve().then(() => loadEmbeddedDefaultConfig())
+      : loadCustomProviderSettingsFromUrl(customProviderConfigUrl)
 
-    setSettings(nextSettings)
+    const applyUrlSettings = async (baseSettings: Partial<AppSettings>) => {
+      const ids = getExplicitUrlSettingsIds(searchParams)
+      const restored = await restoreExplicitPresetConfig(ids)
+      const restoredSettings = useStore.getState().settings
+      const sourceSettings = restored
+        ? { ...restoredSettings, ...baseSettings, customProviders: restoredSettings.customProviders, profiles: restoredSettings.profiles }
+        : baseSettings
+      const nextSettings = buildSettingsFromUrlParams(sourceSettings, searchParams)
+      return Object.keys(nextSettings).length ? nextSettings : sourceSettings
+    }
 
-    if (hasUrlSettingParams(searchParams)) {
+    const clearAppliedUrlSettings = () => {
+      if (!hasUrlSettingParams(searchParams)) return
       clearUrlSettingParams(searchParams)
-
       const nextSearch = searchParams.toString()
       const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`
       window.history.replaceState(null, '', nextUrl)
     }
 
-    const customProviderConfigUrl = getCustomProviderConfigUrl()
-    if (customProviderConfigUrl && !customProviderConfigUrlImportStarted) {
-      customProviderConfigUrlImportStarted = true
-      void loadCustomProviderSettingsFromUrl(customProviderConfigUrl)
-        .then((importedSettings) => {
-          if (!importedSettings) return
-          const state = useStore.getState()
-          state.setSettings(mergeImportedSettings(state.settings, importedSettings))
-        })
-        .catch((error) => {
-          console.warn('Failed to import custom provider config URL:', error)
-        })
-    }
+    void initStore()
+      .then(async () => {
+        const importedSettings = embeddedDefaultConfig || customProviderConfigUrl
+          ? await loadDefaultConfig()
+          : hasDefaultPresetConfig()
+            ? {
+                customProviders: [],
+                profiles: [{ ...createDefaultOpenAIProfile(), isDefault: true }],
+              }
+            : null
+        setPresetConfig(importedSettings)
 
-    initStore()
-  }, [setSettings])
+        const state = useStore.getState()
+        if (importedSettings) {
+          await state.setPresetImportedSettings(importedSettings)
+        } else if (state.previousPresetConfig) {
+          await state.setPresetImportedSettings({ customProviders: [], profiles: [] })
+        }
+
+        const syncedState = useStore.getState()
+        if (!importedSettings) {
+          useStore.setState({ dismissedPresetProfileIds: [], dismissedPresetProviderIds: [] })
+          if (syncedState.settings.profiles.some((profile) => profile.isDefault)) {
+            syncedState.setSettings({
+              profiles: syncedState.settings.profiles.map((profile) => profile.isDefault ? { ...profile, isDefault: undefined } : profile),
+            })
+          }
+        }
+
+        const current = useStore.getState()
+        const presetIds = getPresetProfileIds()
+        const defaultPresetId = getDefaultPresetProfileId()
+        const settings = isPresetConfigOnlyEnabled()
+          ? normalizeSettings({
+              ...current.settings,
+              activeProfileId: presetIds.has(current.settings.activeProfileId)
+                ? current.settings.activeProfileId
+                : defaultPresetId ?? [...presetIds][0],
+              agentTextProfileId: current.settings.agentTextProfileId && presetIds.has(current.settings.agentTextProfileId)
+                ? current.settings.agentTextProfileId
+                : current.settings.profiles.find((profile) => presetIds.has(profile.id) && isAgentTextApiProfile(profile))?.id ?? null,
+              agentImageProfileId: current.settings.agentImageProfileId && presetIds.has(current.settings.agentImageProfileId)
+                ? current.settings.agentImageProfileId
+                : defaultPresetId ?? [...presetIds][0],
+            })
+          : current.settings
+        current.setSettings(await applyUrlSettings(settings))
+        clearAppliedUrlSettings()
+      })
+      .catch((error) => {
+        console.warn('Failed to import preset config:', error)
+        setPresetConfig(null)
+        const state = useStore.getState()
+        void applyUrlSettings(state.settings).then((settings) => {
+          useStore.getState().setSettings(settings)
+          clearAppliedUrlSettings()
+        })
+      })
+  }, [])
 
   useEffect(() => {
     const preventPageImageDrag = (e: DragEvent) => {

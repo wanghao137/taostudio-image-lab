@@ -40,6 +40,8 @@ export function normalizeBaseUrl(baseUrl: string): string {
 
   try {
     const url = new URL(input)
+    if (trimmed.endsWith('/')) return `${url.origin}${url.pathname.replace(/\/+$/, '/')}`
+
     const pathSegments = url.pathname.split('/').filter(Boolean)
     const v1Index = pathSegments.indexOf('v1')
     const normalizedSegments = v1Index >= 0
@@ -111,11 +113,16 @@ export function buildApiUrl(
   proxyConfig?: DevProxyConfig | null,
   useApiProxy = false,
 ): string {
-  const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+  const trimmedBaseUrl = baseUrl.trim()
   const endpointPath = path.replace(/^\/+/, '')
 
   if (useApiProxy) {
     return `${proxyConfig?.prefix ?? normalizeProxyPrefix(readRuntimeEnv(import.meta.env.VITE_API_PROXY_PREFIX))}/${endpointPath}`
+  }
+
+  const normalizedBaseUrl = normalizeBaseUrl(trimmedBaseUrl)
+  if (trimmedBaseUrl.endsWith('/')) {
+    return `${normalizedBaseUrl.replace(/\/+$/, '')}/${endpointPath}`
   }
 
   const apiPath = normalizedBaseUrl.endsWith('/v1')

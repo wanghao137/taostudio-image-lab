@@ -129,7 +129,9 @@ export async function storeTaskOutputImages(
         }
 
         try {
-          outputDataUrl = await removeKeyedBackgroundFromDataUrl(dataUrl)
+          outputDataUrl = task.params.output_format === 'webp'
+            ? await removeKeyedBackgroundFromDataUrl(dataUrl, undefined, 'webp', task.params.output_compression)
+            : await removeKeyedBackgroundFromDataUrl(dataUrl)
           transparentOriginalImageIds.push(originalId)
         } catch (err) {
           console.warn('透明背景后处理失败，已回退为原始输出', err)

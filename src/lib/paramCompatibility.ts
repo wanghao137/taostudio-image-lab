@@ -1,5 +1,5 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
-import { getActiveApiProfile } from './apiProfiles'
+import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
 import { calculateImageSize, normalizeCodexCliImageSize, normalizeImageSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
@@ -44,7 +44,7 @@ export function normalizeParamsForSettings(
   }
   nextParams.exact_size = nextParams.size !== 'auto' && Boolean(nextParams.exact_size)
 
-  if (activeProfile.provider === 'openai' && activeProfile.codexCli) {
+  if (isOpenAICompatibleProvider(settings, activeProfile.provider) && activeProfile.codexCli) {
     if (!options.preserveExactSizeIntent || !nextParams.exact_size) {
       nextParams.size = normalizeCodexCliImageSize(nextParams.size)
     }
