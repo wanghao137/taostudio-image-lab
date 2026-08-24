@@ -22,6 +22,18 @@ const TRANSPARENT_PROMPT_TEMPLATE = [
   '禁止：主体本身、描边、光晕、投影或反射中不能出现所选背景色。',
 ].join('\n')
 
+// 原生透明（API 直出 alpha）：部分后端不读 background 参数但遵循提示词意图，
+// 与参数叠加对支持参数的官方后端无副作用。
+const NATIVE_TRANSPARENT_PROMPT_HINT = [
+  '[透明背景指令]',
+  '背景必须完全透明：输出带 Alpha 通道的图像，主体以外的所有像素 Alpha=0；禁止白色、纯色、渐变或棋盘格等任何形式的背景填充。',
+  '主体要求：单主体、完整呈现、边缘干净锐利；主体上不得残留半透明背景色，也不要为衬托主体而加深色描边底板。',
+].join('\n')
+
+export function buildNativeTransparentPrompt(prompt: string) {
+  return `${prompt.trim()}\n\n${NATIVE_TRANSPARENT_PROMPT_HINT}`
+}
+
 export function buildTransparentPrompt(prompt: string) {
   return `${prompt.trim()}\n\n${TRANSPARENT_PROMPT_TEMPLATE}`
 }

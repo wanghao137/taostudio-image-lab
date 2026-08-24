@@ -180,6 +180,7 @@ vi.mock('./lib/transparentImage', () => ({
     output_compression: params.output_format === 'webp' ? params.output_compression : null,
     transparent_output: true,
   })),
+  buildNativeTransparentPrompt: vi.fn((prompt: string) => `${prompt}\n\n背景必须完全透明`),
   removeKeyedBackgroundFromDataUrl: vi.fn(async (dataUrl: string) => `transparent:${dataUrl}`),
 }))
 vi.mock('./lib/exactImageSize', () => ({
@@ -1296,6 +1297,40 @@ describe('mask draft lifecycle in store actions', () => {
     expect(task.transparentOutput).toBeUndefined()
     expect(task.transparentPrompt).toBeUndefined()
     expect(task.transparentOriginalImages).toBeUndefined()
+    await clearTasks()
+    await clearImages()
+  })
+
+  it('augments the request prompt with the native transparent instruction', async () => {
+    const { callImageApi } = await import('./lib/api')
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(removeKeyedBackgroundFromDataUrl).mockClear()
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,native-transparent-hint'],
+      actualParams: { output_format: 'png' },
+      actualParamsList: [{ output_format: 'png' }],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      settings: { ...DEFAULT_SETTINGS, baseUrl: 'https://api.example.com/v1', apiKey: 'test-key' },
+      prompt: '透明玻璃瓶',
+      params: {
+        ...DEFAULT_PARAMS,
+        output_format: 'png',
+        transparent_output: true,
+      },
+    })
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(callImageApi).toHaveBeenCalledWith(expect.objectContaining({
+      nativeTransparentBackground: true,
+      prompt: expect.stringContaining('背景必须完全透明'),
+    }))
+    // 提示词增强只作用于请求：任务本身仍按原生透明记录，不触发本地后处理。
+    const [task] = useStore.getState().tasks
+    expect(task.transparentOutput).toBeUndefined()
     await clearTasks()
     await clearImages()
   })

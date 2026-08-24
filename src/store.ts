@@ -67,7 +67,7 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { imageDataUrlToPngBlob, validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
-import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
+import { buildNativeTransparentPrompt, createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, getCachedImage, getUnpinnedQuotaImageIds, pinQuotaImage, scheduleThumbnailBackfill } from './lib/imageCache'
 import { hasActiveDataOperations } from './lib/dataOperations'
@@ -4060,9 +4060,15 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       if (!maskDataUrl) throw new Error('遮罩图片已不存在')
     }
 
-    const requestPrompt = task.transparentOutput && task.transparentPrompt
+    // 原生透明：background 参数照发（官方后端按参数出 alpha）；部分后端不读
+    // 该参数但遵循提示词意图，因此叠加透明指令，两类后端都能直出真透明。
+    const nativeTransparentRequested = Boolean(task.params.transparent_output) && !task.transparentOutput
+    const baseRequestPrompt = task.transparentOutput && task.transparentPrompt
       ? task.transparentPrompt
       : task.prompt
+    const requestPrompt = nativeTransparentRequested
+      ? buildNativeTransparentPrompt(baseRequestPrompt)
+      : baseRequestPrompt
     const promptSentToApi = appendTargetAspectPromptHint(
       replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
       task.params.size,
@@ -4078,7 +4084,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       settings: requestSettings,
       prompt: promptSentToApi,
       params: providerParams,
-      nativeTransparentBackground: Boolean(task.params.transparent_output) && !task.transparentOutput,
+      nativeTransparentBackground: nativeTransparentRequested,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
