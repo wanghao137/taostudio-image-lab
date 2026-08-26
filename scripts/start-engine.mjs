@@ -14,7 +14,7 @@
 // All engine config is read from .env.local by cli.mjs itself; this launcher
 // only adds supervision + logging and does not duplicate configuration.
 
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -110,6 +110,54 @@ function startOnce() {
   return child
 }
 
+// 幂等自愈启动（配合计划任务周期性触发）：
+// 1. 引擎已在健康响应 → 直接退出（说明另一个 supervisor 或健康引擎在管）；
+// 2. 端口无响应但被进程占用（事件循环卡死）→ 强杀该进程再拉起，否则
+//    新 cli.mjs 会因 state 目录锁被卡死进程持有而 STATE_DIR_LOCKED 失败；
+// 3. 端口完全空闲 → 正常启动。
+// 这样计划任务可以安全地每分钟触发本脚本，引擎下线后 ≤1 分钟自动恢复。
+function findListenerPid(port) {
+  try {
+    const out = execFileSync('netstat', ['-ano'], { encoding: 'utf8', timeout: 5000 })
+    for (const line of out.split(/\r?\n/)) {
+      const match = line.match(/\s*TCP\s+127\.0\.0\.1:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/)
+      if (match && Number(match[1]) === port) return Number(match[2])
+    }
+  } catch {
+    // netstat 失败时不阻塞启动，直接走正常拉起流程
+  }
+  return null
+}
+
+async function preflightEngine() {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 3000)
+  let alive = false
+  try {
+    await fetch(`http://127.0.0.1:${HEALTH_PORT}/v1/health-probe`, { signal: controller.signal })
+    alive = true
+  } catch {
+    alive = false
+  } finally {
+    clearTimeout(timer)
+  }
+  if (alive) {
+    writeLog('engine already healthy on ' + HEALTH_PORT + ', exiting (periodic no-op)')
+    process.exit(0)
+  }
+  const listenerPid = findListenerPid(HEALTH_PORT)
+  if (listenerPid) {
+    writeLog(`port ${HEALTH_PORT} held by unresponsive pid ${listenerPid}, force-killing before start`)
+    try {
+      process.kill(listenerPid, 'SIGKILL')
+    } catch {
+      // 进程已消失，忽略
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 1500))
+  }
+}
+
+await preflightEngine()
 let current = startOnce()
 
 // Hang self-healing: probe an unknown path; a healthy engine answers quickly

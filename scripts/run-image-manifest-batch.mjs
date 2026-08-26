@@ -1030,14 +1030,16 @@ async function processEntry(entry, workerId) {
         'utf8',
       )
       if (job.state !== 'succeeded') {
-        if (providerRoutesUnavailable(job)) {
-          throw providerUnavailableError(`both provider routes returned 5xx for job ${job.id}`)
-        }
+        // 内容策略拒绝是正常业务结果，不是 provider 故障：优先走 safe-rewrite，
+        // 且不因策略失败触发 provider-unavailable 暂停。
         if (policyFailure(job) && revision === 0) {
           safeRewrite = await safeRewritePrompt(entry, env, job)
           executionPrompt = safeRewrite.prompt
           replacementReason = 'safe_rewrite'
           continue
+        }
+        if (providerRoutesUnavailable(job) && !policyFailure(job)) {
+          throw providerUnavailableError(`both provider routes returned 5xx for job ${job.id}`)
         }
         await recordBatchItemQa(entry.itemKey, {
           qaStatus: 'not_run',

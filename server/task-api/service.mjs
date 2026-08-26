@@ -556,6 +556,11 @@ export class TaskRepository {
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
       PRAGMA busy_timeout = 5000;
+      -- 默认自动 checkpoint 阈值 1000 页(~4MB)在批次写入高峰会让 WAL 冲到
+      -- 4MB 才一次性写回主库，同步 I/O 阻塞事件循环数百毫秒~数秒，表现为
+      -- 周期性 health-probe miss / 瞬时 fetch failed。降到 200 页(~800KB)
+      -- 后 checkpoint 更频繁但单次写回量小，阻塞降至毫秒级。
+      PRAGMA wal_autocheckpoint = 200;
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
         idempotency_key TEXT NOT NULL UNIQUE,
@@ -2067,6 +2072,13 @@ export class TaskRepository {
   // P0-3: Also delete orphaned assets not referenced by any job (e.g. from
   // crash recovery, cancelled jobs, or old revisions). Excludes upload assets
   // (jobId='upload') which are user-uploaded reference images still in active use.
+  // WAL 维护：低峰期把 WAL 截断写回主库，防止 WAL 无限累积。TRUNCATE 在
+  // 有活跃写事务时返回 busy=1 并跳过，下一周期再试即可，无副作用。
+  // 配合 wal_autocheckpoint=200，单次 checkpoint 写回量小，不阻塞事件循环。
+  checkpointWal() {
+    this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()
+  }
+
   pruneOrphanedAssets() {
     const orphans = this.db.prepare(`
       SELECT a.id, a.file_path FROM assets a
@@ -2974,6 +2986,17 @@ export async function createTaskApi(options = {}) {
     throw error
   }
   const recoveredJobs = repository.recoverInterruptedJobs()
+  // WAL 定期截断：批次写入会让 WAL 持续增长，自动 checkpoint(200 页)只
+  // 保证单次写回量小；这里每 5 分钟在低峰把 WAL 清空回主库，从根上防止
+  // WAL 累积到 MB 级后一次性写回阻塞事件循环（引擎周期性卡顿根因）。
+  const walMaintenanceTimer = setInterval(() => {
+    try {
+      repository.checkpointWal()
+    } catch {
+      // checkpoint 失败（如磁盘瞬时忙）不致命，下个周期重试
+    }
+  }, 5 * 60_000)
+  if (typeof walMaintenanceTimer.unref === 'function') walMaintenanceTimer.unref()
   const token = options.token || randomBytes(24).toString('hex')
   const workerPool = new TaskWorkerPool({
     repository,
