@@ -289,6 +289,10 @@ export default defineConfig(async ({ command, mode }) => {
       host: true,
       port: 9527,
       strictPort: true,
+      watch: {
+        // 本地草稿目录里 E2E 会落盘下载产物，避免 watcher 盯到临时文件崩溃
+        ignored: ['**/.omc/**', '**/.omx/**'],
+      },
     },
     test: {
       // 只跑本仓库的测试；.upstream/ 缓存里上游仓库自己的测试文件不属于本项目，

@@ -17,6 +17,8 @@ import {
 } from '../lib/stickerSplit/splitService'
 import type { SplitImageData, SplitOutput, SplitRunResult, SquareSetting } from '../lib/stickerSplit/engine'
 import { downloadSplitOutput, downloadSplitOutputsZip } from '../lib/stickerSplit/download'
+import { outputToCanvas } from '../lib/stickerSplit/animate'
+import StickerAnimatePanel from './StickerAnimatePanel'
 
 type Phase = 'loading' | 'ready' | 'error'
 
@@ -36,14 +38,6 @@ function isDarkTheme() {
   return document.documentElement.classList.contains('dark')
 }
 
-function makeOutputCanvas(output: SplitOutput): HTMLCanvasElement {
-  const canvas = document.createElement('canvas')
-  canvas.width = output.w
-  canvas.height = output.h
-  canvas.getContext('2d')?.putImageData(new ImageData(new Uint8ClampedArray(output.data), output.w, output.h), 0, 0)
-  return canvas
-}
-
 export default function StickerSplitModal() {
   const source = useStore((s) => s.stickerSplitSource)
   const setStickerSplitSource = useStore((s) => s.setStickerSplitSource)
@@ -59,11 +53,14 @@ export default function StickerSplitModal() {
   const [squareSetting, setSquareSetting] = useState<SquareSetting>('auto')
   const [selected, setSelected] = useState(-1)
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+  const [animateOpen, setAnimateOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [nameBase, setNameBase] = useState('stickers')
   const [gapSlider, setGapSlider] = useState(0)
+  // 每次新切分结果 +1：作为动图面板的 remount key，避免换图后帧选择残留旧 index
+  const [splitVersion, setSplitVersion] = useState(0)
 
   const imageDataRef = useRef<SplitImageData | null>(null)
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -91,6 +88,7 @@ export default function StickerSplitModal() {
     setResult(r)
     setSelected(-1)
     setPreviewIndex(null)
+    setSplitVersion((v) => v + 1)
     setPhase('ready')
   }, [])
 
@@ -442,7 +440,10 @@ export default function StickerSplitModal() {
         </div>
       </div>
 
-      {/* 主区 */}
+      {/* 主区：动图工作台 / 切分视图 */}
+      {animateOpen && outputs.length > 0 ? (
+        <StickerAnimatePanel key={splitVersion} outputs={outputs} nameBase={nameBase} showToast={showToast} />
+      ) : (
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* 左：原图 + 检测框 / 单张大图预览 */}
         <div
@@ -527,9 +528,31 @@ export default function StickerSplitModal() {
           </div>
         </div>
       </div>
+      )}
 
       {/* 底栏 */}
       <div className="flex h-16 shrink-0 items-center gap-3 border-t border-gray-200/80 dark:border-white/[0.06] px-4">
+        <button
+          type="button"
+          disabled={!outputs.length}
+          onClick={() => {
+            setAnimateOpen((v) => !v)
+            setPreviewIndex(null)
+          }}
+          className={`flex items-center gap-2 whitespace-nowrap rounded-xl px-4 py-2.5 text-sm font-semibold transition active:scale-95 ${
+            outputs.length
+              ? animateOpen
+                ? 'border border-blue-200/80 bg-white/80 text-blue-600 hover:bg-blue-50 dark:border-blue-400/20 dark:bg-white/[0.04] dark:text-blue-300'
+                : 'bg-blue-500 text-white shadow-md hover:bg-blue-600 hover:shadow-blue-500/25'
+              : 'cursor-not-allowed bg-gray-100 text-gray-400 shadow-none dark:bg-white/10 dark:text-white/40'
+          }`}
+        >
+          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="m22 8-6 4 6 4V8Z" />
+            <rect x="2" y="6" width="14" height="12" rx="2" />
+          </svg>
+          {animateOpen ? '返回切图' : '做成动图'}
+        </button>
         <button
           type="button"
           disabled={!outputs.length || downloading}
@@ -621,7 +644,7 @@ function OutputThumb({
     if (!g) return
     drawChecker(g, canvas.width, canvas.height, 7, isDarkTheme())
     g.imageSmoothingQuality = 'high'
-    g.drawImage(makeOutputCanvas(output), 0, 0, canvas.width, canvas.height)
+    g.drawImage(outputToCanvas(output), 0, 0, canvas.width, canvas.height)
   }, [output])
 
   return (
@@ -691,7 +714,7 @@ function BigPreview({
       if (!g) return
       drawChecker(g, canvas.width, canvas.height, 12, isDarkTheme())
       g.imageSmoothingQuality = 'high'
-      g.drawImage(makeOutputCanvas(output), 0, 0, canvas.width, canvas.height)
+      g.drawImage(outputToCanvas(output), 0, 0, canvas.width, canvas.height)
     }
     draw()
     const ro = new ResizeObserver(draw)

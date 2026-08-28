@@ -28,6 +28,7 @@
     "@fal-ai/client": "^1.10.0",
     "@streamdown/math": "^1.0.2",
     "fflate": "^0.8.3",
+    "gifenc": "^1.0.3",
     "katex": "^0.16.47",
     "lucide-react": "^1.17.0",
     "react": "^19.1.0",
