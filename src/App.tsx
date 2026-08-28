@@ -28,6 +28,7 @@ const Lightbox = lazy(() => import('./components/Lightbox'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
 const ConfirmDialog = lazy(() => import('./components/ConfirmDialog'))
 const MaskEditorModal = lazy(() => import('./components/MaskEditorModal'))
+const StickerSplitModal = lazy(() => import('./components/StickerSplitModal'))
 const SupportPromptModal = lazy(() => import('./components/SupportPromptModal'))
 const FavoriteCollectionsView = lazy(() =>
   import('./components/FavoriteCollections').then((module) => ({ default: module.FavoriteCollectionsView })),
@@ -137,6 +138,7 @@ export default function App() {
   const confirmDialog = useStore((s) => s.confirmDialog)
   const supportPromptOpen = useStore((s) => s.supportPromptOpen)
   const maskEditorImageId = useStore((s) => s.maskEditorImageId)
+  const stickerSplitSource = useStore((s) => s.stickerSplitSource)
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
   const isMobile = useIsMobile()
@@ -332,7 +334,7 @@ export default function App() {
       {/* 模态层：移动/桌面两端共用，保持在 Suspense 里；崩溃只炸单个模态不炸整页。
           key 随活动模态变化：切换查看对象时重置错误态，不让上一个崩溃污染下一个。 */}
       <ErrorBoundary
-        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : 'none')}
+        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : 'none')}
         sectionLabel="弹窗"
       >
         <Suspense fallback={null}>
@@ -342,6 +344,7 @@ export default function App() {
           {confirmDialog ? <ConfirmDialog /> : null}
           {supportPromptOpen ? <SupportPromptModal /> : null}
           {maskEditorImageId ? <MaskEditorModal /> : null}
+          {stickerSplitSource ? <StickerSplitModal /> : null}
           {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}
           {isManageCollectionsModalOpen ? <ManageCollectionsModal /> : null}
         </Suspense>

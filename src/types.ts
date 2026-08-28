@@ -256,6 +256,12 @@ export interface MaskDraft {
   updatedAt: number
 }
 
+/** 贴纸切图入口：生成图（imageId）或任意图片地址（右键场景可能只有 src）。 */
+export interface StickerSplitSource {
+  imageId?: string
+  url?: string
+}
+
 export interface AgentInputDraft {
   prompt: string
   inputImages: InputImage[]

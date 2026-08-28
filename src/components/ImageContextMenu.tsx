@@ -13,6 +13,7 @@ export default function ImageContextMenu() {
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
   const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
+  const setStickerSplitSource = useStore((s) => s.setStickerSplitSource)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -169,6 +170,12 @@ export default function ImageContextMenu() {
     }
   }
 
+  const handleStickerSplit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setMenuInfo(null)
+    setStickerSplitSource({ imageId: menuInfo.imageId, url: menuInfo.src })
+  }
+
   const handleEdit = async (e: React.MouseEvent) => {
     e.stopPropagation()
     setMenuInfo(null)
@@ -195,7 +202,7 @@ export default function ImageContextMenu() {
   let top = menuInfo.y
   const MENU_WIDTH = 120
   const showDownloadAll = menuInfo.outputImageIds.length > 1
-  const menuItemCount = (menuInfo.canCopyImage ? 1 : 0) + 1 + (showDownloadAll ? 1 : 0) + 1
+  const menuItemCount = (menuInfo.canCopyImage ? 1 : 0) + 1 + (showDownloadAll ? 1 : 0) + 1 + 1
   const MENU_HEIGHT = menuItemCount * 32 + 32
 
   if (left + MENU_WIDTH > window.innerWidth) {
@@ -237,6 +244,19 @@ export default function ImageContextMenu() {
           下载全部
         </button>
       )}
+      <button
+        onClick={handleStickerSplit}
+        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+      >
+        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="6" cy="6" r="3" />
+          <path d="M8.12 8.12 12 12" />
+          <path d="M20 4 8.12 15.88" />
+          <circle cx="6" cy="18" r="3" />
+          <path d="M14.8 14.8 20 20" />
+        </svg>
+        拆分贴纸
+      </button>
       <button
         onClick={handleEdit}
         className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"

@@ -12,6 +12,7 @@ import type {
   TaskParams,
   InputImage,
   MaskDraft,
+  StickerSplitSource,
   TaskRecord,
   FavoriteCollection,
   PromptHistoryEntry,
@@ -419,6 +420,8 @@ interface AppState {
   clearMaskDraft: () => void
   maskEditorImageId: string | null
   setMaskEditorImageId: (id: string | null) => void
+  stickerSplitSource: StickerSplitSource | null
+  setStickerSplitSource: (src: StickerSplitSource | null) => void
   galleryInputDraft: AgentInputDraft | null
 
   // 参数
@@ -918,6 +921,11 @@ export const useStore = create<AppState>()(
       setMaskEditorImageId: (maskEditorImageId) => {
         if (maskEditorImageId) dismissAllTooltips()
         set((s) => syncActiveInputDraft(s, { maskEditorImageId }))
+      },
+      stickerSplitSource: null,
+      setStickerSplitSource: (stickerSplitSource) => {
+        if (stickerSplitSource) dismissAllTooltips()
+        set({ stickerSplitSource })
       },
       galleryInputDraft: null,
 

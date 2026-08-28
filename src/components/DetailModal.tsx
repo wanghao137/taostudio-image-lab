@@ -77,6 +77,8 @@ export default function DetailModal() {
   const downloadOriginalImageTooltip = useTooltip()
   const downloadSourceImageTooltip = useTooltip()
   const downloadAllTooltip = useTooltip()
+  const stickerSplitTooltip = useTooltip()
+  const setStickerSplitSource = useStore((s) => s.setStickerSplitSource)
 
   // 移动端：全屏 sheet + 下滑关闭（仅 <640px 生效，桌面完全不变）
   const isMobile = useIsMobile()
@@ -514,6 +516,13 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
+  const handleStickerSplit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!currentOutputImageId) return
+    setStickerSplitSource({ imageId: currentOutputImageId })
+    setDetailTaskId(null)
+  }
+
   return (
     <div
       data-no-drag-select
@@ -586,6 +595,31 @@ export default function DetailModal() {
                   </button>
                   <ViewportTooltip visible={downloadAllTooltip.visible} className="whitespace-nowrap">
                     下载全部
+                  </ViewportTooltip>
+                </div>
+              )}
+              {currentOutputImageId && (
+                <div className="relative group flex">
+                  <button
+                    type="button"
+                    {...stickerSplitTooltip.handlers}
+                    onClick={(e) => {
+                      stickerSplitTooltip.handlers.onClick()
+                      handleStickerSplit(e)
+                    }}
+                    className="flex items-center justify-center px-1.5 py-0.5 bg-black/50 text-white rounded backdrop-blur-sm hover:bg-black/70 transition focus:outline-none focus:ring-1 focus:ring-white/50"
+                    aria-label="拆分贴纸"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="6" cy="6" r="3" />
+                      <path d="M8.12 8.12 12 12" />
+                      <path d="M20 4 8.12 15.88" />
+                      <circle cx="6" cy="18" r="3" />
+                      <path d="M14.8 14.8 20 20" />
+                    </svg>
+                  </button>
+                  <ViewportTooltip visible={stickerSplitTooltip.visible} className="whitespace-nowrap">
+                    拆分贴纸
                   </ViewportTooltip>
                 </div>
               )}
