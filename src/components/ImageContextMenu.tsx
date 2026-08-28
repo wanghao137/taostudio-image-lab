@@ -4,10 +4,11 @@ import { canCopyImageToClipboard, copyImageSourceToClipboard, getClipboardFailur
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getImageZipEntries } from '../lib/downloadImages'
 import { suppressGlobalClicks } from '../lib/clickSuppression'
 import { ensureImageCached } from '../lib/imageCache'
+import { isTransparentImageCached } from '../lib/stickerSplit/transparency'
 import { CopyIcon, DownloadIcon, EditIcon } from './icons'
 
 export default function ImageContextMenu() {
-  const [menuInfo, setMenuInfo] = useState<{ src: string; imageId?: string; outputImageIds: string[]; canCopyImage: boolean; x: number; y: number } | null>(null)
+  const [menuInfo, setMenuInfo] = useState<{ src: string; imageId?: string; outputImageIds: string[]; canCopyImage: boolean; canStickerSplit: boolean; x: number; y: number } | null>(null)
   const showToast = useStore((s) => s.showToast)
   const inputImages = useStore((s) => s.inputImages)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
@@ -41,6 +42,7 @@ export default function ImageContextMenu() {
           imageId: imgTarget.dataset.imageId,
           outputImageIds: imgTarget.dataset.outputImageIds?.split(',').filter(Boolean) ?? [],
           canCopyImage,
+          canStickerSplit: false,
           x: e.clientX,
           y: e.clientY,
         })
@@ -53,6 +55,21 @@ export default function ImageContextMenu() {
       window.removeEventListener('contextmenu', onContextMenu)
     }
   }, [])
+
+  // 「拆分贴纸」门控：异步检测右键目标是否为透明类型图，结果回来后补充进菜单
+  const menuSrc = menuInfo?.src
+  const menuImageId = menuInfo?.imageId
+  useEffect(() => {
+    if (!menuSrc) return
+    let stale = false
+    isTransparentImageCached(menuImageId ?? menuSrc, menuSrc).then((transparent) => {
+      if (stale) return
+      setMenuInfo((prev) => (prev && prev.src === menuSrc ? { ...prev, canStickerSplit: transparent } : prev))
+    })
+    return () => {
+      stale = true
+    }
+  }, [menuSrc, menuImageId])
 
   // 点击其他地方、滚动或缩放时关闭菜单
   useEffect(() => {
@@ -202,7 +219,7 @@ export default function ImageContextMenu() {
   let top = menuInfo.y
   const MENU_WIDTH = 120
   const showDownloadAll = menuInfo.outputImageIds.length > 1
-  const menuItemCount = (menuInfo.canCopyImage ? 1 : 0) + 1 + (showDownloadAll ? 1 : 0) + 1 + 1
+  const menuItemCount = (menuInfo.canCopyImage ? 1 : 0) + 1 + (showDownloadAll ? 1 : 0) + (menuInfo.canStickerSplit ? 1 : 0) + 1
   const MENU_HEIGHT = menuItemCount * 32 + 32
 
   if (left + MENU_WIDTH > window.innerWidth) {
@@ -244,19 +261,21 @@ export default function ImageContextMenu() {
           下载全部
         </button>
       )}
-      <button
-        onClick={handleStickerSplit}
-        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
-      >
-        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="6" cy="6" r="3" />
-          <path d="M8.12 8.12 12 12" />
-          <path d="M20 4 8.12 15.88" />
-          <circle cx="6" cy="18" r="3" />
-          <path d="M14.8 14.8 20 20" />
-        </svg>
-        拆分贴纸
-      </button>
+      {menuInfo.canStickerSplit && (
+        <button
+          onClick={handleStickerSplit}
+          className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+        >
+          <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="6" cy="6" r="3" />
+            <path d="M8.12 8.12 12 12" />
+            <path d="M20 4 8.12 15.88" />
+            <circle cx="6" cy="18" r="3" />
+            <path d="M14.8 14.8 20 20" />
+          </svg>
+          拆分贴纸
+        </button>
+      )}
       <button
         onClick={handleEdit}
         className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"

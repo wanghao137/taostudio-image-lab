@@ -12,6 +12,7 @@ import { copyImageSourceToClipboard, copyTextToClipboard, getClipboardFailureMes
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from '../lib/downloadImages'
+import { isTransparentImageCached } from '../lib/stickerSplit/transparency'
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { replaceImageMentionsForApi } from '../lib/promptImageMentions'
 import { appendTargetAspectPromptHint } from '../lib/targetAspectPrompt'
@@ -79,6 +80,8 @@ export default function DetailModal() {
   const downloadAllTooltip = useTooltip()
   const stickerSplitTooltip = useTooltip()
   const setStickerSplitSource = useStore((s) => s.setStickerSplitSource)
+  // 「拆分贴纸」入口门控：仅透明类型的输出图展示（详情页预览就是原图，可直接采样）
+  const [splitEligible, setSplitEligible] = useState(false)
 
   // 移动端：全屏 sheet + 下滑关闭（仅 <640px 生效，桌面完全不变）
   const isMobile = useIsMobile()
@@ -236,6 +239,22 @@ export default function DetailModal() {
   const currentExactSizeSourceImageId = currentOutputImageIndex >= 0 ? task?.exactSizeOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentExactSizeTransform = currentOutputImageId ? task?.exactSizeTransforms?.[currentOutputImageId] : undefined
   const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
+
+  useEffect(() => {
+    const imageId = currentOutputImageId
+    const src = currentOutputPreviewSrc
+    if (!imageId || !src) {
+      setSplitEligible(false)
+      return
+    }
+    let cancelled = false
+    isTransparentImageCached(imageId, src).then((transparent) => {
+      if (!cancelled) setSplitEligible(transparent)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [currentOutputImageId, currentOutputPreviewSrc])
 
   useEffect(() => {
     const outputImageIds = task?.outputImages ?? []
@@ -598,7 +617,7 @@ export default function DetailModal() {
                   </ViewportTooltip>
                 </div>
               )}
-              {currentOutputImageId && (
+              {currentOutputImageId && splitEligible && (
                 <div className="relative group flex">
                   <button
                     type="button"
