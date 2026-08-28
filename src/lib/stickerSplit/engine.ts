@@ -57,6 +57,23 @@ export function rerunSquare(
   return { ...toMeta(analyzeResult), squareAuto, square, outputs }
 }
 
+/**
+ * 单主体守卫：取面积最大的连通域并按其紧框提取。
+ * AI 编辑帧偶发"多角色/多格拼贴"污染（把姿势指令理解成序列表），
+ * 用分水岭确定性兜底：只保留最大主体，丢弃其余。
+ */
+export function extractLargestComponent(imageData: SplitImageData): SplitImageData | null {
+  const core = getStickerSplitCore()
+  const result = core.analyze(imageData as ImageData, { group: 'none', minSize: 400 })
+  if (!result.boxes.length) return null
+  let best = 0
+  for (let i = 1; i < result.boxes.length; i++) {
+    if (result.boxes[i].area > result.boxes[best].area) best = i
+  }
+  const extracted = core.extract(imageData as ImageData, result, best)
+  return { width: extracted.w, height: extracted.h, data: extracted.data }
+}
+
 function toMeta(analyzeResult: StickerSplitAnalyzeResult): SplitRunMeta {
   return {
     source: analyzeResult.source,

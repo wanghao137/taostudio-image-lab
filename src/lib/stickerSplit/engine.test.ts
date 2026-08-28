@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { rerunSquare, runSplitFull, type SplitImageData } from './engine'
+import { extractLargestComponent, rerunSquare, runSplitFull, type SplitImageData } from './engine'
 import { buildSplitOptions, DEFAULT_STICKER_SPLIT_PARAMS, type StickerSplitParams } from './splitService'
 
 interface Rect {
@@ -269,5 +269,36 @@ describe('buildSplitOptions 参数映射', () => {
     expect(opts.gap).toBe(40)
     expect(opts.minSize).toBe(800)
     expect(opts.padding).toBe(12)
+  })
+})
+
+describe('extractLargestComponent 单主体守卫', () => {
+  it('多主体帧只保留面积最大的连通域', () => {
+    const image = makeTransparentGrid(600, 300, [
+      { x: 20, y: 20, w: 160, h: 160 },   // 次要主体
+      { x: 320, y: 40, w: 220, h: 220 },  // 主主体
+    ])
+    const largest = extractLargestComponent(image)
+    expect(largest).not.toBeNull()
+    // 220×220 的紧框（±2px 保护边）
+    expect(largest!.width).toBeGreaterThanOrEqual(218)
+    expect(largest!.width).toBeLessThanOrEqual(226)
+    expect(largest!.height).toBeGreaterThanOrEqual(218)
+    // 只含主主体：左上角与右下角应为透明
+    const d = largest!.data
+    expect(d[3]).toBe(0)
+    expect(d[(largest!.height - 1) * largest!.width * 4 + 3]).toBe(0)
+  })
+
+  it('单主体帧原样返回紧框', () => {
+    const image = makeTransparentGrid(400, 400, [{ x: 60, y: 60, w: 200, h: 200 }])
+    const largest = extractLargestComponent(image)
+    expect(largest).not.toBeNull()
+    expect(Math.abs(largest!.width - 200)).toBeLessThanOrEqual(6)
+  })
+
+  it('空图返回 null', () => {
+    const image = makeTransparentGrid(100, 100, [])
+    expect(extractLargestComponent(image)).toBeNull()
   })
 })

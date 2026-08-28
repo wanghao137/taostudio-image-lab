@@ -1,38 +1,63 @@
 import { describe, expect, it } from 'vitest'
-import { ANIM_FRAME_MS, buildTimeline, motionAt, timelineTotalMs, type SequenceConfig } from './animate'
+import { ANIM_FRAME_MS, buildTimeline, performanceAt, timelineTotalMs, type MotionPreset, type SequenceConfig } from './animate'
 
 function config(patch: Partial<SequenceConfig> = {}): SequenceConfig {
   return { poses: [1, 2, 3], pingPong: true, crossfade: false, poseMs: 160, motionPreset: 'bounce', ...patch }
 }
 
-describe('motionAt 刚体预设', () => {
-  it('none 恒为恒等变换', () => {
+describe('performanceAt 演出预设', () => {
+  it('none 恒为恒等变换（含 bend 与 fx 为空）', () => {
     for (const t of [0, 0.25, 0.5, 0.9]) {
-      expect(motionAt('none', t)).toEqual({ dx: 0, dy: 0, rotate: 0, scaleX: 1, scaleY: 1 })
+      const s = performanceAt('none', t)
+      expect(s).toMatchObject({ dx: 0, dy: 0, rotate: 0, scaleX: 1, scaleY: 1, bend: 0 })
+      expect(s.fx).toEqual({})
     }
   })
 
-  it('bounce 落地压扁、腾空上移', () => {
-    const land = motionAt('bounce', 0)
-    expect(land.dy).toBeCloseTo(0)
-    expect(land.scaleY).toBeLessThan(1)
-    expect(land.scaleX).toBeGreaterThan(1)
-    const air = motionAt('bounce', 0.25)
-    expect(air.dy).toBeLessThan(0)
-    expect(air.scaleY).toBeCloseTo(1, 5)
+  it('全部预设首尾帧无缝循环（t=0 与 t→1 的变换严格接近）', () => {
+    for (const preset of ['bounce', 'jelly', 'sway', 'heartbeat', 'float', 'shake'] as MotionPreset[]) {
+      const head = performanceAt(preset, 0)
+      const tail = performanceAt(preset, 0.999999)
+      for (const key of ['dx', 'dy', 'rotate', 'scaleX', 'scaleY', 'bend'] as const) {
+        expect(Math.abs(head[key] - tail[key]), `${preset}.${key}`).toBeLessThan(0.02)
+      }
+    }
   })
 
-  it('heartbeat 在脉搏点放大、周期首尾回 1', () => {
-    expect(motionAt('heartbeat', 0.12).scaleX).toBeGreaterThan(1.03)
-    expect(motionAt('heartbeat', 0.9).scaleX).toBeCloseTo(1, 3)
+  it('bounce 腾空上移且带落地影子', () => {
+    const air = performanceAt('bounce', 0.22)
+    expect(air.dy).toBeLessThan(-0.03)
+    expect(air.fx.shadow).toBeTruthy()
+    const grounded = performanceAt('bounce', 0.6)
+    expect(grounded.fx.shadow!.scale).toBeGreaterThan(air.fx.shadow!.scale)
   })
 
-  it('sway/float/shake 位移有界不出画', () => {
-    for (const preset of ['sway', 'float', 'shake'] as const) {
-      for (const t of [0, 0.2, 0.5, 0.8]) {
-        const m = motionAt(preset, t)
-        expect(Math.abs(m.dx)).toBeLessThan(0.05)
-        expect(Math.abs(m.dy)).toBeLessThan(0.05)
+  it('jelly 带弯折形变（非刚体）', () => {
+    let bent = false
+    for (let i = 0; i < 12; i++) {
+      if (Math.abs(performanceAt('jelly', i / 12).bend) > 0.01) bent = true
+    }
+    expect(bent).toBe(true)
+  })
+
+  it('shake 怒抖带怒气青筋，heartbeat 心跳带星星与微闪', () => {
+    expect(performanceAt('shake', 0.3).fx.anger).toBeGreaterThan(0.2)
+    const beat = performanceAt('heartbeat', 0.3)
+    expect(beat.fx.stars?.length).toBeGreaterThanOrEqual(2)
+    expect(beat.fx.flash).toBeGreaterThan(0)
+  })
+
+  it('所有预设位移/形变有界不出画', () => {
+    for (const preset of ['bounce', 'jelly', 'sway', 'heartbeat', 'float', 'shake'] as MotionPreset[]) {
+      for (let i = 0; i < 16; i++) {
+        const s = performanceAt(preset, i / 16)
+        expect(Math.abs(s.dx)).toBeLessThan(0.06)
+        expect(Math.abs(s.dy)).toBeLessThan(0.14)
+        expect(Math.abs(s.bend)).toBeLessThan(0.12)
+        expect(s.scaleX).toBeGreaterThan(0.7)
+        expect(s.scaleX).toBeLessThan(1.3)
+        expect(s.scaleY).toBeGreaterThan(0.7)
+        expect(s.scaleY).toBeLessThan(1.3)
       }
     }
   })

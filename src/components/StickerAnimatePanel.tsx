@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { zipSync } from 'fflate'
+import { useStore } from '../store'
 import type { SplitOutput } from '../lib/stickerSplit/engine'
 import {
   MOTION_PRESETS,
@@ -12,8 +13,9 @@ import {
 } from '../lib/stickerSplit/animate'
 import { encodeApngFromCanvases } from '../lib/stickerSplit/apng'
 import { encodeGif } from '../lib/stickerSplit/gifEncode'
+import { ACTION_TEMPLATES, generateActionFrame, dataUrlToCanvas, getActionTemplate, normalizeCanvasToActionFrame } from '../lib/stickerSplit/actionFrames'
 
-type AnimateMode = 'sequence' | 'single'
+type AnimateMode = 'sequence' | 'single' | 'action'
 type ExportSize = 512 | 240
 
 interface StickerAnimatePanelProps {
@@ -68,6 +70,10 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
   const [pingPong, setPingPong] = useState(true)
   const [exportSize, setExportSize] = useState<ExportSize>(512)
   const [busy, setBusy] = useState<'gif' | 'apng' | 'batch' | null>(null)
+  // AI 动作帧：动作模板 + 已生成帧（第 1 帧固定为所选贴纸原图）
+  const [actionTemplateId, setActionTemplateId] = useState(ACTION_TEMPLATES[0].id)
+  const [aiFrameCanvases, setAiFrameCanvases] = useState<HTMLCanvasElement[]>([])
+  const [genState, setGenState] = useState<{ running: boolean; done: number; total: number; error?: string }>({ running: false, done: 0, total: 0 })
 
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -81,14 +87,43 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
     return selected.length >= 2 ? selected : outputs.length ? [outputs[0].index] : []
   }, [outputs, selectedPoses])
 
+  // AI 动作帧源：原图帧（与生成帧同一归一化管线，统一边长消除帧间尺度泵动）+ 生成帧（index 从 1 起）
+  const aiSources = useMemo<ComposeSource[]>(() => {
+    const original = sources.find((s) => s.index === singleIndex)
+    if (!original) return []
+    try {
+      const normalized = normalizeCanvasToActionFrame(original.canvas)
+      return [{ index: 1, canvas: normalized }, ...aiFrameCanvases.map((canvas, i) => ({ index: i + 2, canvas }))]
+    } catch {
+      return []
+    }
+  }, [sources, singleIndex, aiFrameCanvases])
+
+  // AI 动作帧模式下切换角色时，清空上一个角色生成的帧，避免新旧混切
+  useEffect(() => {
+    setAiFrameCanvases([])
+    setGenState({ running: false, done: 0, total: 0 })
+  }, [singleIndex])
+
+  // 当前模式的帧序列与帧源（导出/预览统一路由）
+  const currentPoses = mode === 'action'
+    ? aiSources.map((s) => s.index)
+    : mode === 'sequence'
+      ? sequencePoses
+      : [singleIndex]
+  const currentSources = mode === 'action' ? aiSources : sources
+  const currentCrossfade = mode === 'action' ? false : crossfade
+
+  // AI 动作帧模式纯内容帧播放（不加刚体叠加），对齐 motion-sticker-pack 案例节奏
+  const effectivePreset: MotionPreset = mode === "action" ? "none" : preset
   const timeline = useMemo(
-    () => buildTimeline({ poses: mode === 'sequence' ? sequencePoses : [singleIndex], pingPong, crossfade, poseMs, motionPreset: preset }),
-    [mode, sequencePoses, singleIndex, pingPong, crossfade, poseMs, preset],
+    () => buildTimeline({ poses: currentPoses, pingPong, crossfade: currentCrossfade, poseMs, motionPreset: effectivePreset }),
+    [currentPoses, pingPong, currentCrossfade, poseMs, effectivePreset],
   )
 
   const activeSources = useMemo(
-    () => sources.filter((s) => (mode === 'sequence' ? sequencePoses.includes(s.index) : s.index === singleIndex)),
-    [mode, sequencePoses, singleIndex, sources],
+    () => currentSources.filter((s) => currentPoses.includes(s.index)),
+    [currentSources, currentPoses],
   )
   const uniformMaxDim = useMemo(
     () => Math.max(1, ...activeSources.map((s) => Math.max(s.canvas.width, s.canvas.height))),
@@ -118,23 +153,23 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
           break
         }
       }
-      renderer.render(step, preset)
+      renderer.render(step, effectivePreset)
       drawChecker(pctx, preview.width, preview.height, 16, isDarkTheme())
       pctx.drawImage(renderer.canvas, 0, 0)
       raf = requestAnimationFrame(draw)
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
-  }, [activeSources, uniformMaxDim, timeline, preset])
+  }, [activeSources, uniformMaxDim, timeline, effectivePreset])
 
   const collectGifFrames = (size: number, poses: number[], useCrossfade: boolean, forBatch: boolean) => {
     const frames: Array<{ data: Uint8ClampedArray; width: number; height: number; delayMs: number }> = []
-    const tl = buildTimeline({ poses, pingPong, crossfade: forBatch ? false : useCrossfade, poseMs, motionPreset: preset })
-    const srcs = sources.filter((s) => poses.includes(s.index))
+    const tl = buildTimeline({ poses, pingPong, crossfade: forBatch ? false : useCrossfade, poseMs, motionPreset: effectivePreset })
+    const srcs = (forBatch ? sources : currentSources).filter((s) => poses.includes(s.index))
     const maxDim = Math.max(1, ...srcs.map((s) => Math.max(s.canvas.width, s.canvas.height)))
     const renderer = new TimelineRenderer(srcs, maxDim, size)
     for (const step of tl) {
-      renderer.render(step, preset)
+      renderer.render(step, effectivePreset)
       const ctx = renderer.canvas.getContext('2d')
       if (!ctx) continue
       frames.push({ data: ctx.getImageData(0, 0, size, size).data, width: size, height: size, delayMs: step.delayMs })
@@ -142,11 +177,42 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
     return frames
   }
 
+  /** AI 动作帧生成：逐相位调当前生成通道（图生图编辑），边生成边预览。 */
+  const generateFrames = async () => {
+    if (genState.running || busy) return
+    const template = getActionTemplate(actionTemplateId)
+    if (!template) return
+    const sticker = outputs.find((o) => o.index === singleIndex)
+    if (!sticker) return
+    const stickerDataUrl = outputToCanvas(sticker).toDataURL('image/png')
+    const { settings, params } = useStore.getState()
+
+    setAiFrameCanvases([])
+    setGenState({ running: true, done: 0, total: template.phases.length, error: undefined })
+    const urls: string[] = []
+    for (let i = 0; i < template.phases.length; i++) {
+      try {
+        const url = await generateActionFrame(settings, params, stickerDataUrl, template.phases[i])
+        const canvas = await dataUrlToCanvas(url)
+        urls.push(url)
+        setAiFrameCanvases((prev) => [...prev, canvas])
+        setGenState((s) => ({ ...s, done: i + 1 }))
+      } catch (err) {
+        console.error(err)
+        setGenState((s) => ({ ...s, running: false, error: err instanceof Error ? err.message : String(err) }))
+        showToast(`第 ${i + 1} 帧生成失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+        return
+      }
+    }
+    setGenState({ running: false, done: template.phases.length, total: template.phases.length })
+    showToast(`动作帧生成完成（${urls.length} 帧）`, 'success')
+  }
+
   const exportGif = async () => {
     if (busy || !activeSources.length) return
     setBusy('gif')
     try {
-      const blob = encodeGif(collectGifFrames(exportSize, mode === 'sequence' ? sequencePoses : [singleIndex], crossfade, false))
+      const blob = encodeGif(collectGifFrames(exportSize, currentPoses, currentCrossfade, false))
       triggerDownload(blob, `${nameBase}-anim.gif`)
       showToast(`GIF 已导出（${formatKb(blob.size)}）`, 'success')
     } catch (err) {
@@ -161,14 +227,14 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
     if (busy || !activeSources.length) return
     setBusy('apng')
     try {
-      const poses = mode === 'sequence' ? sequencePoses : [singleIndex]
-      const tl = buildTimeline({ poses, pingPong, crossfade, poseMs, motionPreset: preset })
-      const srcs = sources.filter((s) => poses.includes(s.index))
+      const poses = currentPoses
+      const tl = buildTimeline({ poses, pingPong, crossfade: currentCrossfade, poseMs, motionPreset: effectivePreset })
+      const srcs = currentSources.filter((s) => poses.includes(s.index))
       const maxDim = Math.max(1, ...srcs.map((s) => Math.max(s.canvas.width, s.canvas.height)))
       const renderer = new TimelineRenderer(srcs, maxDim, exportSize)
       const frames: Array<{ canvas: HTMLCanvasElement; delayMs: number }> = []
       for (const step of tl) {
-        renderer.render(step, preset)
+        renderer.render(step, effectivePreset)
         // 每帧克隆快照，避免复用同一画布导致内容被下一帧覆盖
         const snapshot = document.createElement('canvas')
         snapshot.width = exportSize
@@ -238,18 +304,43 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
             <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
               <button type="button" className={`w-16 ${segBtn(mode === 'sequence')}`} onClick={() => setMode('sequence')}>姿势轮播</button>
               <button type="button" className={`w-16 ${segBtn(mode === 'single')}`} onClick={() => setMode('single')}>单张动效</button>
+              <button type="button" className={`w-16 ${segBtn(mode === 'action')}`} onClick={() => setMode('action')}>AI 动作</button>
             </div>
-            <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-              {MOTION_PRESETS.map((p) => (
-                <button key={p.value} type="button" className={segBtn(preset === p.value)} onClick={() => setPreset(p.value)}>
-                  {p.label}
+            {mode === 'action' ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
+                  {ACTION_TEMPLATES.map((t) => (
+                    <button key={t.id} type="button" className={segBtn(actionTemplateId === t.id)} onClick={() => setActionTemplateId(t.id)}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  disabled={genState.running || busy !== null}
+                  onClick={() => void generateFrames()}
+                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl bg-blue-500 px-4 py-2 text-xs font-semibold text-white shadow-md transition hover:bg-blue-600 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {genState.running ? `生成中 ${genState.done}/${genState.total}…` : aiFrameCanvases.length ? '重新生成' : '生成动作帧'}
                 </button>
-              ))}
-            </div>
+                {genState.running && (
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500 dark:border-white/20 dark:border-t-blue-400" />
+                )}
+                {genState.error && <span className="text-xs text-red-500">{genState.error}</span>}
+              </div>
+            ) : (
+              <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
+                {MOTION_PRESETS.map((p) => (
+                  <button key={p.value} type="button" className={segBtn(preset === p.value)} onClick={() => setPreset(p.value)}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-gray-500 dark:text-gray-400">
-            {mode === 'sequence' && (
+            {mode !== 'single' && (
             <label className="flex items-center gap-2">
               <span>帧时长</span>
               <input
@@ -264,10 +355,12 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
               <span className="font-mono">{poseMs}ms</span>
             </label>
             )}
+            {mode !== 'action' && (
             <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
               <button type="button" className={`w-14 ${segBtn(!crossfade)}`} onClick={() => setCrossfade(false)}>硬切</button>
               <button type="button" className={`w-14 ${segBtn(crossfade)}`} onClick={() => setCrossfade(true)}>溶解</button>
             </div>
+            )}
             <button
               type="button"
               onClick={() => setPingPong((v) => !v)}
@@ -305,6 +398,7 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
             >
               导出 APNG
             </button>
+            {mode !== 'action' && (
             <button
               type="button"
               disabled={busy !== null || outputs.length < 2}
@@ -313,12 +407,13 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
             >
               批量 GIF×{outputs.length}
             </button>
+            )}
             <span className="ml-auto font-mono text-[11px] text-gray-400 dark:text-gray-500">
               {frameCount} 帧 · {(totalMs / 1000).toFixed(1)}s · {mode === 'sequence' ? `${sequencePoses.length} 个姿势` : `#${String(singleIndex).padStart(2, '0')}`}
             </span>
           </div>
           <p className="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
-            GIF 适配微信（1-bit 透明，光晕按阈值二值化）；APNG 保留完整半透明。点击右侧缩略图{mode === 'sequence' ? '增删轮播姿势（至少 2 个）' : '选择动效主体'}。
+            GIF 适配微信（1-bit 透明，光晕按阈值二值化）；APNG 保留完整半透明。{mode === 'sequence' ? '点击右侧缩略图增删轮播姿势（至少 2 个）。' : mode === 'action' ? '选好角色和动作后点「生成动作帧」，用当前生成通道逐帧补画连续动作（每帧约 1~2 分钟）。' : '点击右侧缩略图选择动效主体。'}
           </p>
         </div>
       </div>
@@ -326,9 +421,39 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
       {/* 右：帧选择 */}
       <div className="flex min-h-0 flex-1 flex-col border-t border-gray-200/80 dark:border-white/[0.06] md:w-64 md:flex-none md:border-l md:border-t-0">
         <div className="shrink-0 px-4 pt-3 pb-2 text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500">
-          {mode === 'sequence' ? '轮播姿势' : '动效主体'}
+          {mode === 'sequence' ? '轮播姿势' : mode === 'action' ? '角色与动作帧' : '动效主体'}
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-3">
+          {mode === 'action' && aiSources.length > 1 && (
+            <div className="mb-2">
+              <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500">动作帧序列</div>
+              <div className="grid grid-cols-3 gap-2">
+                {aiSources.map((s, i) => (
+                  <div key={`frame-${i}`} className="relative overflow-hidden rounded-lg border border-blue-300/60 dark:border-blue-400/30">
+                    <div className="flex h-[60px] items-center justify-center">
+                      <AiFrameThumb canvas={s.canvas} />
+                    </div>
+                    <span className="absolute left-1 top-1 rounded bg-blue-500/90 px-1 font-mono text-[10px] font-bold text-white">
+                      {String(i + 1).padStart(2, '0')}
+                    </span>
+                    {i === 0 && (
+                      <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1 text-[9px] text-white">原图</span>
+                    )}
+                  </div>
+                ))}
+                {genState.running && (
+                  <div className="flex h-[60px] items-center justify-center rounded-lg border border-dashed border-gray-300 dark:border-white/10">
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500 dark:border-white/20 dark:border-t-blue-400" />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {mode !== 'action' && (
+          <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500">
+            {mode === 'sequence' ? '拼图姿势' : '角色'}
+          </div>
+          )}
           <div className="grid grid-cols-3 gap-2">
             {outputs.map((o) => {
               const active = mode === 'sequence' ? selectedPoses.has(o.index) : o.index === singleIndex
@@ -399,4 +524,25 @@ function FrameThumb({ output }: { output: SplitOutput }) {
       <canvas ref={canvasRef} className="block max-h-full max-w-full" />
     </div>
   )
+}
+
+/** AI 动作帧缩略图（已是方形 canvas）。 */
+function AiFrameThumb({ canvas: source }: { canvas: HTMLCanvasElement }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const side = 60
+    const k = Math.min(side / source.width, side / source.height)
+    canvas.width = Math.max(1, Math.round(source.width * k))
+    canvas.height = Math.max(1, Math.round(source.height * k))
+    const g = canvas.getContext('2d')
+    if (!g) return
+    drawChecker(g, canvas.width, canvas.height, 5, isDarkTheme())
+    g.imageSmoothingQuality = 'high'
+    g.drawImage(source, 0, 0, canvas.width, canvas.height)
+  }, [source])
+
+  return <canvas ref={canvasRef} className="block max-h-full max-w-full" />
 }
