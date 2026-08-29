@@ -262,6 +262,10 @@ export interface StickerSplitSource {
   url?: string
 }
 
+export interface PromptReverseSource {
+  imageId: string
+}
+
 export interface AgentInputDraft {
   prompt: string
   inputImages: InputImage[]

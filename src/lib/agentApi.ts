@@ -100,7 +100,7 @@ const AGENT_TITLE_INSTRUCTIONS = [
 
 const AGENT_TITLE_MAX_LENGTH = 28
 
-function createHeaders(profile: ApiProfile): Record<string, string> {
+export function createHeaders(profile: ApiProfile): Record<string, string> {
   return {
     Authorization: `Bearer ${profile.apiKey}`,
     'Content-Type': 'application/json',
@@ -337,7 +337,7 @@ function getImageToolFailureFromOutputItem(event: Record<string, unknown>, item?
   }
 }
 
-function extractText(payload: ResponsesApiResponse) {
+export function extractText(payload: ResponsesApiResponse) {
   const chunks: string[] = []
 
   for (const item of payload.output ?? []) {
@@ -411,7 +411,7 @@ function extractImageFromOutputItem(item: ResponsesOutputItem, fallbackMime: str
   }
 }
 
-function normalizeResponsePayload(value: unknown): ResponsesApiResponse | null {
+export function normalizeResponsePayload(value: unknown): ResponsesApiResponse | null {
   if (!isRecordValue(value)) return null
   return {
     ...value,

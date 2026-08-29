@@ -13,6 +13,7 @@ import {
   getApiProviderLabel,
   getActiveApiProfile,
   getDefaultOpenAIModel,
+  getPromptReverseApiProfile,
   isManagedDefaultOpenAIModel,
   getCustomProviderDefinition,
   findEquivalentApiProfile,
@@ -1773,5 +1774,38 @@ describe('custom providers', () => {
     expect(backToOpenai.apiKey).toBe('sk-openai-key')
     const backToCustom = switchApiProfileProvider(backToOpenai, provider.id, provider)
     expect(backToCustom.apiKey).toBe('custom-key-yyy')
+  })
+})
+
+describe('getPromptReverseApiProfile', () => {
+  const responsesProfile = createDefaultOpenAIProfile({ id: 'resp-profile', apiMode: 'responses' })
+  const imagesProfile = createDefaultOpenAIProfile({ id: 'img-profile', apiMode: 'images' })
+
+  it('agent 模式开启时优先返回 Agent 文本配置', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'img-profile',
+      agentApiConfigMode: 'native',
+      agentTextProfileId: 'resp-profile',
+    })
+    expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
+  })
+
+  it('agent 关闭时回退激活 profile（若为 responses 类型）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'resp-profile',
+      agentApiConfigMode: 'off',
+    })
+    expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
+  })
+
+  it('agent 关闭且激活 profile 是 images 类型时返回 null（UI 引导配置）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'img-profile',
+      agentApiConfigMode: 'off',
+    })
+    expect(getPromptReverseApiProfile(settings)).toBeNull()
   })
 })

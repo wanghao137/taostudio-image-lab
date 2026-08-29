@@ -13,6 +13,7 @@ import type {
   InputImage,
   MaskDraft,
   StickerSplitSource,
+  PromptReverseSource,
   TaskRecord,
   FavoriteCollection,
   PromptHistoryEntry,
@@ -422,6 +423,8 @@ interface AppState {
   setMaskEditorImageId: (id: string | null) => void
   stickerSplitSource: StickerSplitSource | null
   setStickerSplitSource: (src: StickerSplitSource | null) => void
+  promptReverseSource: PromptReverseSource | null
+  setPromptReverseSource: (src: PromptReverseSource | null) => void
   galleryInputDraft: AgentInputDraft | null
 
   // 参数
@@ -926,6 +929,11 @@ export const useStore = create<AppState>()(
       setStickerSplitSource: (stickerSplitSource) => {
         if (stickerSplitSource) dismissAllTooltips()
         set({ stickerSplitSource })
+      },
+      promptReverseSource: null,
+      setPromptReverseSource: (promptReverseSource) => {
+        if (promptReverseSource) dismissAllTooltips()
+        set({ promptReverseSource })
       },
       galleryInputDraft: null,
 
