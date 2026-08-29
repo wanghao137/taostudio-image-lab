@@ -15,6 +15,7 @@ export default function ImageContextMenu() {
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
   const setMaskEditorImageId = useStore((s) => s.setMaskEditorImageId)
   const setStickerSplitSource = useStore((s) => s.setStickerSplitSource)
+  const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -193,6 +194,13 @@ export default function ImageContextMenu() {
     setStickerSplitSource({ imageId: menuInfo.imageId, url: menuInfo.src })
   }
 
+  const handlePromptReverse = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setMenuInfo(null)
+    if (!menuInfo.imageId) return
+    setPromptReverseSource({ imageId: menuInfo.imageId })
+  }
+
   const handleEdit = async (e: React.MouseEvent) => {
     e.stopPropagation()
     setMenuInfo(null)
@@ -219,7 +227,7 @@ export default function ImageContextMenu() {
   let top = menuInfo.y
   const MENU_WIDTH = 120
   const showDownloadAll = menuInfo.outputImageIds.length > 1
-  const menuItemCount = (menuInfo.canCopyImage ? 1 : 0) + 1 + (showDownloadAll ? 1 : 0) + (menuInfo.canStickerSplit ? 1 : 0) + 1
+  const menuItemCount = (menuInfo.canCopyImage ? 1 : 0) + 1 + (showDownloadAll ? 1 : 0) + (menuInfo.canStickerSplit ? 1 : 0) + 1 + 1
   const MENU_HEIGHT = menuItemCount * 32 + 32
 
   if (left + MENU_WIDTH > window.innerWidth) {
@@ -276,6 +284,17 @@ export default function ImageContextMenu() {
           拆分贴纸
         </button>
       )}
+      <button
+        onClick={handlePromptReverse}
+        className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+      >
+        <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="11" cy="11" r="7" />
+          <path d="m21 21-4.35-4.35" />
+          <path d="M11 8v6M8 11h6" />
+        </svg>
+        反推提示词
+      </button>
       <button
         onClick={handleEdit}
         className="w-full px-4 py-2 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"

@@ -79,7 +79,9 @@ export default function DetailModal() {
   const downloadSourceImageTooltip = useTooltip()
   const downloadAllTooltip = useTooltip()
   const stickerSplitTooltip = useTooltip()
+  const promptReverseTooltip = useTooltip()
   const setStickerSplitSource = useStore((s) => s.setStickerSplitSource)
+  const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   // 「拆分贴纸」入口门控：仅透明类型的输出图展示（详情页预览就是原图，可直接采样）
   const [splitEligible, setSplitEligible] = useState(false)
 
@@ -542,6 +544,13 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
+  const handlePromptReverse = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!currentOutputImageId) return
+    setPromptReverseSource({ imageId: currentOutputImageId })
+    setDetailTaskId(null)
+  }
+
   return (
     <div
       data-no-drag-select
@@ -639,6 +648,29 @@ export default function DetailModal() {
                   </button>
                   <ViewportTooltip visible={stickerSplitTooltip.visible} className="whitespace-nowrap">
                     拆分贴纸
+                  </ViewportTooltip>
+                </div>
+              )}
+              {currentOutputImageId && (
+                <div className="relative group flex">
+                  <button
+                    type="button"
+                    {...promptReverseTooltip.handlers}
+                    onClick={(e) => {
+                      promptReverseTooltip.handlers.onClick()
+                      handlePromptReverse(e)
+                    }}
+                    className="flex items-center justify-center px-1.5 py-0.5 bg-black/50 text-white rounded backdrop-blur-sm hover:bg-black/70 transition focus:outline-none focus:ring-1 focus:ring-white/50"
+                    aria-label="反推提示词"
+                  >
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="7" />
+                      <path d="m21 21-4.35-4.35" />
+                      <path d="M11 8v6M8 11h6" />
+                    </svg>
+                  </button>
+                  <ViewportTooltip visible={promptReverseTooltip.visible} className="whitespace-nowrap">
+                    反推提示词
                   </ViewportTooltip>
                 </div>
               )}
