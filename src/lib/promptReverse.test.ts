@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { parsePromptReverseResult, resolveReverseImageTarget } from './promptReverse'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createDefaultOpenAIProfile, DEFAULT_SETTINGS } from './apiProfiles'
+import { callPromptReverseApi, parsePromptReverseResult, PROMPT_REVERSE_INSTRUCTIONS, resolveReverseImageTarget } from './promptReverse'
 
 const VALID_JSON = JSON.stringify({
   imageType: 'poster',
@@ -72,5 +73,56 @@ describe('resolveReverseImageTarget', () => {
     expect(resolveReverseImageTarget(2400, 3200)).toEqual({ width: 1536, height: 1536 })
     expect(resolveReverseImageTarget(4096, 4096)).toEqual({ width: 1536, height: 1536 })
     expect(resolveReverseImageTarget(1536, 2048)).toEqual({ width: 1536, height: 1536 })
+  })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+describe('callPromptReverseApi', () => {
+  const okPayload = {
+    output: [{ type: 'message', content: [{ type: 'output_text', text: '{"imageType":"general"}' }] }],
+  }
+
+  it('构造 responses 请求：instructions + input_image 内联 + reasoning 透传', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(okPayload), { status: 200 }))
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses', model: 'gpt-5-6', reasoningEffort: 'low' })
+
+    const text = await callPromptReverseApi({
+      settings: DEFAULT_SETTINGS,
+      profile,
+      imageDataUrl: 'data:image/png;base64,AAAA',
+    })
+
+    expect(text).toBe('{"imageType":"general"}')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/responses')
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.instructions).toBe(PROMPT_REVERSE_INSTRUCTIONS)
+    expect(body.model).toBe('gpt-5-6')
+    expect(body.reasoning).toEqual({ effort: 'low' })
+    expect(body.input[0].content[0].type).toBe('input_text')
+    expect(body.input[0].content[1]).toEqual({ type: 'input_image', image_url: 'data:image/png;base64,AAAA' })
+    expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer test-key' })
+  })
+
+  it('未配置 reasoningEffort 时不发送 reasoning 字段', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(okPayload), { status: 200 }))
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' })
+
+    await callPromptReverseApi({ settings: DEFAULT_SETTINGS, profile, imageDataUrl: 'data:image/png;base64,AAAA' })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.reasoning).toBeUndefined()
+  })
+
+  it('HTTP 错误时抛出接口错误信息', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: { message: '上游不可用' } }), { status: 502 }))
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' })
+
+    await expect(callPromptReverseApi({ settings: DEFAULT_SETTINGS, profile, imageDataUrl: 'data:image/png;base64,AAAA' }))
+      .rejects.toThrow('上游不可用')
   })
 })
