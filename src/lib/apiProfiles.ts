@@ -801,6 +801,16 @@ export function getAgentTextApiProfile(settings: Partial<AppSettings> | unknown)
   return normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId) ?? null
 }
 
+export function getPromptReverseApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
+  const normalized = normalizeSettings(settings)
+  if (normalized.agentApiConfigMode !== 'off') {
+    const textProfile = normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId)
+    if (textProfile && isAgentTextApiProfile(textProfile)) return textProfile
+  }
+  const active = getActiveApiProfile(normalized)
+  return isAgentTextApiProfile(active) ? active : null
+}
+
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
   if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
