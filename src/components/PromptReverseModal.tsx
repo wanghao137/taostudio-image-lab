@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { ensureImageCached } from '../lib/imageCache'
 import { resizeImageHighQuality } from '../lib/imageResizer'
