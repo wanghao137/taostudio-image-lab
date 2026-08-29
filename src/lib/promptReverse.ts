@@ -88,3 +88,16 @@ export function parsePromptReverseResult(text: string): PromptReverseResult | nu
   }
   return null
 }
+
+export const PROMPT_REVERSE_MAX_EDGE = 1536
+
+/**
+ * 预缩放决策：最长边 ≤1536 返回 null（不缩放不放大）；否则返回 1536×1536
+ * contain 盒（resizeImageHighQuality 以 contain 保持宽高比）。设计文档 §5.1：
+ * VLM 无需 4K（实测 1024px 已逐字读出排版文字）。
+ */
+export function resolveReverseImageTarget(width: number, height: number): { width: number; height: number } | null {
+  if (width <= 0 || height <= 0) return null
+  if (Math.max(width, height) <= PROMPT_REVERSE_MAX_EDGE) return null
+  return { width: PROMPT_REVERSE_MAX_EDGE, height: PROMPT_REVERSE_MAX_EDGE }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parsePromptReverseResult } from './promptReverse'
+import { parsePromptReverseResult, resolveReverseImageTarget } from './promptReverse'
 
 const VALID_JSON = JSON.stringify({
   imageType: 'poster',
@@ -53,5 +53,24 @@ describe('parsePromptReverseResult', () => {
   it('promptEn 缺失时字段为 undefined（UI 隐藏英文区）', () => {
     const result = parsePromptReverseResult('{"imageType":"general","breakdown":[],"prompts":[{"label":"忠实复刻","text":"一只猫"}]}')
     expect(result?.promptEn).toBeUndefined()
+  })
+})
+
+describe('resolveReverseImageTarget', () => {
+  it('最长边不超过 1536 时不缩放', () => {
+    expect(resolveReverseImageTarget(1024, 768)).toBeNull()
+    expect(resolveReverseImageTarget(1536, 1024)).toBeNull()
+    expect(resolveReverseImageTarget(1536, 1536)).toBeNull()
+  })
+
+  it('小图返回 null，不放大', () => {
+    expect(resolveReverseImageTarget(512, 512)).toBeNull()
+    expect(resolveReverseImageTarget(800, 200)).toBeNull()
+  })
+
+  it('4K 图缩到 1536 见方的 contain 盒', () => {
+    expect(resolveReverseImageTarget(2400, 3200)).toEqual({ width: 1536, height: 1536 })
+    expect(resolveReverseImageTarget(4096, 4096)).toEqual({ width: 1536, height: 1536 })
+    expect(resolveReverseImageTarget(1536, 2048)).toEqual({ width: 1536, height: 1536 })
   })
 })
