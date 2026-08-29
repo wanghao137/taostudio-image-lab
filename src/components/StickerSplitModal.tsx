@@ -18,6 +18,7 @@ import {
 import type { SplitImageData, SplitOutput, SplitRunResult, SquareSetting } from '../lib/stickerSplit/engine'
 import { downloadSplitOutput, downloadSplitOutputsZip } from '../lib/stickerSplit/download'
 import { outputToCanvas } from '../lib/stickerSplit/animate'
+import { STICKER_STYLE_PRESETS, buildStickerSheetPrompt } from '../lib/stickerSplit/stylePresets'
 import StickerAnimatePanel from './StickerAnimatePanel'
 
 type Phase = 'loading' | 'ready' | 'error'
@@ -44,6 +45,19 @@ export default function StickerSplitModal() {
   const showToast = useStore((s) => s.showToast)
 
   const close = useCallback(() => setStickerSplitSource(null), [setStickerSplitSource])
+
+  /** 空态风格预设：组装九宫格贴纸提示词写入输入栏，关模态去生成 */
+  const handleStylePrompt = (styleId: string) => {
+    try {
+      const prompt = buildStickerSheetPrompt(styleId)
+      useStore.getState().setPrompt(prompt)
+      close()
+      showToast('已填入贴纸拼图提示词，直接点击生成即可', 'success')
+    } catch (err) {
+      console.error(err)
+      showToast('提示词组装失败', 'error')
+    }
+  }
   useCloseOnEscape(Boolean(source), close)
   usePreventBackgroundScroll(true)
 
@@ -55,6 +69,7 @@ export default function StickerSplitModal() {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
   const [animateOpen, setAnimateOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [showStylePanel, setShowStylePanel] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [nameBase, setNameBase] = useState('stickers')
@@ -418,6 +433,38 @@ export default function StickerSplitModal() {
         </div>
         <span className={`text-xs ${outputs.length ? 'text-gray-500 dark:text-gray-400' : 'text-red-500'}`}>{statusText}</span>
         <div className="ml-auto flex items-center gap-2">
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowStylePanel((v) => !v)}
+              className="flex items-center gap-1.5 rounded-xl border border-gray-200/80 bg-white/80 dark:border-white/10 dark:bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 transition hover:bg-gray-100 dark:hover:bg-white/[0.08]"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3l1.9 5.8L20 10l-5 4.1L16.2 21 12 17.8 7.8 21 9 14.1 4 10l6.1-1.2L12 3z" />
+              </svg>
+              拼图风格
+            </button>
+            {showStylePanel && (
+              <div className="absolute right-0 top-full z-30 mt-2 w-64 rounded-xl border border-gray-200/80 bg-white/95 p-3 shadow-2xl backdrop-blur-xl dark:border-white/10 dark:bg-gray-800/95">
+                <p className="mb-2 text-[11px] text-gray-500 dark:text-gray-400">选风格，一键填入九宫格贴纸拼图的生成提示词：</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {STICKER_STYLE_PRESETS.map((style) => (
+                    <button
+                      key={style.id}
+                      type="button"
+                      onClick={() => {
+                        setShowStylePanel(false)
+                        handleStylePrompt(style.id)
+                      }}
+                      className="rounded-full border border-gray-200/80 px-2.5 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-white/10 dark:text-gray-300 dark:hover:border-blue-400/40 dark:hover:text-blue-300"
+                    >
+                      {style.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           <button
             type="button"
             onClick={() => setAdvancedOpen((v) => !v)}
@@ -472,6 +519,19 @@ export default function StickerSplitModal() {
                       <div className="text-4xl grayscale-[0.3]">✂️</div>
                       <p className="text-base text-gray-600 dark:text-gray-300">把拼图拖进来，自动拆好</p>
                       <p className="text-xs">或点击右下角「换一张」· Ctrl+V 粘贴</p>
+                      <p className="text-[11px] text-gray-400 dark:text-gray-500">还没有拼图？选一个风格，一键填入生成提示词：</p>
+                      <div className="flex max-w-md flex-wrap items-center justify-center gap-1.5">
+                        {STICKER_STYLE_PRESETS.map((style) => (
+                          <button
+                            key={style.id}
+                            type="button"
+                            onClick={() => handleStylePrompt(style.id)}
+                            className="rounded-full border border-gray-200/80 bg-white/70 px-2.5 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-gray-300 dark:hover:border-blue-400/40 dark:hover:text-blue-300"
+                          >
+                            {style.label}
+                          </button>
+                        ))}
+                      </div>
                       <p className="text-xs text-gray-400 dark:text-gray-500">透明底 PNG / 单色底 JPG · 全程本地处理，不上传</p>
                     </>
                   )}

@@ -17,7 +17,7 @@ export function encodeGif(frames: GifFrame[]): Blob {
     const rgba = new Uint8Array(frame.data)
     // 先把像素 alpha 二值化，量化/映射两侧保持一致，透明像素稳定落到 alpha=0 的调色板项
     prequantize(rgba, { oneBitAlpha: 127 })
-    const palette = quantize(rgba, 256, { format: 'rgba4444', oneBitAlpha: 127 })
+    const palette = quantize(rgba, 192, { format: 'rgba4444', oneBitAlpha: 127 })
     const indexed = applyPalette(rgba, palette, 'rgba4444')
     const transparentIndex = palette.findIndex((color) => (color[3] ?? 255) <= 127)
     gif.writeFrame(indexed, frame.width, frame.height, {

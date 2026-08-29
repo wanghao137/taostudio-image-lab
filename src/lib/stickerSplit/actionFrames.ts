@@ -72,6 +72,25 @@ export const ACTION_TEMPLATES: ActionTemplate[] = [
   },
 ]
 
+/** 帧主体面积 QC 门(v0.2.0 的 withheld 语义):面积比基准帧偏差过大 = 疑似多主体/坏帧,拒绝。 */
+export const FRAME_AREA_MIN_RATIO = 0.45
+export const FRAME_AREA_MAX_RATIO = 2.2
+
+export function isFrameAreaAcceptable(frameArea: number, baseArea: number): boolean {
+  if (baseArea <= 0 || frameArea <= 0) return false
+  const ratio = frameArea / baseArea
+  return ratio >= FRAME_AREA_MIN_RATIO && ratio <= FRAME_AREA_MAX_RATIO
+}
+
+function opaqueArea(canvas: HTMLCanvasElement): number {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return 0
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  let count = 0
+  for (let i = 3; i < data.length; i += 4) if (data[i] > 128) count++
+  return count
+}
+
 export function getActionTemplate(id: string): ActionTemplate | undefined {
   return ACTION_TEMPLATES.find((t) => t.id === id)
 }
@@ -89,6 +108,16 @@ export async function generateActionFrame(
   const prompt = buildTransparentPrompt(`${phasePrompt}。${SAME_CHARACTER}`)
   const editParams: TaskParams = { ...params, n: 1, transparent_output: true }
 
+  // 基准面积:原图帧归一化后的主体面积,用于逐帧 QC
+  const stickerCanvas = document.createElement('canvas')
+  {
+    const image = await loadImage(stickerDataUrl)
+    stickerCanvas.width = image.naturalWidth
+    stickerCanvas.height = image.naturalHeight
+    stickerCanvas.getContext('2d')?.drawImage(image, 0, 0)
+  }
+  const baseArea = opaqueArea(normalizeCanvasToActionFrame(stickerCanvas))
+
   let lastError: unknown = new Error('生成通道未返回图片')
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 8000 * attempt))
@@ -97,7 +126,11 @@ export async function generateActionFrame(
       const image = result.images?.[0]
       if (!image) throw new Error('生成通道未返回图片')
       const cleaned = await removeKeyedBackgroundFromDataUrl(image)
-      return normalizeToSquareDataUrl(cleaned)
+      const normalized = normalizeCanvasToActionFrame(await dataUrlToCanvas(cleaned))
+      if (!isFrameAreaAcceptable(opaqueArea(normalized), baseArea)) {
+        throw new Error('帧主体面积异常（疑似多主体或坏帧）')
+      }
+      return normalized.toDataURL('image/png')
     } catch (err) {
       lastError = err
     }
@@ -115,7 +148,9 @@ function drawSquareNormalized(cropSource: HTMLCanvasElement, cropX: number, crop
   const octx = out.getContext('2d')
   if (!octx) throw new Error('无法创建画布上下文')
   octx.imageSmoothingQuality = 'high'
-  octx.drawImage(cropSource, cropX, cropY, cropW, cropH, (side - cropW) / 2, (side - cropH) / 2, cropW, cropH)
+  // 底部锚定:主体下缘贴画布底边,水平居中。角色贴纸的稳定参照是底部基线(脚/身下缘),
+  // 头部/表情动作不再牵动整体位移——移植 v0.2.0 stable-canvas 的"固定粘贴位置"原理。
+  octx.drawImage(cropSource, cropX, cropY, cropW, cropH, (side - cropW) / 2, side - cropH, cropW, cropH)
   return out
 }
 
