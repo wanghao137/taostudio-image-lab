@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useStore } from '../store'
+import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { ensureImageCached } from '../lib/imageCache'
 import { resizeImageHighQuality } from '../lib/imageResizer'
 import { getPromptReverseApiProfile } from '../lib/apiProfiles'
@@ -7,12 +8,21 @@ import {
   callPromptReverseApi,
   parsePromptReverseResult,
   resolveReverseImageTarget,
+  type PromptReverseImageType,
   type PromptReverseResult,
 } from '../lib/promptReverse'
 
 type Phase = 'loading' | 'noProfile' | 'error' | 'done'
 
 const CLOSE_ICON_PATH = 'M18 6 6 18M6 6l12 12'
+
+const IMAGE_TYPE_LABELS: Record<PromptReverseImageType, string> = {
+  portrait: '人像摄影',
+  illustration: '插画动漫',
+  poster: '海报版式',
+  product: '产品图',
+  general: '通用',
+}
 
 function readImageSize(dataUrl: string): Promise<{ width: number; height: number }> {
   return new Promise((resolve, reject) => {
@@ -27,6 +37,9 @@ export default function PromptReverseModal() {
   const source = useStore((s) => s.promptReverseSource)
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   const showToast = useStore((s) => s.showToast)
+
+  const close = useCallback(() => setPromptReverseSource(null), [setPromptReverseSource])
+  useCloseOnEscape(Boolean(source), close)
 
   const [phase, setPhase] = useState<Phase>('loading')
   const [result, setResult] = useState<PromptReverseResult | null>(null)
@@ -53,11 +66,7 @@ export default function PromptReverseModal() {
     void (async () => {
       try {
         const { settings } = useStore.getState()
-        const profile = getPromptReverseApiProfile(settings)
-        if (!profile) {
-          setPhase('noProfile')
-          return
-        }
+        // 图片预览与尺寸先就位：即使无可用 profile（noProfile 态）也能看到图。
         const originalDataUrl = await ensureImageCached(source.imageId)
         if (!originalDataUrl) throw new Error('图片不存在或已被清理')
         if (cancelled) return
@@ -65,6 +74,12 @@ export default function PromptReverseModal() {
         const size = await readImageSize(originalDataUrl)
         if (cancelled) return
         setImageSize(size)
+        const profile = getPromptReverseApiProfile(settings)
+        if (!profile) {
+          window.clearInterval(timer)
+          setPhase('noProfile')
+          return
+        }
         const target = resolveReverseImageTarget(size.width, size.height)
         const requestImage = target
           ? await resizeImageHighQuality(originalDataUrl, target.width, target.height, 'contain')
@@ -76,10 +91,12 @@ export default function PromptReverseModal() {
         if (!parsed) throw new Error('反推返回格式无法解析，请重试')
         setResult(parsed)
         setActiveLabel(parsed.prompts[0]?.label ?? '')
+        window.clearInterval(timer)
         setPhase('done')
       } catch (err) {
         if (cancelled || controller.signal.aborted) return
         setErrorMsg(err instanceof Error ? err.message : String(err))
+        window.clearInterval(timer)
         setPhase('error')
       }
     })()
@@ -92,8 +109,6 @@ export default function PromptReverseModal() {
   }, [source?.imageId, retryTick])
 
   if (!source) return null
-
-  const close = () => setPromptReverseSource(null)
 
   const activeCandidate = result?.prompts.find((p) => p.label === activeLabel) ?? result?.prompts[0] ?? null
   const activeText = activeCandidate ? (editedTexts[activeCandidate.label] ?? activeCandidate.text) : ''
@@ -130,6 +145,9 @@ export default function PromptReverseModal() {
       onClick={close}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="反推提示词"
         className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-gray-900 max-sm:max-h-[92vh] max-sm:rounded-b-none"
         onClick={(e) => e.stopPropagation()}
       >
@@ -209,6 +227,11 @@ export default function PromptReverseModal() {
 
             {phase === 'done' && result && (
               <div className="space-y-4">
+                <div>
+                  <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600 dark:bg-white/[0.06] dark:text-gray-300">
+                    {IMAGE_TYPE_LABELS[result.imageType]}
+                  </span>
+                </div>
                 {result.breakdown.length > 0 && (
                   <div className="space-y-2">
                     <div className="text-xs font-medium text-gray-400 dark:text-gray-500">画面解构</div>

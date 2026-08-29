@@ -201,7 +201,7 @@ interface PromptReverseResult {
 2. 去尾随逗号（`/,\s*([}\]])/g`）再 parse；
 3. 剥 ```json 围栏（含去尾逗号）再 parse；
 4. 首个 `{` 到末个 `}` 截取（含去尾逗号）再 parse；
-5. 全失败 → 整段文本兜底为单条 prompt、`breakdown` 空，UI 永远有东西可看。
+5. 全失败 → 返回 null，模态展示错误态与重试按钮（有意偏差：重试路径优于倾倒原始文本）。
 
 `imageType` 为信息徽章不做门控（实测边界图会摆动）；`prompts` 缺失/空时走兜底；`promptEn` 缺失时隐藏英文区不报错。
 
@@ -225,10 +225,10 @@ interface PromptReverseResult {
 
 | 情形 | 行为 |
 |---|---|
-| 无可用 Responses profile | 引导文案 + 指向设置 |
-| 请求失败/超时/abort | 错误态 + `重试` 按钮 |
-| 非 JSON/格式损坏 | 四级解析链 → 整段文本兜底 |
-| 图片超大 | 发送前预缩放 ≤1536px JPEG（实测 1024px 已逐字读出排版文字） |
+| 无可用 Responses profile | 引导文案 + 指向设置（图片预览与尺寸徽章仍可见） |
+| 请求失败/超时/abort | 错误态 + `重试` 按钮（超时给出中文超时提示与调整指引） |
+| 非 JSON/格式损坏 | 四级解析链 → 返回 null，模态错误态 + 重试按钮 |
+| 图片超大 | 发送前预缩放：保持宽高比、最长边 1536（实测 1024px 已逐字读出排版文字） |
 
 ### 5.9 反推质量 QC 方法论
 
@@ -257,3 +257,16 @@ interface PromptReverseResult {
 2. `填入提示词` 直接覆盖输入框？——默认**覆盖**（与历史回填语义一致，草稿有自动保存）。
 3. 预缩放上限 1536px——实测 1024px 已够；对极小图不放大。
 4. promptEn 只做「忠实复刻」的英文镜像（不做三候选全量英文）——双语共识的核心是"看懂+可用"，全量×2 收益递减且拖长输出（felt 样本 1331 token 已接近舒适上限）。
+
+## 8. 对抗式审查修订记录（2026-08-29）
+
+- C1（严重）·预缩放保持宽高比：`resolveReverseImageTarget` 由「1536×1536 见方 contain 盒」改为「保持宽高比、最长边 1536、短边按比例取整」——实测 `resizeImageHighQuality` 的 contain 在 canvas 回退路径是拉伸而非 letterbox，见方目标会把所有超限图压成正方形；目标比例与原图一致后 fitMode 语义不再影响结果（§5.8 预缩放行同步改写）。
+- I1 ·超时中文化：`callPromptReverseApi` 区分超时 abort（`timedOut` 标记），超时抛「反推请求超时（N 秒），请重试或在设置中调大超时」，其余错误原样透传。
+- I2 ·去重：`coerceResult` 中 breakdown 先剔除空文本条目、再按 dimension 去重（保留首条）；prompts 重复 label 依次追加「 2」「 3」…（后缀扫描防再次撞名），保证候选切换与 React key 稳定。
+- Minor #1 ·兜底保 promptEn：解析兜底分支（prompts 缺失/全空时回落整段文本单候选）的返回值补上 `promptEn`，英文镜像不再丢失。
+- Minor #4 ·组合分支测试：解析链补「围栏+尾随逗号」「杂文包裹+尾随逗号」两个组合分支单测。
+- Minor #5 ·计时器停走：模态计时器在离开 loading（noProfile/error/done）前即 `clearInterval`，不再空转到 effect 卸载。
+- Minor #7 ·Esc + dialog 语义：模态接入全局 ESC 栈（`useCloseOnEscape`，与 ConfirmDialog/MaskEditorModal 同款一次只关最顶层），面板补 `role="dialog" aria-modal="true"`。
+- Minor #8 ·菜单项条件渲染：右键菜单「反推提示词」仅在 `menuInfo.imageId` 存在时渲染（同「拆分贴纸」门控），`menuItemCount` 改为按条件计数。
+- 徽章与预览（§5.7/§5.8）：done 态新增 imageType 中文徽章（人像摄影/插画动漫/海报版式/产品图/通用）；图片预览与尺寸读取提前到 profile 检查之前，noProfile 态也能看到图片与尺寸徽章。
+- 解析兜底语义修订（§5.5）：四级链全失败由「整段文本兜底」改为「返回 null，模态错误态 + 重试按钮」（有意偏差：重试路径优于倾倒原始文本），§5.8 表格同步。

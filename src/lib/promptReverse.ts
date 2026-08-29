@@ -34,15 +34,21 @@ function coerceResult(value: unknown, rawText: string): PromptReverseResult | nu
   const imageType = IMAGE_TYPES.includes(record.imageType as PromptReverseImageType)
     ? (record.imageType as PromptReverseImageType)
     : 'general'
+  // breakdown：先剔除空文本条目，再按 dimension 去重（保留首条）——
+  // VLM 偶发重复维度/空描述，去重后 React key 与卡片展示才稳定。
   const breakdown = Array.isArray(record.breakdown)
     ? record.breakdown
         .filter((item): item is { dimension: string; text: string } => {
           if (typeof item !== 'object' || item === null) return false
           const entry = item as Record<string, unknown>
-          return typeof entry.dimension === 'string' && typeof entry.text === 'string'
+          return typeof entry.dimension === 'string' && typeof entry.text === 'string' && entry.text.trim() !== ''
         })
         .map((item) => ({ dimension: item.dimension, text: item.text }))
+        .filter((item, index, list) => list.findIndex((other) => other.dimension === item.dimension) === index)
     : []
+  // prompts：label 重复会导致候选切换与 React key 冲突，重复者依次追加「 2」「 3」…
+  // 后缀扫描避免与既有 label（含原始就带后缀的）再次撞名。
+  const seenLabels = new Set<string>()
   const prompts = Array.isArray(record.prompts)
     ? record.prompts
         .filter((item): item is { label: string; text: string } => {
@@ -50,11 +56,20 @@ function coerceResult(value: unknown, rawText: string): PromptReverseResult | nu
           const entry = item as Record<string, unknown>
           return typeof entry.label === 'string' && typeof entry.text === 'string' && entry.text.trim() !== ''
         })
-        .map((item) => ({ label: item.label, text: item.text }))
+        .map((item) => {
+          let label = item.label
+          if (seenLabels.has(label)) {
+            let suffix = 2
+            while (seenLabels.has(`${item.label} ${suffix}`)) suffix += 1
+            label = `${item.label} ${suffix}`
+          }
+          seenLabels.add(label)
+          return { label, text: item.text }
+        })
     : []
   const promptEn = typeof record.promptEn === 'string' && record.promptEn.trim() !== '' ? record.promptEn : undefined
   if (prompts.length === 0) {
-    return { imageType, breakdown, prompts: [{ label: '反推结果', text: rawText.trim() }] }
+    return { imageType, breakdown, prompts: [{ label: '反推结果', text: rawText.trim() }], promptEn }
   }
   return { imageType, breakdown, prompts, promptEn }
 }
@@ -97,14 +112,20 @@ export function parsePromptReverseResult(text: string): PromptReverseResult | nu
 export const PROMPT_REVERSE_MAX_EDGE = 1536
 
 /**
- * 预缩放决策：最长边 ≤1536 返回 null（不缩放不放大）；否则返回 1536×1536
- * contain 盒（resizeImageHighQuality 以 contain 保持宽高比）。设计文档 §5.1：
+ * 预缩放决策：最长边 ≤1536 返回 null（不缩放不放大）；否则返回保持宽高比的
+ * 目标尺寸——最长边 = 1536，短边 = round(1536 × 短边 / 长边)。目标比例与原图
+ * 一致，因此 fitMode 语义不再重要（不会拉伸也不会 letterbox）。设计文档 §5.1：
  * VLM 无需 4K（实测 1024px 已逐字读出排版文字）。
  */
 export function resolveReverseImageTarget(width: number, height: number): { width: number; height: number } | null {
   if (width <= 0 || height <= 0) return null
-  if (Math.max(width, height) <= PROMPT_REVERSE_MAX_EDGE) return null
-  return { width: PROMPT_REVERSE_MAX_EDGE, height: PROMPT_REVERSE_MAX_EDGE }
+  const long = Math.max(width, height)
+  if (long <= PROMPT_REVERSE_MAX_EDGE) return null
+  const short = Math.min(width, height)
+  const shortTarget = Math.max(1, Math.round((PROMPT_REVERSE_MAX_EDGE * short) / long))
+  return width >= height
+    ? { width: PROMPT_REVERSE_MAX_EDGE, height: shortTarget }
+    : { width: shortTarget, height: PROMPT_REVERSE_MAX_EDGE }
 }
 
 /**
@@ -140,7 +161,11 @@ export async function callPromptReverseApi(opts: {
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
+  let timedOut = false
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, profile.timeout * 1000)
   const abortFromCaller = () => controller.abort()
   if (signal?.aborted) controller.abort()
   signal?.addEventListener('abort', abortFromCaller, { once: true })
@@ -157,19 +182,27 @@ export async function callPromptReverseApi(opts: {
     }
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
-      method: 'POST',
-      headers: createHeaders(profile),
-      cache: 'no-store',
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
-    if (!response.ok) {
-      throw new Error(await getApiErrorMessage(response))
+    try {
+      const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+        method: 'POST',
+        headers: createHeaders(profile),
+        cache: 'no-store',
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        throw new Error(await getApiErrorMessage(response))
+      }
+      const payload = normalizeResponsePayload(await response.json())
+      if (!payload) throw new Error('反推接口返回格式无效')
+      return extractText(payload)
+    } catch (error) {
+      // 超时 abort 抛出的是裸 AbortError，用户看不懂——换成可行动的中文提示。
+      if (timedOut) {
+        throw new Error(`反推请求超时（${profile.timeout} 秒），请重试或在设置中调大超时`)
+      }
+      throw error
     }
-    const payload = normalizeResponsePayload(await response.json())
-    if (!payload) throw new Error('反推接口返回格式无效')
-    return extractText(payload)
   } finally {
     clearTimeout(timeoutId)
     signal?.removeEventListener('abort', abortFromCaller)
