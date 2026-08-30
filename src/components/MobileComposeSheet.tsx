@@ -1,8 +1,8 @@
 import { lazy, Suspense, useState } from 'react'
-import { ImageUp, Sparkles, ChevronDown } from 'lucide-react'
+import { ImageUp, Search, Sparkles, ChevronDown } from 'lucide-react'
 import { useImageComposer } from '../hooks/useImageComposer'
 import { useMobileSheet } from '../hooks/useMobileSheet'
-import { useStore } from '../store'
+import { createInputImageFromFile, useStore } from '../store'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import MobileMoreParamsSheet from './MobileMoreParamsSheet'
 
@@ -26,10 +26,29 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
   } = composer
   const removeInputImage = useStore((s) => s.removeInputImage)
   const setShowSettings = useStore((s) => s.setShowSettings)
+  const showToast = useStore((s) => s.showToast)
+  const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   const sheet = useMobileSheet({ open, onClose })
   const [moreOpen, setMoreOpen] = useState(false)
   const [sizePickerOpen, setSizePickerOpen] = useState(false)
   const [openMenu, setOpenMenu] = useState<'none' | 'quality' | 'count'>('none')
+
+  // 上传反推：走 createInputImageFromFile 校验/入库，模态关闭时未引用自动清理。
+  const handleReverseFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      const image = await createInputImageFromFile(file)
+      if (!image) {
+        showToast('请选择有效图片', 'error')
+        return
+      }
+      setPromptReverseSource({ imageId: image.id })
+    } catch (err) {
+      showToast(`上传图片失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }
 
   if (!open) return null
 
@@ -75,6 +94,11 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
               上传图片
               <input type="file" accept="image/*" multiple className="hidden" disabled={atImageLimit}
                 onChange={(e) => e.target.files && handleFiles(e.target.files)} />
+            </label>
+            <label className="flex items-center gap-1.5 rounded-lg border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 dark:border-white/10 dark:bg-white/5 dark:text-stone-200">
+              <Search className="h-4 w-4" />
+              反推图片
+              <input type="file" accept="image/*" className="hidden" onChange={handleReverseFile} />
             </label>
             <span className="text-xs text-stone-400">{uploadImageTooltipText}</span>
           </div>

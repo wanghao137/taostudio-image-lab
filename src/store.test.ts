@@ -7181,3 +7181,37 @@ describe('image cleanup plan (#20)', () => {
     deleteSpy.mockRestore()
   })
 })
+
+describe('prompt reverse source orphan cleanup', () => {
+  it('replacing or clearing the reverse source deletes unreferenced upload images', async () => {
+    const dbModule = await import('./lib/db')
+    const { useStore } = await import('./store')
+    const { id: a } = await dbModule.storeImageWithSize('data:image/png;base64,AAA-100x100', 'upload')
+    const { id: b } = await dbModule.storeImageWithSize('data:image/png;base64,BBB-100x100', 'upload')
+    const { setPromptReverseSource } = useStore.getState()
+
+    setPromptReverseSource({ imageId: a })
+    setPromptReverseSource({ imageId: b })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(a)).toBeUndefined()
+    expect(await dbModule.getImage(b)).toBeDefined()
+
+    setPromptReverseSource(null)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(b)).toBeUndefined()
+  })
+
+  it('keeps task-referenced images when the reverse source is replaced or cleared', async () => {
+    const dbModule = await import('./lib/db')
+    const { useStore } = await import('./store')
+    const { id } = await dbModule.storeImageWithSize('data:image/png;base64,CCC-100x100', 'upload')
+    useStore.setState({ tasks: [task({ id: 'reverse-ref-task', outputImages: [id] })] })
+
+    useStore.getState().setPromptReverseSource({ imageId: id })
+    useStore.getState().setPromptReverseSource(null)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(id)).toBeDefined()
+
+    useStore.setState({ tasks: [] })
+  })
+})

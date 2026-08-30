@@ -189,6 +189,7 @@ export default function InputBar() {
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
   const openFavoritePicker = useStore((s) => s.openFavoritePicker)
   const searchQuery = useStore((s) => s.searchQuery)
+  const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
 
   const {
     prompt,
@@ -452,6 +453,7 @@ export default function InputBar() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const replaceFileInputRef = useRef<HTMLInputElement>(null)
+  const reverseFileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLDivElement>(null)
   const cardRef = useRef<HTMLDivElement>(null)
   const imagesRef = useRef<HTMLDivElement>(null)
@@ -461,6 +463,7 @@ export default function InputBar() {
   const [isSingleLine, setIsSingleLine] = useState(true)
   const [submitHover, setSubmitHover] = useState(false)
   const [attachHover, setAttachHover] = useState(false)
+  const [reverseUploadHover, setReverseUploadHover] = useState(false)
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
 
@@ -877,6 +880,22 @@ export default function InputBar() {
       showToast('参考图已替换', 'success')
     } catch (err) {
       showToast(`参考图替换失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }
+
+  const handleReverseFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      const image = await createInputImageFromFile(file)
+      if (!image) {
+        showToast('请选择有效图片', 'error')
+        return
+      }
+      setPromptReverseSource({ imageId: image.id })
+    } catch (err) {
+      showToast(`上传图片失败：${err instanceof Error ? err.message : String(err)}`, 'error')
     }
   }
 
@@ -2346,6 +2365,24 @@ export default function InputBar() {
               </div>
               <div
                 className="relative"
+                onMouseEnter={() => setReverseUploadHover(true)}
+                onMouseLeave={() => setReverseUploadHover(false)}
+              >
+                <ButtonTooltip visible={reverseUploadHover} text="上传图片反推提示词" />
+                <button
+                  onClick={() => reverseFileInputRef.current?.click()}
+                  className="p-2.5 rounded-xl transition-all shadow-sm bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 hover:shadow"
+                  aria-label="上传图片反推提示词"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="11" cy="11" r="7" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 8v6M8 11h6" />
+                  </svg>
+                </button>
+              </div>
+              <div
+                className="relative"
                 onMouseEnter={() => setSubmitHover(true)}
                 onMouseLeave={() => setSubmitHover(false)}
               >
@@ -2507,6 +2544,13 @@ export default function InputBar() {
             accept="image/*"
             className="hidden"
             onChange={handleReplaceFileUpload}
+          />
+          <input
+            ref={reverseFileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleReverseFileUpload}
           />
         </div>
       </div>

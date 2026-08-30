@@ -38,6 +38,7 @@ export default function PromptReverseModal() {
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   const showToast = useStore((s) => s.showToast)
 
+  // 孤儿上传图的回收统一由 store 的 setPromptReverseSource 负责（替换/置空时清理旧 id）。
   const close = useCallback(() => setPromptReverseSource(null), [setPromptReverseSource])
   useCloseOnEscape(Boolean(source), close)
 

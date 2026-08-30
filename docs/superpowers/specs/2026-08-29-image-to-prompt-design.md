@@ -270,3 +270,21 @@ interface PromptReverseResult {
 - Minor #8 ·菜单项条件渲染：右键菜单「反推提示词」仅在 `menuInfo.imageId` 存在时渲染（同「拆分贴纸」门控），`menuItemCount` 改为按条件计数。
 - 徽章与预览（§5.7/§5.8）：done 态新增 imageType 中文徽章（人像摄影/插画动漫/海报版式/产品图/通用）；图片预览与尺寸读取提前到 profile 检查之前，noProfile 态也能看到图片与尺寸徽章。
 - 解析兜底语义修订（§5.5）：四级链全失败由「整段文本兜底」改为「返回 null，模态错误态 + 重试按钮」（有意偏差：重试路径优于倾倒原始文本），§5.8 表格同步。
+
+## 9. 增量修订：上传图片反推入口（2026-08-30）
+
+### 9.1 入口放置（第一性原理重审后修正）
+
+- 桌面：InputBar 工具条「上传图片」与生成按钮之间新增放大镜按钮（`aria-label="上传图片反推提示词"`），产出物（提示词框）就在旁边；复用 `createInputImageFromFile` 校验/入库链，不占参考图 16 张槽位。
+- 移动：**修正**——最初加在 InputBar 的 `sm:hidden` 移动上传菜单，但实测发现 InputBar 仅在 ≥640px（`useIsMobile` 断点与 Tailwind sm 一致）挂载，该段是永不显示的死代码；真实移动路径是 `MobileShell → MobileComposeSheet`（底部全屏创作抽屉）。入口改为 MobileComposeSheet「上传图片」旁新增「反推图片」pill（label 包隐藏 input，与既有上传模式一致），死代码菜单项已删除。PromptReverseModal 挂在移动/桌面共用模态层且渲染顺序在 sheet 之后，层叠正确。
+
+### 9.2 孤儿图回收（store 层统一）
+
+- 上传反推图以 `source='upload'` 全量入 IndexedDB；若无人引用而模态被替换/关闭，需要回收。
+- `setPromptReverseSource` 替换/置空旧值时调用 `deleteImageIfUnreferenced(prev.imageId)`（先 set 再删，避免与引用判定互锁）；模态 close 回归单纯 `setPromptReverseSource(null)`，清理职责单一归属 store。
+- `isImageReferencedByState` 补 `promptReverseSource.imageId` 判定：堵「同 hash 重传拿到同 id + 在途删除」竞态，同时防止反推进行中图片被其他清理路径误删；画廊/任务引用图依旧受完整保护（DetailModal 任务图反推入口不受影响）。
+
+### 9.3 本轮对抗式审查结论（2026-08-30）
+
+- Important（并发上传窗口孤儿）与 Minor（同 hash 重传竞态）均已按 9.2 修复并补 store 层测试两条（替换清理 / 任务引用保护）；其余攻击面（atImageLimit 不占槽、value 重置、z-index 层叠、a11y、provider 中立、大图防护、ESC 栈、死代码残留）全部通过。
+- 验证：浏览器实测 12/12（桌面真实反推 done→填入→清理；移动 sheet 入口→模态→ESC 中断→清理）；`npm test` 957/957、`npm run build`、`npm run lint` 0 errors（存量 warning 与基线一致）。

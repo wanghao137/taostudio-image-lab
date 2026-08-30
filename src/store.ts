@@ -555,6 +555,7 @@ interface AppState {
 }
 
 function isImageReferencedByState(state: AppState, imageId: string) {
+  if (state.promptReverseSource?.imageId === imageId) return true
   if (state.inputImages.some((img) => img.id === imageId)) return true
   if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId)) return true
   if (Object.values(state.agentInputDrafts).some((draft) => draft.inputImages.some((img) => img.id === imageId))) return true
@@ -933,7 +934,13 @@ export const useStore = create<AppState>()(
       promptReverseSource: null,
       setPromptReverseSource: (promptReverseSource) => {
         if (promptReverseSource) dismissAllTooltips()
+        const prev = get().promptReverseSource
         set({ promptReverseSource })
+        // 上传反推在模态打开前可重复触发：被替换/关闭的旧上传图若无人引用则回收，
+        // 否则要等到下次重载的孤儿清扫。先 set 再删，避免与引用判定里的 source 检查互锁。
+        if (prev && prev.imageId !== promptReverseSource?.imageId) {
+          void deleteImageIfUnreferenced(prev.imageId)
+        }
       },
       galleryInputDraft: null,
 
