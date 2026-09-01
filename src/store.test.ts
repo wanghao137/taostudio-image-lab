@@ -7215,3 +7215,33 @@ describe('prompt reverse source orphan cleanup', () => {
     useStore.setState({ tasks: [] })
   })
 })
+
+describe('prompt reverse drop-zone state', () => {
+  it('opening the drop zone (imageId null) does not trigger cleanup; transitioning through it recycles the old image', async () => {
+    const dbModule = await import('./lib/db')
+    const { useStore } = await import('./store')
+    const { id: a } = await dbModule.storeImageWithSize('data:image/png;base64,DDD-100x100', 'upload')
+    const { id: b } = await dbModule.storeImageWithSize('data:image/png;base64,EEE-100x100', 'upload')
+
+    // 落区打开：null → {a}
+    useStore.getState().setPromptReverseSource({ imageId: null })
+    useStore.getState().setPromptReverseSource({ imageId: a })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(a)).toBeDefined()
+
+    // 换一张回落区：{a} → null（a 应被回收）
+    useStore.getState().setPromptReverseSource({ imageId: null })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(a)).toBeUndefined()
+
+    // 落区粘贴新图：null → {b}
+    useStore.getState().setPromptReverseSource({ imageId: b })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(b)).toBeDefined()
+
+    // 关闭：{b} → null（b 应被回收）
+    useStore.getState().setPromptReverseSource(null)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(await dbModule.getImage(b)).toBeUndefined()
+  })
+})

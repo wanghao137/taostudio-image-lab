@@ -453,7 +453,6 @@ export default function InputBar() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
   const replaceFileInputRef = useRef<HTMLInputElement>(null)
-  const reverseFileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLDivElement>(null)
   const cardRef = useRef<HTMLDivElement>(null)
   const imagesRef = useRef<HTMLDivElement>(null)
@@ -883,22 +882,6 @@ export default function InputBar() {
     }
   }
 
-  const handleReverseFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
-    try {
-      const image = await createInputImageFromFile(file)
-      if (!image) {
-        showToast('请选择有效图片', 'error')
-        return
-      }
-      setPromptReverseSource({ imageId: image.id })
-    } catch (err) {
-      showToast(`上传图片失败：${err instanceof Error ? err.message : String(err)}`, 'error')
-    }
-  }
-
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (showAtImageMenu) {
       if (e.key === 'ArrowDown') {
@@ -972,9 +955,10 @@ export default function InputBar() {
     e.clipboardData.setData('text/plain', copyText)
   }
 
-  // 粘贴图片
+  // 粘贴图片（加为生图参考图）。反推模态打开期间让位——落区态的粘贴归反推（见 PromptReverseModal）。
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
+      if (useStore.getState().promptReverseSource) return
       const items = e.clipboardData?.items
       if (!items) return
       const imageFiles: File[] = []
@@ -998,6 +982,8 @@ export default function InputBar() {
     const handleDragEnter = (e: DragEvent) => {
       e.preventDefault()
       e.stopPropagation()
+      // 反推模态打开期间不弹全页拖拽遮罩，落区自己接管。
+      if (useStore.getState().promptReverseSource) return
       dragCounter.current++
       if (e.dataTransfer?.types.includes('Files')) {
         setIsDragging(true)
@@ -1012,6 +998,7 @@ export default function InputBar() {
     const handleDragLeave = (e: DragEvent) => {
       e.preventDefault()
       e.stopPropagation()
+      if (useStore.getState().promptReverseSource) return
       dragCounter.current--
       if (dragCounter.current === 0) {
         setIsDragging(false)
@@ -1023,6 +1010,8 @@ export default function InputBar() {
       e.stopPropagation()
       dragCounter.current = 0
       setIsDragging(false)
+      // 反推模态打开期间让位：拖入的图片归反推落区（其 drop 事件会冒泡到这里）。
+      if (useStore.getState().promptReverseSource) return
       const files = e.dataTransfer?.files
       if (files && files.length > 0) {
         handleFilesRef.current(files)
@@ -2368,11 +2357,11 @@ export default function InputBar() {
                 onMouseEnter={() => setReverseUploadHover(true)}
                 onMouseLeave={() => setReverseUploadHover(false)}
               >
-                <ButtonTooltip visible={reverseUploadHover} text="上传图片反推提示词" />
+                <ButtonTooltip visible={reverseUploadHover} text="反推提示词（可粘贴图片）" />
                 <button
-                  onClick={() => reverseFileInputRef.current?.click()}
+                  onClick={() => setPromptReverseSource({ imageId: null })}
                   className="p-2.5 rounded-xl transition-all shadow-sm bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 hover:shadow"
-                  aria-label="上传图片反推提示词"
+                  aria-label="反推提示词"
                 >
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <circle cx="11" cy="11" r="7" />
@@ -2544,13 +2533,6 @@ export default function InputBar() {
             accept="image/*"
             className="hidden"
             onChange={handleReplaceFileUpload}
-          />
-          <input
-            ref={reverseFileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleReverseFileUpload}
           />
         </div>
       </div>

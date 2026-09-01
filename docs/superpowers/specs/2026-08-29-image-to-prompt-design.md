@@ -288,3 +288,25 @@ interface PromptReverseResult {
 
 - Important（并发上传窗口孤儿）与 Minor（同 hash 重传竞态）均已按 9.2 修复并补 store 层测试两条（替换清理 / 任务引用保护）；其余攻击面（atImageLimit 不占槽、value 重置、z-index 层叠、a11y、provider 中立、大图防护、ESC 栈、死代码残留）全部通过。
 - 验证：浏览器实测 12/12（桌面真实反推 done→填入→清理；移动 sheet 入口→模态→ESC 中断→清理）；`npm test` 957/957、`npm run build`、`npm run lint` 0 errors（存量 warning 与基线一致）。
+
+## 10. 增量修订：粘贴/拖拽输入落区（2026-09-01）
+
+### 10.1 设计
+
+- 全局"粘贴图片"语义已被参考图占用（InputBar document 级 paste→handleFiles），不可抢占；反推采用**可空开落区**：`PromptReverseSource.imageId: string | null`，null=落区态。
+- 桌面放大镜按钮改为打开落区模态（不再直连文件选择）；落区三种输入：Ctrl+V 粘贴（window paste 监听）/ 拖入（dialog 根级 onDrop）/ 点击选择（隐藏 file input），共用 `acceptReverseFile`（createInputImageFromFile 入库 → 替换 source → 既有 effect 自动反推）。
+- InputBar 四个全局监听（paste/dragenter/dragleave/drop）在 `promptReverseSource` 存在时让位（enter/leave 对称跳过 counter，drop 先重置 counter 再让位）——否则落区 drop 冒泡到 document 会被同时上传为参考图（实测抓到的双吃 bug）。
+- done/error 态 header「换一张」→ 回落区；换图/清空经 store 替换清理自动回收旧上传图；imageId null 过渡不触发清理（prev?.imageId 守卫）。
+- 模态关闭后全局粘贴图片回到参考图语义（既有行为保留）；焦点在提示词框的文本粘贴不受影响。
+
+### 10.2 对抗式审查修订（同日）
+
+- M1：effect 头补 `setPreviewDataUrl('')/setImageSize(null)`——换一张时组件不卸载，旧图预览/角标必须清空（否则闪旧图、错误态旁挂旧图）。
+- M2：`acceptReverseFile` 入库 await 期间模态可能被 ESC 关闭——set 前检查 `promptReverseSource` 仍存在，已关则回收刚入库的图，不复活模态。
+- M3：onDragOver/onDrop 上移到落区 dialog 根 div——拖到 header/边缘也能落，消除静默无反馈。
+- 其余攻击面（双吃时序/编辑态贴图/并发粘贴/counter 对称/ESC 栈/a11y/中立性）全部通过，结论可发布。
+
+### 10.3 验证
+
+- 浏览器实测 8/8（.omx/reverse-lab/verify-paste-reverse.mjs）：落区开→粘贴→真实反推 done→换一张→拖拽→ESC 中断→参考图粘贴回归→孤儿清理（仅参考图留存）。
+- 单元 965/965（新增落区过渡全链测试）；build 通过；lint 0 errors（基线一致）。

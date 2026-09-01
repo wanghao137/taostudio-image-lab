@@ -936,9 +936,10 @@ export const useStore = create<AppState>()(
         if (promptReverseSource) dismissAllTooltips()
         const prev = get().promptReverseSource
         set({ promptReverseSource })
-        // 上传反推在模态打开前可重复触发：被替换/关闭的旧上传图若无人引用则回收，
-        // 否则要等到下次重载的孤儿清扫。先 set 再删，避免与引用判定里的 source 检查互锁。
-        if (prev && prev.imageId !== promptReverseSource?.imageId) {
+        // 上传/粘贴反推在替换前可重复触发：被替换/关闭/清空的旧上传图若无人引用则回收，
+        // 否则要等到下次重载的孤儿清扫。先 set 再删，避免与引用判定里的 source 检查互锁；
+        // imageId 为 null（落区待输入态）不参与清理。
+        if (prev?.imageId && prev.imageId !== promptReverseSource?.imageId) {
           void deleteImageIfUnreferenced(prev.imageId)
         }
       },

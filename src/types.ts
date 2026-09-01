@@ -266,7 +266,8 @@ export interface StickerSplitSource {
 }
 
 export interface PromptReverseSource {
-  imageId: string
+  /** 反推目标图。null = 模态以「粘贴/拖入/选择」落区形式打开，等待输入。 */
+  imageId: string | null
 }
 
 export interface AgentInputDraft {

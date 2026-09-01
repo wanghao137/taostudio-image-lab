@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useStore } from '../store'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createInputImageFromFile, deleteImageIfUnreferenced, useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { ensureImageCached } from '../lib/imageCache'
 import { resizeImageHighQuality } from '../lib/imageResizer'
@@ -39,10 +39,46 @@ export default function PromptReverseModal() {
   const showToast = useStore((s) => s.showToast)
   const settings = useStore((s) => s.settings)
   const textApiResolution = getTextApiProfileResolution(settings)
+  const imageId = source?.imageId ?? null
+  const dropZoneFileInputRef = useRef<HTMLInputElement>(null)
 
   // 孤儿上传图的回收统一由 store 的 setPromptReverseSource 负责（替换/置空时清理旧 id）。
   const close = useCallback(() => setPromptReverseSource(null), [setPromptReverseSource])
   useCloseOnEscape(Boolean(source), close)
+
+  // 落区拿图（粘贴/拖拽/选择共用）：入库后替换 source，effect 自动开始反推；旧图由 store 清理。
+  const acceptReverseFile = useCallback(async (file: File) => {
+    try {
+      const image = await createInputImageFromFile(file)
+      if (!image) {
+        showToast('请粘贴或选择有效图片', 'error')
+        return
+      }
+      // 入库是异步的：等待期间用户可能已 ESC 关闭模态，此时不再复活模态，回收刚入库的图。
+      if (!useStore.getState().promptReverseSource) {
+        void deleteImageIfUnreferenced(image.id)
+        return
+      }
+      setPromptReverseSource({ imageId: image.id })
+    } catch (err) {
+      showToast(`图片读取失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }, [setPromptReverseSource, showToast])
+
+  // 落区态监听全局粘贴：模态打开期间 InputBar 的参考图粘贴让位（见 InputBar 全局 paste 监听）。
+  useEffect(() => {
+    if (!source || imageId) return
+    const onPaste = (e: ClipboardEvent) => {
+      const files = e.clipboardData?.files
+      if (!files?.length) return
+      const file = Array.from(files).find((f) => f.type.startsWith('image/'))
+      if (!file) return
+      e.preventDefault()
+      void acceptReverseFile(file)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [source, imageId, acceptReverseFile])
 
   const [phase, setPhase] = useState<Phase>('loading')
   const [result, setResult] = useState<PromptReverseResult | null>(null)
@@ -55,7 +91,8 @@ export default function PromptReverseModal() {
   const [retryTick, setRetryTick] = useState(0)
 
   useEffect(() => {
-    if (!source?.imageId) return
+    const requestId = source?.imageId
+    if (!requestId) return
     const controller = new AbortController()
     let cancelled = false
     setPhase('loading')
@@ -64,13 +101,16 @@ export default function PromptReverseModal() {
     setEditedTexts({})
     setElapsed(0)
     setActiveLabel('')
+    // 换一张时组件不卸载，旧图预览/角标必须随新一轮清空，否则闪旧图甚至挂在错误态旁。
+    setPreviewDataUrl('')
+    setImageSize(null)
     const timer = window.setInterval(() => setElapsed((e) => e + 1), 1000)
 
     void (async () => {
       try {
         const { settings } = useStore.getState()
         // 图片预览与尺寸先就位：即使无可用 profile（noProfile 态）也能看到图。
-        const originalDataUrl = await ensureImageCached(source.imageId)
+        const originalDataUrl = await ensureImageCached(requestId)
         if (!originalDataUrl) throw new Error('图片不存在或已被清理')
         if (cancelled) return
         setPreviewDataUrl(originalDataUrl)
@@ -140,6 +180,78 @@ export default function PromptReverseModal() {
   }
 
   const retry = () => setRetryTick((t) => t + 1)
+  // 换一张：清空当前源回落区，旧上传图由 store 的替换清理回收。
+  const resetToDropZone = () => setPromptReverseSource({ imageId: null })
+
+  // 落区态：等待粘贴/拖入/选择图片。
+  if (!imageId) {
+    return (
+      <div
+        data-no-drag-select
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 max-sm:items-end max-sm:justify-stretch max-sm:p-0"
+        onClick={close}
+      >
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="反推提示词"
+          className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:bg-gray-900 max-sm:max-h-[92vh] max-sm:rounded-b-none"
+          onClick={(e) => e.stopPropagation()}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault()
+            const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith('image/'))
+            if (file) void acceptReverseFile(file)
+          }}
+        >
+          <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3.5 dark:border-white/[0.06]">
+            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">反推提示词</h2>
+            <button
+              type="button"
+              onClick={close}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-300"
+              aria-label="关闭"
+            >
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+                <path d={CLOSE_ICON_PATH} />
+              </svg>
+            </button>
+          </div>
+          <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center gap-4 p-8">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 dark:bg-blue-500/10">
+              <svg className="h-8 w-8 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                <rect x="8" y="3" width="12" height="14" rx="2" />
+                <path d="M16 21H6a2 2 0 01-2-2V7" strokeLinecap="round" />
+                <path d="M12 10v4M10 12h4" strokeLinecap="round" />
+              </svg>
+            </div>
+            <div className="text-center">
+              <p className="text-sm text-gray-700 dark:text-gray-200">按 <kbd className="rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-xs dark:border-white/10 dark:bg-white/5">Ctrl</kbd>+<kbd className="rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-xs dark:border-white/10 dark:bg-white/5">V</kbd> 粘贴图片，或将图片拖到这里</p>
+              <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">反推是对画面的推测而非精确复刻，可编辑后再生成</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => dropZoneFileInputRef.current?.click()}
+              className="rounded-xl bg-blue-500 px-4 py-2 text-sm text-white transition hover:bg-blue-600"
+            >
+              选择本地图片
+            </button>
+            <input
+              ref={dropZoneFileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                e.target.value = ''
+                if (file) void acceptReverseFile(file)
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -157,7 +269,16 @@ export default function PromptReverseModal() {
         <div className="flex items-center justify-between border-b border-gray-100 px-5 py-3.5 dark:border-white/[0.06]">
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">反推提示词</h2>
           <div className="flex items-center gap-3">
-            <span className="text-xs text-gray-400 dark:text-gray-500">反推是对画面的推测而非精确复刻，可编辑后再生成</span>
+            <span className="hidden text-xs text-gray-400 dark:text-gray-500 md:inline">反推是对画面的推测而非精确复刻，可编辑后再生成</span>
+            {(phase === 'done' || phase === 'error') && (
+              <button
+                type="button"
+                onClick={resetToDropZone}
+                className="rounded-lg border border-gray-200 px-2.5 py-1 text-xs text-gray-600 transition hover:bg-gray-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/[0.06]"
+              >
+                换一张
+              </button>
+            )}
             <button
               type="button"
               onClick={close}
