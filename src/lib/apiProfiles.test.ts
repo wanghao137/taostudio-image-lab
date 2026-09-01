@@ -14,6 +14,7 @@ import {
   getActiveApiProfile,
   getDefaultOpenAIModel,
   getPromptReverseApiProfile,
+  getTextApiProfileResolution,
   isManagedDefaultOpenAIModel,
   getCustomProviderDefinition,
   findEquivalentApiProfile,
@@ -1791,6 +1792,27 @@ describe('getPromptReverseApiProfile', () => {
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
   })
 
+  it('agent 文本配置优先于全局 textApiProfileId 显式选择', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'img-profile',
+      agentApiConfigMode: 'native',
+      agentTextProfileId: 'resp-profile',
+      textApiProfileId: 'resp-profile',
+    })
+    // 两者一致时无法区分，此处用不同 profile 锁定优先级语义
+    const another = createDefaultOpenAIProfile({ id: 'resp-profile-2', apiMode: 'responses' })
+    const settingsAmbiguous = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile, another],
+      activeProfileId: 'img-profile',
+      agentApiConfigMode: 'native',
+      agentTextProfileId: 'resp-profile',
+      textApiProfileId: 'resp-profile-2',
+    })
+    expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
+    expect(getPromptReverseApiProfile(settingsAmbiguous)?.id).toBe('resp-profile')
+  })
+
   it('agent 关闭时回退激活 profile（若为 responses 类型）', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
@@ -1800,12 +1822,84 @@ describe('getPromptReverseApiProfile', () => {
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
   })
 
-  it('agent 关闭且激活 profile 是 images 类型时返回 null（UI 引导配置）', () => {
+  it('agent 关闭且激活 profile 是 images 类型时，自动采用唯一可用文本配置', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'img-profile',
       agentApiConfigMode: 'off',
     })
-    expect(getPromptReverseApiProfile(settings)).toBeNull()
+    expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
+  })
+})
+
+describe('getTextApiProfileResolution（全局文本能力路由）', () => {
+  const responsesProfile = createDefaultOpenAIProfile({ id: 'resp-profile', apiMode: 'responses' })
+  const anotherResponsesProfile = createDefaultOpenAIProfile({ id: 'resp-profile-2', apiMode: 'responses' })
+  const imagesProfile = createDefaultOpenAIProfile({ id: 'img-profile', apiMode: 'images' })
+
+  it('显式选择最优先（resolvedBy=explicit），即使激活配置也支持文本', () => {
+    const settings = normalizeSettings({
+      profiles: [responsesProfile, anotherResponsesProfile],
+      activeProfileId: 'resp-profile',
+      textApiProfileId: 'resp-profile-2',
+    })
+    const resolution = getTextApiProfileResolution(settings)
+    expect(resolution.profile?.id).toBe('resp-profile-2')
+    expect(resolution.resolvedBy).toBe('explicit')
+  })
+
+  it('自动模式跟随生图激活配置（resolvedBy=active）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'resp-profile',
+    })
+    const resolution = getTextApiProfileResolution(settings)
+    expect(resolution.profile?.id).toBe('resp-profile')
+    expect(resolution.resolvedBy).toBe('active')
+  })
+
+  it('自动模式在激活配置不支持文本时采用唯一文本配置（resolvedBy=sole）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'img-profile',
+    })
+    const resolution = getTextApiProfileResolution(settings)
+    expect(resolution.profile?.id).toBe('resp-profile')
+    expect(resolution.resolvedBy).toBe('sole')
+  })
+
+  it('自动模式下没有任何文本配置时返回 none（不固化推导值）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile],
+      activeProfileId: 'img-profile',
+    })
+    const once = getTextApiProfileResolution(settings)
+    expect(once.profile).toBeNull()
+    expect(once.reason).toBe('none')
+    // 幂等：解析多次不会把任何推导值固化进 settings
+    const normalized = normalizeSettings(settings)
+    expect(normalized.textApiProfileId).toBeNull()
+    expect(getTextApiProfileResolution(normalized).reason).toBe('none')
+  })
+
+  it('自动模式下多个文本配置且激活配置不支持文本时返回 ambiguous（不静默猜）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile, anotherResponsesProfile],
+      activeProfileId: 'img-profile',
+    })
+    const resolution = getTextApiProfileResolution(settings)
+    expect(resolution.profile).toBeNull()
+    expect(resolution.reason).toBe('ambiguous')
+  })
+
+  it('显式值指向非文本配置时归一化为 auto（无效即清空，不报错）', () => {
+    const settings = normalizeSettings({
+      profiles: [imagesProfile, responsesProfile],
+      activeProfileId: 'img-profile',
+      textApiProfileId: 'img-profile',
+    })
+    expect(settings.textApiProfileId).toBeNull()
+    // 清回 auto 后按唯一文本配置解析
+    expect(getTextApiProfileResolution(settings).profile?.id).toBe('resp-profile')
   })
 })

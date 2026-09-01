@@ -17,6 +17,7 @@ import {
   getApiProviderLabel,
   getActiveApiProfile,
   getDefaultOpenAIModel,
+  getTextApiProfileResolution,
   importCustomProviderSettingsFromJson,
   isDefaultConfigOnlyEnabled,
   isAgentTextApiProfile,
@@ -283,6 +284,14 @@ export default function SettingsModal() {
     label: `${profile.name} · ${getApiProviderLabel(draft, profile.provider)} · ${profile.model}`,
     value: profile.id,
   }))
+  const textApiResolution = getTextApiProfileResolution(draft)
+  const textApiProfileOptions = [
+    { label: '自动（跟随生图配置，或唯一的文本配置）', value: '' },
+    ...agentTextProfiles.map((profile) => ({
+      label: `${profile.name} · ${profile.model || DEFAULT_RESPONSES_MODEL}`,
+      value: profile.id,
+    })),
+  ]
 
   const wasSettingsOpenRef = useRef(false)
 
@@ -1423,6 +1432,37 @@ export default function SettingsModal() {
                     </div>
                   )}
                 </div>
+
+              {/* 文本模型服务：与生图路由正交的全局文本能力路由（反推提示词等） */}
+              <div className="block">
+                <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">文本模型服务</span>
+                <Select
+                  value={draft.textApiProfileId ?? ''}
+                  onChange={(value) => commitSettings({ ...draft, textApiProfileId: value || null })}
+                  options={textApiProfileOptions}
+                  disabled={defaultConfigOnly}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                {draft.agentApiConfigMode !== 'off' && selectedAgentTextProfile ? (
+                  <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
+                    Agent 独立配置开启中：反推提示词与智能体优先使用 Agent 文本配置「{selectedAgentTextProfile.name}」，
+                    此处的选择在关闭 Agent 独立配置后生效。
+                  </p>
+                ) : textApiResolution.profile ? (
+                  <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
+                    反推提示词等文本功能当前使用：{textApiResolution.profile.name} · {textApiResolution.profile.model || DEFAULT_RESPONSES_MODEL}
+                    （{textApiResolution.resolvedBy === 'explicit' ? '手动指定' : textApiResolution.resolvedBy === 'active' ? '自动跟随生图配置' : '自动采用唯一可用文本配置'}）
+                  </p>
+                ) : textApiResolution.reason === 'ambiguous' ? (
+                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    存在多个文本配置，自动模式无法选择，请手动指定一项。
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
+                    暂无 Responses 模式的文本配置，反推提示词等文本功能不可用；可新建一个「OpenAI 兼容 · Responses 模式」配置。
+                  </p>
+                )}
+              </div>
 
               {/* 1. 配置名称 */}
               <label className="block">

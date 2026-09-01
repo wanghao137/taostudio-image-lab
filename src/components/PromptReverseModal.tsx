@@ -3,7 +3,7 @@ import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { ensureImageCached } from '../lib/imageCache'
 import { resizeImageHighQuality } from '../lib/imageResizer'
-import { getPromptReverseApiProfile } from '../lib/apiProfiles'
+import { getPromptReverseApiProfile, getTextApiProfileResolution } from '../lib/apiProfiles'
 import {
   callPromptReverseApi,
   parsePromptReverseResult,
@@ -37,6 +37,8 @@ export default function PromptReverseModal() {
   const source = useStore((s) => s.promptReverseSource)
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   const showToast = useStore((s) => s.showToast)
+  const settings = useStore((s) => s.settings)
+  const textApiResolution = getTextApiProfileResolution(settings)
 
   // 孤儿上传图的回收统一由 store 的 setPromptReverseSource 负责（替换/置空时清理旧 id）。
   const close = useCallback(() => setPromptReverseSource(null), [setPromptReverseSource])
@@ -200,8 +202,12 @@ export default function PromptReverseModal() {
 
             {phase === 'noProfile' && (
               <div className="space-y-3 py-8 text-center">
-                <p className="text-sm text-gray-600 dark:text-gray-300">暂无可用的反推模型配置。</p>
-                <p className="text-xs text-gray-400 dark:text-gray-500">请在 设置 → API 配置 中启用 Agent 独立配置并选择 Responses 类型的文本模型，或将当前激活配置切换为 Responses 模式。</p>
+                <p className="text-sm text-gray-600 dark:text-gray-300">暂无可用的反推文本模型。</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  {textApiResolution.reason === 'ambiguous'
+                    ? '存在多个文本模型配置，自动模式无法选择。请在 设置 → API 配置 → 文本模型服务 指定一项。'
+                    : '当前生图配置不支持文本请求，也没有其他可用的文本配置。请在 设置 → API 配置 新建一个「OpenAI 兼容 · Responses 模式」配置（生图配置无需切换）。'}
+                </p>
                 <button
                   type="button"
                   onClick={openSettings}

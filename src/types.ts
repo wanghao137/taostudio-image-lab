@@ -148,6 +148,9 @@ export interface AppSettings {
   agentApiConfigMode: AgentApiConfigMode
   agentTextProfileId?: string | null
   agentImageProfileId?: string | null
+  /** 全局文本能力路由（反推/标题等文本类功能）：null=自动（跟随生图配置或唯一可用文本配置），
+   *  指向 Responses 类型 profile 则显式使用它。归一化只校验有效性，不固化推导值。 */
+  textApiProfileId?: string | null
   profiles: ApiProfile[]
   activeProfileId: string
 }

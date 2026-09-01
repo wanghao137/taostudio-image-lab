@@ -760,6 +760,11 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   const agentImageProfileId = typeof record.agentImageProfileId === 'string' && profiles.some((p) => p.id === record.agentImageProfileId)
     ? record.agentImageProfileId
     : active.id
+  // 文本路由只校验显式值有效性（须指向 Responses 类型 profile），缺省/无效一律回到 auto；
+  // 不在这里固化任何推导结果，否则「跟随激活配置」的语义会被旧推导值覆盖失效。
+  const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isAgentTextApiProfile(p))
+    ? record.textApiProfileId
+    : null
 
   return {
     baseUrl: active.baseUrl,
@@ -790,6 +795,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     agentApiConfigMode,
     agentTextProfileId,
     agentImageProfileId,
+    textApiProfileId,
     profiles,
     activeProfileId,
   }
@@ -807,8 +813,37 @@ export function getPromptReverseApiProfile(settings: Partial<AppSettings> | unkn
     const textProfile = normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId)
     if (textProfile && isAgentTextApiProfile(textProfile)) return textProfile
   }
+  return getTextApiProfile(normalized)
+}
+
+export interface TextApiResolution {
+  profile: ApiProfile | null
+  /** explicit=显式选择；active=自动跟随生图激活配置；sole=自动采用唯一可用文本配置；null=未解析到 */
+  resolvedBy: 'explicit' | 'active' | 'sole' | null
+  /** 未解析到时的原因：none=没有任何文本配置；ambiguous=多个候选且无法自动选择 */
+  reason: 'none' | 'ambiguous' | null
+}
+
+/**
+ * 全局文本能力路由：文本/视觉理解类功能（反推提示词、会话标题等）的统一 profile 解析。
+ * 与生图路由（activeProfileId）正交：显式选择 > 跟随生图配置 > 唯一可用文本配置；
+ * 多候选歧义时不静默猜测，返回 null 由 UI 引导显式选择。
+ */
+export function getTextApiProfileResolution(settings: Partial<AppSettings> | unknown): TextApiResolution {
+  const normalized = normalizeSettings(settings)
+  if (normalized.textApiProfileId) {
+    const explicit = normalized.profiles.find((profile) => profile.id === normalized.textApiProfileId)
+    if (explicit) return { profile: explicit, resolvedBy: 'explicit', reason: null }
+  }
   const active = getActiveApiProfile(normalized)
-  return isAgentTextApiProfile(active) ? active : null
+  if (isAgentTextApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
+  const textProfiles = normalized.profiles.filter(isAgentTextApiProfile)
+  if (textProfiles.length === 1) return { profile: textProfiles[0], resolvedBy: 'sole', reason: null }
+  return { profile: null, resolvedBy: null, reason: textProfiles.length === 0 ? 'none' : 'ambiguous' }
+}
+
+export function getTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
+  return getTextApiProfileResolution(settings).profile
 }
 
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
