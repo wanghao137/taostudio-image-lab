@@ -2,7 +2,7 @@ import type { LocalAutoSaveStatus, StoredImage, TaskRecord } from '../types'
 import { dataUrlToBytes } from './dataUrl'
 import { formatExportFileTime, sanitizeFileNamePart } from './exportFileName'
 import { getExactImageSizeTarget } from './exactImageSize'
-import { calculateImageSize, COMMON_IMAGE_RATIOS } from './size'
+import { calculateImageSize, COMMON_IMAGE_RATIOS, normalizeImageSize } from './size'
 
 export type LocalAutoSaveIneligibilityReason =
   | 'agent_task'
@@ -125,8 +125,13 @@ export function isConfirmed4kSize(size: { width?: number; height?: number } | nu
     return false
   }
 
-  const dimensions = `${width}x${height}`
-  return COMMON_IMAGE_RATIOS.some(({ value }) => calculateImageSize('4K', value) === dimensions)
+  // 任务里存的尺寸可能是尺寸弹窗归一化后的值（如 4:5 的 4K 档存成 2400x3008），
+  // 与预设原始值（2400x3000）比对前必须两侧都归一化。
+  const dimensions = normalizeImageSize(`${width}x${height}`)
+  return COMMON_IMAGE_RATIOS.some(({ value }) => {
+    const presetSize = calculateImageSize('4K', value)
+    return presetSize != null && normalizeImageSize(presetSize) === dimensions
+  })
 }
 
 export function getLocalAutoSaveIntentSize(task: Pick<TaskRecord, 'params'>): LocalAutoSaveSize | null {

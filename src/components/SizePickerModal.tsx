@@ -29,7 +29,10 @@ function findPresetForSize(size: string) {
   const normalized = normalizeImageSize(size)
   for (const tier of TIERS) {
     for (const ratio of COMMON_IMAGE_RATIOS) {
-      if (calculateImageSize(tier, ratio.value) === normalized) {
+      const presetSize = calculateImageSize(tier, ratio.value)
+      // 部分预设（4K 4:5/5:4、21:9 全档）不是 16 的倍数，applySize 存出去的
+      // 是归一化后的值，反查时候选值必须同样归一化才能对得上。
+      if (presetSize && normalizeImageSize(presetSize) === normalized) {
         return { tier, ratio: ratio.value }
       }
     }

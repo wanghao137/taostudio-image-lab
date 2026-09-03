@@ -1,5 +1,5 @@
 import { DEFAULT_PARAMS, type TaskParams } from '../types'
-import { calculateImageSize, COMMON_IMAGE_RATIOS, parseImageSize, type CommonImageRatio, type ImageSize } from './size'
+import { calculateImageSize, COMMON_IMAGE_RATIOS, normalizeImageSize, parseImageSize, type CommonImageRatio, type ImageSize } from './size'
 
 export const ASSET_4K_RATIO_PRESETS = COMMON_IMAGE_RATIOS
 
@@ -89,6 +89,13 @@ export function createAsset4KOriginalRatioPresetParams(
   return buildAsset4KParams(size, options)
 }
 
+// 尺寸可能以预设原始值（2400x3000）或尺寸弹窗归一化值（2400x3008）两种形态
+// 存在任务参数里，激活态判断统一按归一化后的值比对。
+function matchesPresetSize(actualSize: string | undefined, presetSize: string | undefined) {
+  if (!actualSize || !presetSize) return false
+  return normalizeImageSize(actualSize) === normalizeImageSize(presetSize)
+}
+
 export function isAsset4KRatioPresetActive(
   params: TaskParams,
   ratio: CommonImageRatio,
@@ -97,7 +104,7 @@ export function isAsset4KRatioPresetActive(
   const preset = createAsset4KRatioPresetParams(ratio, options)
   return Boolean(
     preset &&
-    params.size === preset.size &&
+    matchesPresetSize(params.size, preset.size) &&
     params.exact_size === true &&
     params.quality === preset.quality &&
     params.output_format === preset.output_format &&
@@ -115,7 +122,7 @@ export function isAsset4KOriginalRatioPresetActive(
   const preset = createAsset4KOriginalRatioPresetParams(source, options)
   return Boolean(
     preset &&
-    params.size === preset.size &&
+    matchesPresetSize(params.size, preset.size) &&
     params.exact_size === true &&
     params.quality === preset.quality &&
     params.output_format === preset.output_format &&

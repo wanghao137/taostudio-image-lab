@@ -226,4 +226,15 @@ describe('local auto-save pure helpers', () => {
     expect(isConfirmed4kSize({ width: 3840, height: 1600 })).toBe(false)
     expect(isConfirmed4kSize({ width: 2048, height: 4096 })).toBe(false)
   })
+
+  it('accepts the normalized forms of non-16-multiple 4K presets (size picker round-trip)', () => {
+    // 尺寸弹窗存的是 normalizeImageSize 后的值：4:5/5:4/21:9 的 4K 档
+    // 预设不是 16 的倍数，会归一化成 3008/1648 一类。
+    expect(isConfirmed4kSize({ width: 2400, height: 3008 })).toBe(true)
+    expect(isConfirmed4kSize({ width: 3008, height: 2400 })).toBe(true)
+    expect(isConfirmed4kSize({ width: 3840, height: 1648 })).toBe(true)
+    // 21:9 的 1K/2K 归一化档位不属于 4K 资产。
+    expect(isConfirmed4kSize({ width: 1280, height: 544 })).toBe(false)
+    expect(isConfirmed4kSize({ width: 2560, height: 1104 })).toBe(false)
+  })
 })

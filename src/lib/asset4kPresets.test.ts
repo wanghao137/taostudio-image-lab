@@ -79,6 +79,20 @@ describe('asset 4K ratio presets', () => {
     expect(isAsset4KRatioPresetActive(params, '16:9')).toBe(false)
   })
 
+  it('detects the active ratio preset from the normalized size stored by the size picker', () => {
+    // 尺寸弹窗确定后存的是 normalizeImageSize('2400x3000') = '2400x3008'，
+    // 激活态判断不能只认预设表里的原始值。
+    const params = {
+      ...DEFAULT_PARAMS,
+      ...createAsset4KRatioPresetParams('4:5'),
+      size: '2400x3008',
+    }
+
+    expect(isAsset4KRatioPresetActive(params, '4:5')).toBe(true)
+    expect(isAsset4KRatioPresetActive(params, '5:4')).toBe(false)
+    expect(isAsset4KRatioPresetActive(params, '3:4')).toBe(false)
+  })
+
   it('preserves the uploaded image aspect ratio for 4K high PNG output', () => {
     const source = { width: 1536, height: 1024 }
 
