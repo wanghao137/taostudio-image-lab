@@ -5,10 +5,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import 'fake-indexeddb/auto'
 import {
   clearAgentConversations,
+  clearEngineDeliveryDirectoryHandle,
   clearImages,
+  clearLocalAutoSaveDirectoryHandle,
   clearTasks,
   clearTasksAndAdvanceGeneration,
   commitTaskDeletion,
+  getEngineDeliveryDirectoryHandle,
+  getLocalAutoSaveDirectoryHandle,
   getTaskGeneration,
   getAllAgentConversations,
   getAllImageIds,
@@ -17,8 +21,10 @@ import {
   getImage,
   getImageThumbnail,
   putAgentConversation,
+  putEngineDeliveryDirectoryHandle,
   putImage,
   putImageThumbnail,
+  putLocalAutoSaveDirectoryHandle,
   putTask,
   storeImage,
 } from './db'
@@ -231,5 +237,61 @@ describe('db — Blob image storage', () => {
     expect(second.skipped).toBeGreaterThanOrEqual(1)
     // 迁移后仍可正常读出
     expect((await getImage('blob-img-2'))?.dataUrl).toBe(dataUrl)
+  })
+})
+
+describe('db — gallery vs engine delivery directory handles stay isolated', () => {
+  function fakeHandle(name: string) {
+    return { kind: 'directory', name } as unknown as FileSystemDirectoryHandle
+  }
+
+  beforeEach(async () => {
+    await clearLocalAutoSaveDirectoryHandle()
+    await clearEngineDeliveryDirectoryHandle()
+  })
+
+  afterEach(async () => {
+    await clearLocalAutoSaveDirectoryHandle()
+    await clearEngineDeliveryDirectoryHandle()
+  })
+
+  it('stores and returns each handle under its own key', async () => {
+    const gallery = fakeHandle('4K')
+    const engine = fakeHandle('批量')
+    await putLocalAutoSaveDirectoryHandle(gallery)
+    await putEngineDeliveryDirectoryHandle(engine)
+
+    expect(await getLocalAutoSaveDirectoryHandle()).toMatchObject({ handle: gallery, name: '4K' })
+    expect(await getEngineDeliveryDirectoryHandle()).toMatchObject({ handle: engine, name: '批量' })
+  })
+
+  it('replacing one handle never touches the other', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeHandle('4K'))
+    await putEngineDeliveryDirectoryHandle(fakeHandle('批量-old'))
+
+    await putEngineDeliveryDirectoryHandle(fakeHandle('批量-new'))
+    expect(await getLocalAutoSaveDirectoryHandle()).toMatchObject({ name: '4K' })
+    expect(await getEngineDeliveryDirectoryHandle()).toMatchObject({ name: '批量-new' })
+
+    await putLocalAutoSaveDirectoryHandle(fakeHandle('4K-new'))
+    expect(await getLocalAutoSaveDirectoryHandle()).toMatchObject({ name: '4K-new' })
+    expect(await getEngineDeliveryDirectoryHandle()).toMatchObject({ name: '批量-new' })
+  })
+
+  it('clearing one handle never clears the other', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeHandle('4K'))
+    await putEngineDeliveryDirectoryHandle(fakeHandle('批量'))
+
+    await clearLocalAutoSaveDirectoryHandle()
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+    expect(await getEngineDeliveryDirectoryHandle()).toMatchObject({ name: '批量' })
+
+    await clearEngineDeliveryDirectoryHandle()
+    expect(await getEngineDeliveryDirectoryHandle()).toBeUndefined()
+  })
+
+  it('engine handle is empty when only the gallery handle was configured (no legacy fallback)', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeHandle('4K'))
+    expect(await getEngineDeliveryDirectoryHandle()).toBeUndefined()
   })
 })

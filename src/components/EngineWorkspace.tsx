@@ -203,24 +203,30 @@ export default function EngineWorkspace() {
     }
   }, [setDeliveryRecord])
 
+  // 更换目录或恢复权限后触发一次全量补交付：清空已尝试记录并让
+  // 自动交付 effect 以 force 模式重跑（resync）。
+  const scheduleDeliveryResync = useCallback(() => {
+    const nextRevision = deliveryDirectoryRevisionRef.current + 1
+    deliveryDirectoryRevisionRef.current = nextRevision
+    deliveryResyncRevisionRef.current = nextRevision
+    setDeliveryDirectoryRevision(nextRevision)
+    deliveryAttemptedRef.current.clear()
+  }, [])
+
   const handleChooseDeliveryDirectory = useCallback(async () => {
     beginDeliveryOperation()
     try {
       const directory = await chooseEngineLocalDeliveryDirectory()
       setDeliveryDirectoryName(directory.name)
-      const nextRevision = deliveryDirectoryRevisionRef.current + 1
-      deliveryDirectoryRevisionRef.current = nextRevision
-      deliveryResyncRevisionRef.current = nextRevision
-      setDeliveryDirectoryRevision(nextRevision)
       deliveryAutoSaveStartedAtRef.current = Date.now()
-      deliveryAttemptedRef.current.clear()
+      scheduleDeliveryResync()
       setStatusAnnouncement(`本地交付目录已设置为 ${directory.name}`)
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'AbortError')) setWorkspaceError(errorMessage(error))
     } finally {
       endDeliveryOperation()
     }
-  }, [beginDeliveryOperation, endDeliveryOperation])
+  }, [beginDeliveryOperation, endDeliveryOperation, scheduleDeliveryResync])
 
   const saveJobDelivery = useCallback(async (job: ImageJobV1, force = false) => {
     if (!job.finalAssetId || job.state !== 'succeeded') return
@@ -516,6 +522,53 @@ export default function EngineWorkspace() {
       })
       .catch(() => setDeliveryDirectoryName(null))
   }, [])
+
+  // 浏览器重启后交付目录句柄的写权限会降级为 prompt；权限请求需要用户激活，
+  // 因此挂一次性 pointerdown/keydown 监听器，用户下次点击页面时恢复授权并
+  // 补交付。行为对齐画廊侧 restoreLocalAutoSavePermissionOnUserActivation。
+  useEffect(() => {
+    let disposed = false
+    let tryOnce: (() => void) | null = null
+    void getEngineLocalDeliveryDirectory()
+      .then(async (directory) => {
+        if (disposed || !directory) return
+        try {
+          if (typeof directory.handle.queryPermission !== 'function') return
+          if (await directory.handle.queryPermission({ mode: 'readwrite' }) !== 'prompt') return
+        } catch {
+          return
+        }
+        if (disposed) return
+        const handle = directory.handle
+        tryOnce = () => {
+          if (tryOnce) {
+            window.removeEventListener('pointerdown', tryOnce)
+            window.removeEventListener('keydown', tryOnce)
+          }
+          void (async () => {
+            try {
+              const permission = await handle.requestPermission?.({ mode: 'readwrite' })
+              if (permission === 'granted') {
+                setStatusAnnouncement(`已恢复引擎交付目录「${directory.name}」的写入权限`)
+                scheduleDeliveryResync()
+              }
+            } catch {
+              // 非 user activation 上下文等异常 → 静默，留在详情页手动重试
+            }
+          })()
+        }
+        window.addEventListener('pointerdown', tryOnce, { once: true })
+        window.addEventListener('keydown', tryOnce, { once: true })
+      })
+      .catch(() => undefined)
+    return () => {
+      disposed = true
+      if (tryOnce) {
+        window.removeEventListener('pointerdown', tryOnce)
+        window.removeEventListener('keydown', tryOnce)
+      }
+    }
+  }, [scheduleDeliveryResync])
 
   useEffect(() => {
     if (!config || !deliveryDirectoryName || deliveryAutoSaveStartedAtRef.current === null) return
@@ -1225,7 +1278,7 @@ export default function EngineWorkspace() {
               onClick={() => void handleChooseDeliveryDirectory()}
               disabled={deliveryBusy || !isEngineLocalDeliverySupported()}
               className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium ${deliveryDirectoryName ? 'border-emerald-300 text-emerald-700 hover:bg-emerald-50 dark:border-emerald-400/30 dark:text-emerald-300 dark:hover:bg-emerald-500/10' : 'border-amber-300 text-amber-700 hover:bg-amber-50 dark:border-amber-400/30 dark:text-amber-300 dark:hover:bg-amber-500/10'} disabled:opacity-40`}
-              title={isEngineLocalDeliverySupported() ? '选择生成结果自动保存的本地目录' : '当前浏览器不支持目录自动写入'}
+              title={isEngineLocalDeliverySupported() ? '选择引擎批量交付的本地目录（与画廊 4K 自动保存目录相互独立）' : '当前浏览器不支持目录自动写入'}
             >
               {deliveryBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
               {deliveryDirectoryName ? `交付：${deliveryDirectoryName}` : '设置本地交付'}

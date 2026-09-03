@@ -43,6 +43,7 @@ import {
   getLocalAutoSaveDirectoryHandle,
   putLocalAutoSaveDirectoryHandle,
   clearLocalAutoSaveDirectoryHandle,
+  clearEngineDeliveryDirectoryHandle,
   getImage,
   getImageMetadata,
   getImageRecord,
@@ -5199,6 +5200,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
         supportPromptDismissed: false,
       })
       await clearLocalAutoSaveDirectoryHandle()
+      await clearEngineDeliveryDirectoryHandle()
       if (presetConfig) {
         useStore.setState({ settings: { ...DEFAULT_SETTINGS } })
         await useStore.getState().setPresetImportedSettings(presetConfig)
@@ -5755,6 +5757,7 @@ export async function importData(input: File | File[], options: ImportOptions = 
         if (presetProfileIds.has(id)) state.restorePresetProfile(id)
       }
       const current = useStore.getState()
+      // 只重置画廊自动保存句柄；引擎交付句柄是独立授权，不随配置导入失效。
       await clearLocalAutoSaveDirectoryHandle()
       const importedSettings = settingsManifests.reduce(
         (cur, part) => mergeImportedSettings(cur, part.manifest.settings, { preserveInternalIds: true }),

@@ -1803,7 +1803,7 @@ export default function SettingsModal() {
                     <div>
                       <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">本地自动保存</h4>
                       <p className="mt-1 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-                        仅自动保存画廊模式下成功生成的 4K 图片。需要桌面 Chrome/Edge；移动端暂不支持本地自动保存。
+                        仅自动保存画廊模式下成功生成的 4K 图片。保存目录与引擎批量交付目录相互独立。需要桌面 Chrome/Edge；移动端暂不支持本地自动保存。
                       </p>
                     </div>
                     <Checkbox

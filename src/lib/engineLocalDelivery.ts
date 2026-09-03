@@ -10,7 +10,13 @@ import {
   type ImageJobV1,
   type ImageTaskApiConfig,
 } from './imageTaskApi'
-import { getLocalAutoSaveDirectoryHandle, putEngineDeliveryRecord, getEngineDeliveryRecord, type EngineDeliveryRecord } from './db'
+import {
+  getEngineDeliveryDirectoryHandle,
+  putEngineDeliveryDirectoryHandle,
+  putEngineDeliveryRecord,
+  getEngineDeliveryRecord,
+  type EngineDeliveryRecord,
+} from './db'
 import { isLocalAutoSaveSupported } from './localAutoSave'
 import {
   LocalAutoSavePermissionError,
@@ -97,7 +103,7 @@ function errorText(error: unknown) {
 }
 
 async function getDirectory(): Promise<EngineDeliveryDirectory | null> {
-  const record = await getLocalAutoSaveDirectoryHandle()
+  const record = await getEngineDeliveryDirectoryHandle()
   if (!record?.handle) return null
   return { handle: record.handle as unknown as WritableDirectoryHandle, name: record.name || record.handle.name || '本地目录' }
 }
@@ -116,8 +122,7 @@ export async function chooseEngineLocalDeliveryDirectory(): Promise<EngineDelive
     showDirectoryPicker: (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>
   }).showDirectoryPicker
   const handle = await picker({ mode: 'readwrite' })
-  const { putLocalAutoSaveDirectoryHandle } = await import('./db')
-  await putLocalAutoSaveDirectoryHandle(handle)
+  await putEngineDeliveryDirectoryHandle(handle)
   return { handle: handle as unknown as WritableDirectoryHandle, name: handle.name || '本地目录' }
 }
 

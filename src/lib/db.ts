@@ -9,6 +9,7 @@ const STORE_AGENT_CONVERSATIONS = 'agentConversations'
 const STORE_LOCAL_AUTO_SAVE = 'localAutoSave'
 const STORE_META = 'meta'
 const LOCAL_AUTO_SAVE_DIRECTORY_KEY = 'directory'
+const ENGINE_DELIVERY_DIRECTORY_KEY = 'engineDeliveryDirectory'
 const TASK_GENERATION_KEY = 'taskGeneration'
 const ENGINE_DELIVERY_PREFIX = 'engineDelivery:'
 const THUMBNAIL_MAX_SIZE = 720
@@ -18,7 +19,7 @@ const THUMBNAIL_VERSION = 2
 export const CURRENT_THUMBNAIL_VERSION = THUMBNAIL_VERSION
 
 export interface StoredLocalAutoSaveDirectoryHandle {
-  id: typeof LOCAL_AUTO_SAVE_DIRECTORY_KEY
+  id: string
   handle: FileSystemDirectoryHandle
   name?: string
   updatedAt: number
@@ -373,6 +374,27 @@ export function putLocalAutoSaveDirectoryHandle(handle: FileSystemDirectoryHandl
 
 export function clearLocalAutoSaveDirectoryHandle(): Promise<undefined> {
   return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(LOCAL_AUTO_SAVE_DIRECTORY_KEY))
+}
+
+// ===== Engine local delivery directory =====
+// 引擎批量交付目录与画廊 4K 自动保存目录是两个独立关注点：
+// 各自授权、各自更换，互不覆盖（此前共用 directory key 是缺陷来源）。
+
+export function getEngineDeliveryDirectoryHandle(): Promise<StoredLocalAutoSaveDirectoryHandle | undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readonly', (s) => s.get(ENGINE_DELIVERY_DIRECTORY_KEY))
+}
+
+export function putEngineDeliveryDirectoryHandle(handle: FileSystemDirectoryHandle): Promise<IDBValidKey> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.put({
+    id: ENGINE_DELIVERY_DIRECTORY_KEY,
+    handle,
+    name: handle.name,
+    updatedAt: Date.now(),
+  } satisfies StoredLocalAutoSaveDirectoryHandle))
+}
+
+export function clearEngineDeliveryDirectoryHandle(): Promise<undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(ENGINE_DELIVERY_DIRECTORY_KEY))
 }
 
 export interface EngineDeliveryRecord {

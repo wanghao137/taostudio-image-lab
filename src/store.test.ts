@@ -16,7 +16,13 @@ vi.mock('./lib/db', () => {
   const thumbnails = new Map<string, StoredImageThumbnail>()
   const agentConversations = new Map<string, AgentConversation>()
   let localAutoSaveDirectoryHandle: {
-    id: 'directory'
+    id: string
+    handle: FileSystemDirectoryHandle
+    name?: string
+    updatedAt: number
+  } | undefined
+  let engineDeliveryDirectoryHandle: {
+    id: string
     handle: FileSystemDirectoryHandle
     name?: string
     updatedAt: number
@@ -81,6 +87,19 @@ vi.mock('./lib/db', () => {
     },
     clearLocalAutoSaveDirectoryHandle: async () => {
       localAutoSaveDirectoryHandle = undefined
+    },
+    getEngineDeliveryDirectoryHandle: async () => engineDeliveryDirectoryHandle,
+    putEngineDeliveryDirectoryHandle: async (handle: FileSystemDirectoryHandle) => {
+      engineDeliveryDirectoryHandle = {
+        id: 'engineDeliveryDirectory',
+        handle,
+        name: handle.name,
+        updatedAt: Date.now(),
+      }
+      return 'engineDeliveryDirectory'
+    },
+    clearEngineDeliveryDirectoryHandle: async () => {
+      engineDeliveryDirectoryHandle = undefined
     },
     getImage: async (id: string) => images.get(id),
     getStoredImageThumbnail: async (id: string) => thumbnails.get(id),
@@ -262,7 +281,7 @@ vi.mock('./lib/agentApi', async (importOriginal) => {
     })),
   }
 })
-import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getLocalAutoSaveDirectoryHandle, getStoredFreshImageThumbnail, putAgentConversation, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
+import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getEngineDeliveryDirectoryHandle, getImage, getLocalAutoSaveDirectoryHandle, getStoredFreshImageThumbnail, putAgentConversation, putEngineDeliveryDirectoryHandle, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
@@ -740,6 +759,32 @@ describe('local auto-save store integration', () => {
     await clearData({ clearConfig: true, clearTasks: false })
 
     expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+  })
+
+  it('clears the engine delivery directory handle together with the gallery handle when clearing config', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('4K'))
+    await putEngineDeliveryDirectoryHandle(fakeDirectoryHandle('批量'))
+
+    await clearData({ clearConfig: true, clearTasks: false })
+
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+    expect(await getEngineDeliveryDirectoryHandle()).toBeUndefined()
+  })
+
+  it('keeps the engine delivery directory handle when importing config', async () => {
+    await putEngineDeliveryDirectoryHandle(fakeDirectoryHandle('批量'))
+    useStore.setState({
+      settings: normalizeSettings(DEFAULT_SETTINGS),
+    })
+
+    const imported = await importData(importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      settings: localAutoSaveSettings(true, { directoryName: 'Imported Archive' }),
+    }), { importConfig: true, importTasks: false })
+
+    expect(imported).toBe(true)
+    expect(await getEngineDeliveryDirectoryHandle()).toMatchObject({ name: '批量' })
   })
 
   it('clears the stored directory handle and imported archive metadata when importing local auto-save settings', async () => {
