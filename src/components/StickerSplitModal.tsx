@@ -18,7 +18,7 @@ import {
 import type { SplitImageData, SplitOutput, SplitRunResult, SquareSetting } from '../lib/stickerSplit/engine'
 import { downloadSplitOutput, downloadSplitOutputsZip } from '../lib/stickerSplit/download'
 import { outputToCanvas } from '../lib/stickerSplit/animate'
-import { STICKER_STYLE_PRESETS, buildStickerSheetPrompt } from '../lib/stickerSplit/stylePresets'
+import { STICKER_STYLE_PRESETS, STYLE_GROUPS, COMMON_STICKER_STYLE_IDS, buildStickerSheetPrompt } from '../lib/stickerSplit/stylePresets'
 import StickerAnimatePanel from './StickerAnimatePanel'
 
 type Phase = 'loading' | 'ready' | 'error'
@@ -445,22 +445,33 @@ export default function StickerSplitModal() {
               拼图风格
             </button>
             {showStylePanel && (
-              <div className="absolute right-0 top-full z-30 mt-2 w-64 rounded-xl border border-gray-200/80 bg-white/95 p-3 shadow-2xl backdrop-blur-xl dark:border-white/10 dark:bg-gray-800/95">
-                <p className="mb-2 text-[11px] text-gray-500 dark:text-gray-400">选风格，一键填入九宫格贴纸拼图的生成提示词：</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {STICKER_STYLE_PRESETS.map((style) => (
-                    <button
-                      key={style.id}
-                      type="button"
-                      onClick={() => {
-                        setShowStylePanel(false)
-                        handleStylePrompt(style.id)
-                      }}
-                      className="rounded-full border border-gray-200/80 px-2.5 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-white/10 dark:text-gray-300 dark:hover:border-blue-400/40 dark:hover:text-blue-300"
-                    >
-                      {style.label}
-                    </button>
-                  ))}
+              <div className="absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-gray-200/80 bg-white/95 p-3 shadow-2xl backdrop-blur-xl dark:border-white/10 dark:bg-gray-800/95">
+                <p className="mb-2 text-[11px] text-gray-500 dark:text-gray-400">36 种风格，选一个一键填入九宫格拼图生成提示词：</p>
+                <div className="max-h-80 space-y-2.5 overflow-y-auto pr-1">
+                  {STYLE_GROUPS.map((group) => {
+                    const styles = STICKER_STYLE_PRESETS.filter((s) => s.group === group.id)
+                    if (!styles.length) return null
+                    return (
+                      <div key={group.id}>
+                        <p className="mb-1 text-[10px] font-medium tracking-wide text-gray-400 dark:text-gray-500">{group.label}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {styles.map((style) => (
+                            <button
+                              key={style.id}
+                              type="button"
+                              onClick={() => {
+                                setShowStylePanel(false)
+                                handleStylePrompt(style.id)
+                              }}
+                              className="rounded-full border border-gray-200/80 px-2.5 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-white/10 dark:text-gray-300 dark:hover:border-blue-400/40 dark:hover:text-blue-300"
+                            >
+                              {style.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             )}
@@ -521,17 +532,28 @@ export default function StickerSplitModal() {
                       <p className="text-xs">或点击右下角「换一张」· Ctrl+V 粘贴</p>
                       <p className="text-[11px] text-gray-400 dark:text-gray-500">还没有拼图？选一个风格，一键填入生成提示词：</p>
                       <div className="flex max-w-md flex-wrap items-center justify-center gap-1.5">
-                        {STICKER_STYLE_PRESETS.map((style) => (
-                          <button
-                            key={style.id}
-                            type="button"
-                            onClick={() => handleStylePrompt(style.id)}
-                            className="rounded-full border border-gray-200/80 bg-white/70 px-2.5 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-gray-300 dark:hover:border-blue-400/40 dark:hover:text-blue-300"
-                          >
-                            {style.label}
-                          </button>
-                        ))}
+                        {COMMON_STICKER_STYLE_IDS.map((id) => {
+                          const style = STICKER_STYLE_PRESETS.find((s) => s.id === id)
+                          if (!style) return null
+                          return (
+                            <button
+                              key={style.id}
+                              type="button"
+                              onClick={() => handleStylePrompt(style.id)}
+                              className="rounded-full border border-gray-200/80 bg-white/70 px-2.5 py-1 text-[11px] text-gray-600 transition hover:border-blue-400 hover:text-blue-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-gray-300 dark:hover:border-blue-400/40 dark:hover:text-blue-300"
+                            >
+                              {style.label}
+                            </button>
+                          )
+                        })}
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowStylePanel(true)}
+                        className="text-[11px] text-blue-500 underline-offset-2 transition hover:underline dark:text-blue-400"
+                      >
+                        查看全部 36 种风格 →
+                      </button>
                       <p className="text-xs text-gray-400 dark:text-gray-500">透明底 PNG / 单色底 JPG · 全程本地处理，不上传</p>
                     </>
                   )}

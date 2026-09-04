@@ -3,20 +3,27 @@ import { zipSync } from 'fflate'
 import { useStore } from '../store'
 import type { SplitOutput } from '../lib/stickerSplit/engine'
 import {
-  MOTION_PRESETS,
   TimelineRenderer,
   buildTimeline,
   outputToCanvas,
   timelineTotalMs,
   type ComposeSource,
-  type MotionPreset,
 } from '../lib/stickerSplit/animate'
 import { encodeApngFromCanvases } from '../lib/stickerSplit/apng'
 import { encodeGif } from '../lib/stickerSplit/gifEncode'
-import { ACTION_TEMPLATES, generateActionFrame, dataUrlToCanvas, getActionTemplate, normalizeCanvasToActionFrame } from '../lib/stickerSplit/actionFrames'
+import {
+  ACTION_FRAME_SIDE,
+  ACTION_TEMPLATES,
+  generateActionPoseSheet,
+  getActionTemplate,
+  normalizeCanvasToActionFrame,
+  dataUrlToCanvas,
+} from '../lib/stickerSplit/actionFrames'
 
-type AnimateMode = 'sequence' | 'single' | 'action'
 type ExportSize = 512 | 240
+
+/** Skill A 路线节奏：步进关键姿势 起始→预备→峰值→恢复→峰值→预备，每姿势 400ms。 */
+const ACTION_POSE_MS = 400
 
 interface StickerAnimatePanelProps {
   outputs: SplitOutput[]
@@ -59,21 +66,17 @@ const segBtn = (active: boolean) =>
     active ? 'bg-blue-500 font-medium text-white' : 'text-gray-500 hover:bg-gray-50 dark:text-gray-400 dark:hover:bg-white/[0.06]'
   }`
 
-/** 动图工作台：预览走导出同一条时间线；右列为帧选择。 */
+/** 动图工作台 —— da-motion-sticker-skill A 路线（Codex 关键姿势）。
+ *  每张贴纸一次生成 2×2 姿势表，本地切格组帧；起始帧=原图；步进关键姿势循环。
+ *  整层仿射动画按 Skill 禁用，不作为模式或失败回退。 */
 export default function StickerAnimatePanel({ outputs, nameBase, showToast }: StickerAnimatePanelProps) {
-  const [mode, setMode] = useState<AnimateMode>('sequence')
-  const [selectedPoses, setSelectedPoses] = useState<Set<number>>(() => new Set(outputs.map((o) => o.index)))
-  const [singleIndex, setSingleIndex] = useState(outputs[0]?.index ?? 1)
-  const [preset, setPreset] = useState<MotionPreset>('bounce')
-  const [poseMs, setPoseMs] = useState(160)
-  const [crossfade, setCrossfade] = useState(true)
-  const [pingPong, setPingPong] = useState(true)
-  const [exportSize, setExportSize] = useState<ExportSize>(512)
-  const [busy, setBusy] = useState<'gif' | 'apng' | 'batch' | null>(null)
-  // AI 动作帧：动作模板 + 已生成帧（第 1 帧固定为所选贴纸原图）
+  const [subjectIndex, setSubjectIndex] = useState(outputs[0]?.index ?? 1)
   const [actionTemplateId, setActionTemplateId] = useState(ACTION_TEMPLATES[0].id)
   const [aiFrameCanvases, setAiFrameCanvases] = useState<HTMLCanvasElement[]>([])
-  const [genState, setGenState] = useState<{ running: boolean; done: number; total: number; error?: string }>({ running: false, done: 0, total: 0 })
+  const [genState, setGenState] = useState<{ running: boolean; error?: string; info?: string }>({ running: false })
+  const [batchState, setBatchState] = useState<{ running: boolean; done: number; total: number } | null>(null)
+  const [exportSize, setExportSize] = useState<ExportSize>(512)
+  const [busy, setBusy] = useState<'gif' | 'apng' | 'batch' | null>(null)
 
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -82,14 +85,9 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
     [outputs],
   )
 
-  const sequencePoses = useMemo(() => {
-    const selected = outputs.filter((o) => selectedPoses.has(o.index)).map((o) => o.index)
-    return selected.length >= 2 ? selected : outputs.length ? [outputs[0].index] : []
-  }, [outputs, selectedPoses])
-
-  // AI 动作帧源：原图帧（与生成帧同一归一化管线，统一边长消除帧间尺度泵动）+ 生成帧（index 从 1 起）
+  // 帧源：原图帧（与生成帧同一归一化管线）+ 姿势表三帧（预备/峰值/恢复，index 从 2 起）
   const aiSources = useMemo<ComposeSource[]>(() => {
-    const original = sources.find((s) => s.index === singleIndex)
+    const original = sources.find((s) => s.index === subjectIndex)
     if (!original) return []
     try {
       const normalized = normalizeCanvasToActionFrame(original.canvas)
@@ -97,33 +95,24 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
     } catch {
       return []
     }
-  }, [sources, singleIndex, aiFrameCanvases])
+  }, [sources, subjectIndex, aiFrameCanvases])
 
-  // AI 动作帧模式下切换角色时，清空上一个角色生成的帧，避免新旧混切
+  // 切换角色时清空上一个角色的姿势帧，避免新旧混切
   useEffect(() => {
     setAiFrameCanvases([])
-    setGenState({ running: false, done: 0, total: 0 })
-  }, [singleIndex])
+    setGenState({ running: false })
+  }, [subjectIndex])
 
-  // 当前模式的帧序列与帧源（导出/预览统一路由）
-  const currentPoses = mode === 'action'
-    ? aiSources.map((s) => s.index)
-    : mode === 'sequence'
-      ? sequencePoses
-      : [singleIndex]
-  const currentSources = mode === 'action' ? aiSources : sources
-  const currentCrossfade = mode === 'action' ? false : crossfade
-
-  // AI 动作帧模式纯内容帧播放（不加刚体叠加），对齐 motion-sticker-pack 案例节奏
-  const effectivePreset: MotionPreset = mode === "action" ? "none" : preset
+  // Skill 步进关键姿势时间线：S→A→P→R→P→A，每姿势 400ms，无溶解、无刚体叠加
+  const currentPoses = aiSources.map((s) => s.index)
   const timeline = useMemo(
-    () => buildTimeline({ poses: currentPoses, pingPong, crossfade: currentCrossfade, poseMs, motionPreset: effectivePreset }),
-    [currentPoses, pingPong, currentCrossfade, poseMs, effectivePreset],
+    () => buildTimeline({ poses: currentPoses, pingPong: true, crossfade: false, poseMs: ACTION_POSE_MS, motionPreset: 'none' }),
+    [currentPoses],
   )
 
   const activeSources = useMemo(
-    () => currentSources.filter((s) => currentPoses.includes(s.index)),
-    [currentSources, currentPoses],
+    () => aiSources.filter((s) => currentPoses.includes(s.index)),
+    [aiSources, currentPoses],
   )
   const uniformMaxDim = useMemo(
     () => Math.max(1, ...activeSources.map((s) => Math.max(s.canvas.width, s.canvas.height))),
@@ -153,66 +142,65 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
           break
         }
       }
-      renderer.render(step, effectivePreset)
+      renderer.render(step, 'none')
       drawChecker(pctx, preview.width, preview.height, 16, isDarkTheme())
       pctx.drawImage(renderer.canvas, 0, 0)
       raf = requestAnimationFrame(draw)
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
-  }, [activeSources, uniformMaxDim, timeline, effectivePreset])
+  }, [activeSources, uniformMaxDim, timeline])
 
-  const collectGifFrames = (size: number, poses: number[], useCrossfade: boolean, forBatch: boolean) => {
-    const frames: Array<{ data: Uint8ClampedArray; width: number; height: number; delayMs: number }> = []
-    const tl = buildTimeline({ poses, pingPong, crossfade: forBatch ? false : useCrossfade, poseMs, motionPreset: effectivePreset })
-    const srcs = (forBatch ? sources : currentSources).filter((s) => poses.includes(s.index))
+  const collectFrames = (size: number, frames: HTMLCanvasElement[]) => {
+    const poses = frames.map((_, i) => i + 1)
+    const tl = buildTimeline({ poses, pingPong: true, crossfade: false, poseMs: ACTION_POSE_MS, motionPreset: 'none' })
+    const srcs = frames.map((canvas, i) => ({ index: i + 1, canvas }))
     const maxDim = Math.max(1, ...srcs.map((s) => Math.max(s.canvas.width, s.canvas.height)))
     const renderer = new TimelineRenderer(srcs, maxDim, size)
+    const out: Array<{ data: Uint8ClampedArray; width: number; height: number; delayMs: number }> = []
     for (const step of tl) {
-      renderer.render(step, effectivePreset)
+      renderer.render(step, 'none')
       const ctx = renderer.canvas.getContext('2d')
       if (!ctx) continue
-      frames.push({ data: ctx.getImageData(0, 0, size, size).data, width: size, height: size, delayMs: step.delayMs })
+      out.push({ data: ctx.getImageData(0, 0, size, size).data, width: size, height: size, delayMs: step.delayMs })
     }
-    return frames
+    return out
   }
 
-  /** AI 动作帧生成：逐相位调当前生成通道（图生图编辑），边生成边预览。 */
+  /** 生成 2×2 姿势表（一次调用），帧即时进预览。 */
   const generateFrames = async () => {
     if (genState.running || busy) return
     const template = getActionTemplate(actionTemplateId)
-    if (!template) return
-    const sticker = outputs.find((o) => o.index === singleIndex)
-    if (!sticker) return
+    const sticker = outputs.find((o) => o.index === subjectIndex)
+    if (!template || !sticker) return
     const stickerDataUrl = outputToCanvas(sticker).toDataURL('image/png')
     const { settings, params } = useStore.getState()
 
     setAiFrameCanvases([])
-    setGenState({ running: true, done: 0, total: template.phases.length, error: undefined })
-    const urls: string[] = []
-    for (let i = 0; i < template.phases.length; i++) {
-      try {
-        const url = await generateActionFrame(settings, params, stickerDataUrl, template.phases[i])
-        const canvas = await dataUrlToCanvas(url)
-        urls.push(url)
-        setAiFrameCanvases((prev) => [...prev, canvas])
-        setGenState((s) => ({ ...s, done: i + 1 }))
-      } catch (err) {
-        console.error(err)
-        setGenState((s) => ({ ...s, running: false, error: err instanceof Error ? err.message : String(err) }))
-        showToast(`第 ${i + 1} 帧生成失败：${err instanceof Error ? err.message : String(err)}`, 'error')
-        return
-      }
+    setGenState({ running: true })
+    try {
+      const sheet = await generateActionPoseSheet(settings, params, stickerDataUrl, template.motion)
+      const canvases = await Promise.all(sheet.poses.map((p) => dataUrlToCanvas(p.dataUrl)))
+      setAiFrameCanvases(canvases)
+      const notes = [
+        `姿势差 ${sheet.motionDifferences.map((d) => d.toFixed(2)).join('/')}`,
+        sheet.paletteAutocorrect ? '已色板自愈' : null,
+      ].filter(Boolean)
+      setGenState({ running: false, info: notes.join(' · ') })
+      showToast(`姿势表生成完成（预备/峰值/恢复 3 帧）`, 'success')
+    } catch (err) {
+      console.error(err)
+      setGenState({ running: false, error: err instanceof Error ? err.message : String(err) })
+      showToast(`姿势表生成失败：${err instanceof Error ? err.message : String(err)}`, 'error')
     }
-    setGenState({ running: false, done: template.phases.length, total: template.phases.length })
-    showToast(`动作帧生成完成（${urls.length} 帧）`, 'success')
   }
 
   const exportGif = async () => {
-    if (busy || !activeSources.length) return
+    if (busy || !aiFrameCanvases.length) return
     setBusy('gif')
     try {
-      const blob = encodeGif(collectGifFrames(exportSize, currentPoses, currentCrossfade, false))
+      const frames = [aiSources[0].canvas, ...aiFrameCanvases]
+      const blob = encodeGif(collectFrames(exportSize, frames))
       triggerDownload(blob, `${nameBase}-anim.gif`)
       showToast(`GIF 已导出（${formatKb(blob.size)}）`, 'success')
     } catch (err) {
@@ -224,25 +212,26 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
   }
 
   const exportApng = async () => {
-    if (busy || !activeSources.length) return
+    if (busy || !aiFrameCanvases.length) return
     setBusy('apng')
     try {
-      const poses = currentPoses
-      const tl = buildTimeline({ poses, pingPong, crossfade: currentCrossfade, poseMs, motionPreset: effectivePreset })
-      const srcs = currentSources.filter((s) => poses.includes(s.index))
+      const frames = [aiSources[0].canvas, ...aiFrameCanvases]
+      const poses = frames.map((_, i) => i + 1)
+      const tl = buildTimeline({ poses, pingPong: true, crossfade: false, poseMs: ACTION_POSE_MS, motionPreset: 'none' })
+      const srcs = frames.map((canvas, i) => ({ index: i + 1, canvas }))
       const maxDim = Math.max(1, ...srcs.map((s) => Math.max(s.canvas.width, s.canvas.height)))
       const renderer = new TimelineRenderer(srcs, maxDim, exportSize)
-      const frames: Array<{ canvas: HTMLCanvasElement; delayMs: number }> = []
+      const snaps: Array<{ canvas: HTMLCanvasElement; delayMs: number }> = []
       for (const step of tl) {
-        renderer.render(step, effectivePreset)
+        renderer.render(step, 'none')
         // 每帧克隆快照，避免复用同一画布导致内容被下一帧覆盖
         const snapshot = document.createElement('canvas')
         snapshot.width = exportSize
         snapshot.height = exportSize
         snapshot.getContext('2d')?.drawImage(renderer.canvas, 0, 0)
-        frames.push({ canvas: snapshot, delayMs: step.delayMs })
+        snaps.push({ canvas: snapshot, delayMs: step.delayMs })
       }
-      const blob = await encodeApngFromCanvases(frames)
+      const blob = await encodeApngFromCanvases(snaps)
       triggerDownload(blob, `${nameBase}-anim.png`)
       showToast(`APNG 已导出（${formatKb(blob.size)}）`, 'success')
     } catch (err) {
@@ -253,27 +242,48 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
     }
   }
 
+  /** 批量：整套贴纸逐张生成姿势表并导出 GIF（每张一次生成调用，带进度）。 */
   const exportBatch = async () => {
-    if (busy) return
+    if (busy || batchState?.running) return
+    const template = getActionTemplate(actionTemplateId)
+    if (!template) return
+    const { settings, params } = useStore.getState()
     setBusy('batch')
+    setBatchState({ running: true, done: 0, total: outputs.length })
     try {
       const files: Record<string, Uint8Array | [Uint8Array, { mtime: Date }]> = {}
+      let failed = 0
       for (let i = 0; i < outputs.length; i++) {
-        const frames = collectGifFrames(exportSize, [outputs[i].index], false, true)
-        const blob = encodeGif(frames)
-        const bytes = new Uint8Array(await blob.arrayBuffer())
-        files[`${nameBase}-${String(i + 1).padStart(2, '0')}-anim.gif`] = [bytes, { mtime: new Date() }]
+        const output = outputs[i]
+        const stickerDataUrl = outputToCanvas(output).toDataURL('image/png')
+        try {
+          const sheet = await generateActionPoseSheet(settings, params, stickerDataUrl, template.motion)
+          const poseCanvases = await Promise.all(sheet.poses.map((p) => dataUrlToCanvas(p.dataUrl)))
+          const original = normalizeCanvasToActionFrame(outputToCanvas(output))
+          const blob = encodeGif(collectFrames(exportSize, [original, ...poseCanvases]))
+          files[`${nameBase}-${String(i + 1).padStart(2, '0')}-anim.gif`] = [new Uint8Array(await blob.arrayBuffer()), { mtime: new Date() }]
+        } catch (err) {
+          console.error(`批量第 ${i + 1} 张失败`, err)
+          failed++
+        }
+        setBatchState({ running: true, done: i + 1, total: outputs.length })
       }
-      const zipped = zipSync(files, { level: 6 })
-      const buffer = zipped.buffer.slice(zipped.byteOffset, zipped.byteOffset + zipped.byteLength) as ArrayBuffer
-      const zipBlob = new Blob([buffer], { type: 'application/zip' })
-      triggerDownload(zipBlob, `${nameBase}-anim.zip`)
-      showToast(`已批量导出 ${outputs.length} 个 GIF（${formatKb(zipBlob.size)}）`, 'success')
+      if (Object.keys(files).length > 0) {
+        const zipped = zipSync(files, { level: 6 })
+        const buffer = zipped.buffer.slice(zipped.byteOffset, zipped.byteOffset + zipped.byteLength) as ArrayBuffer
+        triggerDownload(new Blob([buffer], { type: 'application/zip' }), `${nameBase}-anim.zip`)
+      }
+      const okCount = Object.keys(files).length
+      showToast(
+        failed ? `批量完成：成功 ${okCount} 张，失败 ${failed} 张（已跳过）` : `已批量导出 ${okCount} 个动作 GIF（${template.label}）`,
+        failed ? 'info' : 'success',
+      )
     } catch (err) {
       console.error(err)
       showToast('批量导出失败', 'error')
     } finally {
       setBusy(null)
+      setBatchState(null)
     }
   }
 
@@ -289,260 +299,144 @@ export default function StickerAnimatePanel({ outputs, nameBase, showToast }: St
             ref={previewCanvasRef}
             className="max-h-full max-w-full rounded-xl shadow-sm ring-1 ring-gray-200/70 dark:ring-white/[0.06]"
           />
-          {busy && (
+          {(busy || genState.running) && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-[1px] dark:bg-black/40">
               <div className="flex items-center gap-2 rounded-full bg-white/90 px-4 py-2 text-xs font-medium text-gray-700 shadow-lg dark:bg-black/70 dark:text-gray-200">
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500 dark:border-white/20 dark:border-t-blue-400" />
-                {busy === 'batch' ? '批量生成中…' : '编码中…'}
+                {busy === 'batch' && batchState ? `批量生成中 ${batchState.done}/${batchState.total}…` : busy ? '编码中…' : '生成姿势表…'}
               </div>
             </div>
           )}
         </div>
 
         <div className="max-h-[46%] shrink-0 space-y-3 overflow-y-auto overscroll-contain border-t border-gray-200/80 px-4 py-3 dark:border-white/[0.06]">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-              <button type="button" className={`w-16 ${segBtn(mode === 'sequence')}`} onClick={() => setMode('sequence')}>姿势轮播</button>
-              <button type="button" className={`w-16 ${segBtn(mode === 'single')}`} onClick={() => setMode('single')}>单张动效</button>
-              <button type="button" className={`w-16 ${segBtn(mode === 'action')}`} onClick={() => setMode('action')}>AI 动作</button>
-            </div>
-            {mode === 'action' ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-                  {ACTION_TEMPLATES.map((t) => (
-                    <button key={t.id} type="button" className={segBtn(actionTemplateId === t.id)} onClick={() => setActionTemplateId(t.id)}>
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  disabled={genState.running || busy !== null}
-                  onClick={() => void generateFrames()}
-                  className="flex items-center gap-1.5 whitespace-nowrap rounded-xl bg-blue-500 px-4 py-2 text-xs font-semibold text-white shadow-md transition hover:bg-blue-600 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {genState.running ? `生成中 ${genState.done}/${genState.total}…` : aiFrameCanvases.length ? '重新生成' : '生成动作帧'}
+              {ACTION_TEMPLATES.map((t) => (
+                <button key={t.id} type="button" className={segBtn(actionTemplateId === t.id)} onClick={() => setActionTemplateId(t.id)}>
+                  {t.label}
                 </button>
-                {genState.running && (
-                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500 dark:border-white/20 dark:border-t-blue-400" />
-                )}
-                {genState.error && <span className="text-xs text-red-500">{genState.error}</span>}
-              </div>
-            ) : (
-              <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-                {MOTION_PRESETS.map((p) => (
-                  <button key={p.value} type="button" className={segBtn(preset === p.value)} onClick={() => setPreset(p.value)}>
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            )}
+              ))}
+            </div>
+            <button
+              type="button"
+              disabled={genState.running || busy !== null}
+              onClick={() => void generateFrames()}
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-xl bg-blue-500 px-4 py-2 text-xs font-semibold text-white shadow-md transition hover:bg-blue-600 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {genState.running ? '生成中…' : aiFrameCanvases.length ? '重新生成' : '生成姿势表'}
+            </button>
+            {genState.error && <span className="text-xs text-red-500">{genState.error}</span>}
+            {genState.info && <span className="text-[11px] text-gray-400 dark:text-gray-500">{genState.info}</span>}
           </div>
 
           <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-gray-500 dark:text-gray-400">
-            {mode !== 'single' && (
             <label className="flex items-center gap-2">
-              <span>帧时长</span>
-              <input
-                type="range"
-                min={60}
-                max={240}
-                step={20}
-                value={poseMs}
-                onChange={(e) => setPoseMs(Number(e.target.value))}
-                className="h-1.5 w-28 cursor-pointer appearance-none rounded-full bg-gray-200 outline-none dark:bg-white/10 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-blue-500 [&::-webkit-slider-thumb]:shadow-md"
-              />
-              <span className="font-mono">{poseMs}ms</span>
+              <span>导出尺寸</span>
+              <select
+                value={exportSize}
+                onChange={(e) => setExportSize(Number(e.target.value) === 240 ? 240 : 512)}
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs dark:border-white/10 dark:bg-gray-800"
+              >
+                <option value={512}>512</option>
+                <option value={240}>240（微信）</option>
+              </select>
             </label>
-            )}
-            {mode !== 'action' && (
-            <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-              <button type="button" className={`w-14 ${segBtn(!crossfade)}`} onClick={() => setCrossfade(false)}>硬切</button>
-              <button type="button" className={`w-14 ${segBtn(crossfade)}`} onClick={() => setCrossfade(true)}>溶解</button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={!aiFrameCanvases.length || busy !== null}
+                onClick={() => void exportGif()}
+                className="rounded-xl bg-gray-900 px-3.5 py-1.5 text-xs font-semibold text-white shadow transition hover:bg-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
+              >
+                导出 GIF
+              </button>
+              <button
+                type="button"
+                disabled={!aiFrameCanvases.length || busy !== null}
+                onClick={() => void exportApng()}
+                className="rounded-xl border border-gray-300 px-3.5 py-1.5 text-xs font-medium text-gray-600 transition hover:border-gray-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:text-gray-300 dark:hover:border-white/30"
+              >
+                导出 APNG
+              </button>
+              <button
+                type="button"
+                disabled={busy !== null || genState.running}
+                onClick={() => void exportBatch()}
+                className="rounded-xl border border-gray-300 px-3.5 py-1.5 text-xs font-medium text-gray-600 transition hover:border-gray-400 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:text-gray-300 dark:hover:border-white/30"
+              >
+                批量整套（{outputs.length} 张）
+              </button>
             </div>
-            )}
-            <button
-              type="button"
-              onClick={() => setPingPong((v) => !v)}
-              className={`rounded-lg border px-2.5 py-1.5 transition ${
-                pingPong
-                  ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-400/30 dark:bg-blue-500/10 dark:text-blue-300'
-                  : 'border-gray-200 text-gray-400 dark:border-white/10 dark:text-gray-500'
-              }`}
-            >
-              往返循环 {pingPong ? '开' : '关'}
-            </button>
-            <div className="flex overflow-hidden rounded-lg border border-gray-200 dark:border-white/10">
-              <button type="button" className={`w-14 ${segBtn(exportSize === 512)}`} onClick={() => setExportSize(512)}>512</button>
-              <button type="button" className={`w-16 ${segBtn(exportSize === 240)}`} onClick={() => setExportSize(240)}>240·微信</button>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => void exportGif()}
-              className="flex items-center gap-1.5 rounded-xl bg-blue-500 px-4 py-2 text-sm font-semibold text-white shadow-md transition hover:bg-blue-600 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-              </svg>
-              导出 GIF
-            </button>
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => void exportApng()}
-              className="flex items-center gap-1.5 rounded-xl border border-blue-200/80 bg-white/80 px-4 py-2 text-sm font-semibold text-blue-600 transition hover:bg-blue-50 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60 dark:border-blue-400/20 dark:bg-white/[0.04] dark:text-blue-300 dark:hover:bg-blue-500/10"
-            >
-              导出 APNG
-            </button>
-            {mode !== 'action' && (
-            <button
-              type="button"
-              disabled={busy !== null || outputs.length < 2}
-              onClick={() => void exportBatch()}
-              className="flex items-center gap-1.5 rounded-xl border border-gray-200/80 bg-white/80 px-4 py-2 text-sm font-medium text-gray-600 transition hover:bg-gray-100 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-gray-300 dark:hover:bg-white/[0.08]"
-            >
-              批量 GIF×{outputs.length}
-            </button>
-            )}
-            <span className="ml-auto font-mono text-[11px] text-gray-400 dark:text-gray-500">
-              {frameCount} 帧 · {(totalMs / 1000).toFixed(1)}s · {mode === 'sequence' ? `${sequencePoses.length} 个姿势` : `#${String(singleIndex).padStart(2, '0')}`}
+            <span className="font-mono">
+              {frameCount} 帧 · {(totalMs / 1000).toFixed(1)}s
             </span>
           </div>
+
           <p className="text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
-            GIF 适配微信（1-bit 透明，光晕按阈值二值化）；APNG 保留完整半透明。{mode === 'sequence' ? '点击右侧缩略图增删轮播姿势（至少 2 个）。' : mode === 'action' ? '选好角色和动作后点「生成动作帧」，用当前生成通道逐帧补画连续动作（每帧约 1~2 分钟）。' : '点击右侧缩略图选择动效主体。'}
+            关键姿势路线：每张贴纸一次生成 2×2 姿势表（预备/峰值/恢复），首帧用原图，按 起始→预备→峰值→恢复→峰值→预备 步进循环（每姿势 {ACTION_POSE_MS}ms）。
+            GIF 适配微信（1-bit 透明）；APNG 保留完整半透明。批量 = 每张一次生成调用（约 1~2 分钟/张），失败张自动跳过。
           </p>
         </div>
       </div>
 
-      {/* 右：帧选择 */}
-      <div className="flex min-h-0 flex-1 flex-col border-t border-gray-200/80 dark:border-white/[0.06] md:w-64 md:flex-none md:border-l md:border-t-0">
-        <div className="shrink-0 px-4 pt-3 pb-2 text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500">
-          {mode === 'sequence' ? '轮播姿势' : mode === 'action' ? '角色与动作帧' : '动效主体'}
+      {/* 右：角色选择 + 姿势帧条 */}
+      <div className="flex w-full shrink-0 flex-col border-t border-gray-200/80 md:w-56 md:border-l md:border-t-0 dark:border-white/[0.06]">
+        <p className="px-3 pt-3 text-[11px] font-medium text-gray-500 dark:text-gray-400">角色</p>
+        <div className="grid min-h-0 flex-1 grid-cols-3 content-start gap-2 overflow-y-auto p-3">
+          {outputs.map((o) => (
+            <button
+              key={o.index}
+              type="button"
+              onClick={() => setSubjectIndex(o.index)}
+              className={`group relative overflow-hidden rounded-lg border-2 transition ${
+                o.index === subjectIndex ? 'border-blue-500 shadow-md' : 'border-transparent hover:border-gray-300 dark:hover:border-white/20'
+              }`}
+              title={`#${String(o.index).padStart(2, '0')}`}
+            >
+              <Thumb output={o} />
+              <span className="absolute bottom-0.5 left-1 rounded bg-black/45 px-1 text-[9px] font-medium text-white">
+                {String(o.index).padStart(2, '0')}
+              </span>
+            </button>
+          ))}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-3">
-          {mode === 'action' && aiSources.length > 1 && (
-            <div className="mb-2">
-              <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500">动作帧序列</div>
-              <div className="grid grid-cols-3 gap-2">
-                {aiSources.map((s, i) => (
-                  <div key={`frame-${i}`} className="relative overflow-hidden rounded-lg border border-blue-300/60 dark:border-blue-400/30">
-                    <div className="flex h-[60px] items-center justify-center">
-                      <AiFrameThumb canvas={s.canvas} />
-                    </div>
-                    <span className="absolute left-1 top-1 rounded bg-blue-500/90 px-1 font-mono text-[10px] font-bold text-white">
-                      {String(i + 1).padStart(2, '0')}
-                    </span>
-                    {i === 0 && (
-                      <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1 text-[9px] text-white">原图</span>
-                    )}
-                  </div>
-                ))}
-                {genState.running && (
-                  <div className="flex h-[60px] items-center justify-center rounded-lg border border-dashed border-gray-300 dark:border-white/10">
-                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-gray-300 border-t-blue-500 dark:border-white/20 dark:border-t-blue-400" />
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-          {mode !== 'action' && (
-          <div className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500">
-            {mode === 'sequence' ? '拼图姿势' : '角色'}
-          </div>
-          )}
-          <div className="grid grid-cols-3 gap-2">
-            {outputs.map((o) => {
-              const active = mode === 'sequence' ? selectedPoses.has(o.index) : o.index === singleIndex
-              return (
-                <button
-                  key={o.index}
-                  type="button"
-                  onClick={() => {
-                    if (mode === 'sequence') {
-                      setSelectedPoses((prev) => {
-                        const next = new Set(prev)
-                        if (next.has(o.index)) next.delete(o.index)
-                        else next.add(o.index)
-                        return next
-                      })
-                    } else {
-                      setSingleIndex(o.index)
-                    }
-                  }}
-                  className={`relative overflow-hidden rounded-lg border transition ${
-                    active
-                      ? 'border-blue-500 ring-1 ring-blue-500'
-                      : 'border-gray-200/80 opacity-60 hover:opacity-100 dark:border-white/[0.08]'
-                  }`}
-                >
-                  <FrameThumb output={o} />
-                  <span className="absolute left-1 top-1 rounded bg-black/60 px-1 font-mono text-[10px] font-bold text-white backdrop-blur-sm">
-                    #{String(o.index).padStart(2, '0')}
+        {aiFrameCanvases.length > 0 && (
+          <div className="border-t border-gray-200/80 p-3 dark:border-white/[0.06]">
+            <p className="mb-2 text-[11px] font-medium text-gray-500 dark:text-gray-400">关键姿势（原图 + 生成 3 帧）</p>
+            <div className="flex gap-2">
+              {[aiSources[0], ...aiFrameCanvases.map((canvas, i) => ({ index: i + 2, canvas }))].map((src, i) => (
+                <div key={src.index} className="relative flex-1 overflow-hidden rounded-lg ring-1 ring-gray-200/70 dark:ring-white/[0.06]">
+                  <canvas
+                    className="block w-full"
+                    ref={(el) => {
+                      if (!el) return
+                      el.width = ACTION_FRAME_SIDE
+                      el.height = ACTION_FRAME_SIDE
+                      el.getContext('2d')?.drawImage(src.canvas, 0, 0)
+                    }}
+                  />
+                  <span className="absolute bottom-0.5 left-1 rounded bg-black/45 px-1 text-[9px] font-medium text-white">
+                    {['原图', '预备', '峰值', '恢复'][i] ?? i}
                   </span>
-                  {mode === 'sequence' && (
-                    <span
-                      className={`absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold ${
-                        active ? 'bg-blue-500 text-white' : 'bg-black/50 text-white/70'
-                      }`}
-                    >
-                      {active ? '✓' : ''}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   )
 }
 
-function FrameThumb({ output }: { output: SplitOutput }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-
+function Thumb({ output }: { output: SplitOutput }) {
+  const ref = useRef<HTMLCanvasElement | null>(null)
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const side = 72
-    const k = Math.min(side / output.w, side / output.h)
-    canvas.width = Math.max(1, Math.round(output.w * k))
-    canvas.height = Math.max(1, Math.round(output.h * k))
-    const g = canvas.getContext('2d')
-    if (!g) return
-    drawChecker(g, canvas.width, canvas.height, 6, isDarkTheme())
-    g.imageSmoothingQuality = 'high'
-    g.drawImage(outputToCanvas(output), 0, 0, canvas.width, canvas.height)
+    const el = ref.current
+    if (!el) return
+    el.width = output.w
+    el.height = output.h
+    el.getContext('2d')?.putImageData(new ImageData(new Uint8ClampedArray(output.data), output.w, output.h), 0, 0)
   }, [output])
-
-  return (
-    <div className="flex h-[72px] items-center justify-center">
-      <canvas ref={canvasRef} className="block max-h-full max-w-full" />
-    </div>
-  )
-}
-
-/** AI 动作帧缩略图（已是方形 canvas）。 */
-function AiFrameThumb({ canvas: source }: { canvas: HTMLCanvasElement }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const side = 60
-    const k = Math.min(side / source.width, side / source.height)
-    canvas.width = Math.max(1, Math.round(source.width * k))
-    canvas.height = Math.max(1, Math.round(source.height * k))
-    const g = canvas.getContext('2d')
-    if (!g) return
-    drawChecker(g, canvas.width, canvas.height, 5, isDarkTheme())
-    g.imageSmoothingQuality = 'high'
-    g.drawImage(source, 0, 0, canvas.width, canvas.height)
-  }, [source])
-
-  return <canvas ref={canvasRef} className="block max-h-full max-w-full" />
+  return <canvas ref={ref} className="block w-full" />
 }
