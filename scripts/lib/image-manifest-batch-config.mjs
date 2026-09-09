@@ -60,7 +60,7 @@ export function resolveImageManifestBatchConfig(environment = process.env, cwd =
     routes: [
       {
         name: 'primary',
-        model: environment.IMAGE_BATCH_PRIMARY_MODEL?.trim() || 'gpt-image-2',
+        model: environment.IMAGE_BATCH_PRIMARY_MODEL?.trim() || 'gpt-image-2.5-flare',
         apiMode: apiMode(environment, 'IMAGE_BATCH_PRIMARY_API_MODE', 'images'),
       },
       {

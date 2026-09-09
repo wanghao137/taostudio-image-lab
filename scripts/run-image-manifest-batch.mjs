@@ -740,7 +740,7 @@ for (const entry of manifest.entries.filter((item) => validatedCoreIndexes.has(i
     completedAt: prior.completedAt || prior.updatedAt || new Date().toISOString(),
     actualRoute: prior.actualRoute || {
       name: 'primary',
-      model: 'gpt-image-2',
+      model: 'gpt-image-2.5-flare',
       apiMode: 'images',
     },
     jobId: prior.jobId,

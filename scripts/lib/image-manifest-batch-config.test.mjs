@@ -20,7 +20,7 @@ describe('image manifest batch config', () => {
     expect(config.batchName).toBe('Case library')
     expect([...config.migrateIndexes]).toEqual([1, 2, 8])
     expect(config.routes).toEqual([
-      { name: 'primary', model: 'gpt-image-2', apiMode: 'images' },
+      { name: 'primary', model: 'gpt-image-2.5-flare', apiMode: 'images' },
       { name: 'fallback', model: 'gpt-5.6-sol', apiMode: 'responses' },
     ])
   })

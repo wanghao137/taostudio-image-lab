@@ -24,7 +24,7 @@ const taskApi = await createTaskApi({
   token: 'real-smoke-local-token',
   concurrency: 1,
   providerTimeoutMs: 300_000,
-  providerConfig: { baseUrl, apiKey, model: process.env.IMAGE_TASK_PROVIDER_MODEL || 'gpt-image-2' },
+  providerConfig: { baseUrl, apiKey, model: process.env.IMAGE_TASK_PROVIDER_MODEL || 'gpt-image-2.5-flare' },
 })
 const address = await taskApi.listen(0)
 const headers = { authorization: 'Bearer real-smoke-local-token', 'content-type': 'application/json' }
@@ -37,7 +37,7 @@ try {
       idempotencyKey: `real-smoke-${Date.now()}`,
       input: { prompt: 'A minimal blue ceramic cube on a neutral light gray studio background, centered product photograph.' },
       composition: { ratio: '1:1' },
-      generation: { provider: 'configured', model: process.env.IMAGE_TASK_PROVIDER_MODEL || 'gpt-image-2', baseSize: '1024x1024' },
+      generation: { provider: 'configured', model: process.env.IMAGE_TASK_PROVIDER_MODEL || 'gpt-image-2.5-flare', baseSize: '1024x1024' },
       output: { ratioMode: 'inherit', format: 'png', quality: 'high', dimensions: '1024x1024', enhancement: 'lanczos3', contentClass: 'photo' },
       retry: { maxAttempts: 1 },
     }),

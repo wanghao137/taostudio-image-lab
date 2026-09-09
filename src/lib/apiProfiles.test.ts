@@ -165,10 +165,31 @@ describe('default API URL env', () => {
 })
 
 describe('OpenAI model defaults by API mode', () => {
-  it('uses gpt-image-2 for Images API and gpt-5.6-sol for Responses API', () => {
-    expect(createDefaultOpenAIProfile({ apiMode: 'images' }).model).toBe('gpt-image-2')
+  it('uses gpt-image-2.5-flare for Images API and gpt-5.6-sol for Responses API', () => {
+    expect(createDefaultOpenAIProfile({ apiMode: 'images' }).model).toBe('gpt-image-2.5-flare')
     expect(createDefaultOpenAIProfile({ apiMode: 'responses' }).model).toBe('gpt-5.6-sol')
     expect(DEFAULT_RESPONSES_MODEL).toBe('gpt-5.6-sol')
+  })
+
+  it('migrates the legacy Images default model while preserving custom models', () => {
+    const legacyProfile = {
+      ...createDefaultOpenAIProfile({ id: 'legacy-images', apiMode: 'images', model: 'custom-placeholder' }),
+      model: 'gpt-image-2',
+    }
+    const customProfile = createDefaultOpenAIProfile({
+      id: 'custom-images',
+      apiMode: 'images',
+      model: 'gpt-image-2-official',
+    })
+
+    const normalized = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [legacyProfile, customProfile],
+      activeProfileId: legacyProfile.id,
+    })
+
+    expect(normalized.profiles.find((profile) => profile.id === legacyProfile.id)?.model).toBe('gpt-image-2.5-flare')
+    expect(normalized.profiles.find((profile) => profile.id === customProfile.id)?.model).toBe('gpt-image-2-official')
   })
 
   it('migrates the legacy Responses default model while preserving custom models', () => {

@@ -28,7 +28,7 @@ export const COMMON_IMAGE_RATIOS = Object.freeze([
 ])
 
 // generation.apiMode selects the provider endpoint for a job.
-// 'images' (default) -> POST /images/generations for image models (gpt-image-2).
+// 'images' (default) -> POST /images/generations for image models (gpt-image-2.5-flare).
 // 'responses' -> POST /responses with an image_generation tool for text models
 // that expose image output through the Responses API (gpt-5.6-sol).
 export const API_MODES = Object.freeze(['images', 'responses'])

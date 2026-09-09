@@ -20,7 +20,7 @@ IMAGE_TASK_API_ALLOWED_ORIGINS=https://image.taostudioai.com
 
 IMAGE_TASK_PROVIDER_BASE_URL=https://你的图片服务地址/v1
 IMAGE_TASK_PROVIDER_API_KEY=你的图片服务密钥
-IMAGE_TASK_PROVIDER_MODEL=gpt-image-2
+IMAGE_TASK_PROVIDER_MODEL=gpt-image-2.5-flare
 ```
 
 参数含义：
@@ -67,7 +67,7 @@ npm run task-api
 
 | 用途 | API 模式 | 模型示例 |
 | --- | --- | --- |
-| 图片模型直接生图 | `images` | `gpt-image-2` |
+| 图片模型直接生图 | `images` | `gpt-image-2.5-flare` |
 | 文本模型通过工具生图 | `responses` | `gpt-5.6-sol` |
 
 不要只改 API 模式而不改模型。图像模型通常配 `images`，支持 `image_generation` 工具的文本模型配 `responses`。
@@ -151,7 +151,7 @@ MCP 的标准批量流程：
 
 ```text
 读取 prompts 目录下的所有 txt 文件，每个文件创建一个图片任务。
-统一使用 3:4、2400x3200、images、gpt-image-2、lanczos3，
+统一使用 3:4、2400x3200、images、gpt-image-2.5-flare、lanczos3，
 最大尝试 5 次。幂等键使用 daily:<日期>:<文件名>。
 提交完全部任务后逐个等待，下载 source、final 和 manifest，
 最后给我成功、失败、重试次数和输出路径汇总。

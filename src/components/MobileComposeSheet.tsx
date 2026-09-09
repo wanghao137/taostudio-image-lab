@@ -120,7 +120,7 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
               <Chip label="质量" value={qualityLabel(params.quality)} onClick={() => setOpenMenu(openMenu === 'quality' ? 'none' : 'quality')} active={openMenu === 'quality'} />
               {openMenu === 'quality' && (
                 <ChipMenu onClose={() => setOpenMenu('none')}>
-                  {(['auto', 'high', 'medium', 'low'] as const).map((q) => (
+                  {(['auto', 'max', 'xhigh', 'high', 'medium', 'low'] as const).map((q) => (
                     <ChipMenuItem key={q} active={params.quality === q} onClick={() => { setParams({ quality: q }); setOpenMenu('none') }}>
                       {qualityLabel(q)}
                     </ChipMenuItem>
@@ -212,8 +212,8 @@ function ChipMenuItem({ children, active, onClick }: { children: React.ReactNode
   )
 }
 
-function qualityLabel(q: 'auto' | 'low' | 'medium' | 'high'): string {
-  return q === 'auto' ? '自动' : q === 'high' ? '高' : q === 'medium' ? '中' : '低'
+function qualityLabel(q: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'): string {
+  return q === 'auto' ? '自动' : q === 'max' ? '最高' : q === 'xhigh' ? '超高' : q === 'high' ? '高' : q === 'medium' ? '中' : '低'
 }
 
 function countOptions(limit: number): number[] {

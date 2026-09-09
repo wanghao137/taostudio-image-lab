@@ -135,7 +135,7 @@ export async function buildDerivedManifest({ sourcePath, outputPath, strict = tr
     sourceManifest: sourcePath,
     generatedAt: new Date().toISOString(),
     routes: {
-      primary: { model: 'gpt-image-2', apiMode: 'images' },
+      primary: { model: 'gpt-image-2.5-flare', apiMode: 'images' },
       revision: { model: 'gpt-5.6-sol', apiMode: 'responses' },
     },
     supportedDimensions: DIMENSIONS_BY_RATIO,

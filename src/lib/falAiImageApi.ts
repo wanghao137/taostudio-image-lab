@@ -33,7 +33,9 @@ async function mapFalImageSize(size: string): Promise<{ width: number; height: n
 }
 
 function mapFalQuality(quality: TaskParams['quality']): 'low' | 'medium' | 'high' {
-  return quality === 'auto' ? 'high' : quality
+  // fal 通道没有 xhigh/max 档位，向上收敛到 high。
+  if (quality === 'auto' || quality === 'xhigh' || quality === 'max') return 'high'
+  return quality
 }
 
 function configureFal(profile: ApiProfile) {

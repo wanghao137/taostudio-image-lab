@@ -28,7 +28,7 @@ const api = await createTaskApi({
   providerConfig: {
     baseUrl: value('IMAGE_TASK_PROVIDER_BASE_URL') || value('IMAGE_API_BASE_URL'),
     apiKey: value('IMAGE_TASK_PROVIDER_API_KEY') || value('IMAGE_API_KEY'),
-    model: value('IMAGE_TASK_PROVIDER_MODEL', 'gpt-image-2'),
+    model: value('IMAGE_TASK_PROVIDER_MODEL', 'gpt-image-2.5-flare'),
   },
   batchWatchdogEnabled: value('IMAGE_TASK_API_BATCH_WATCHDOG', 'true') !== 'false',
   batchWatchdogPollIntervalMs: Number(value('IMAGE_TASK_API_BATCH_WATCHDOG_POLL_MS', '60000')),

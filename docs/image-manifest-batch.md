@@ -36,7 +36,7 @@ Optional variables:
 | `IMAGE_BATCH_CLIENT_NAME` | `<batch-key>-client` |
 | `IMAGE_BATCH_CONTACT_SHEET_PREFIX` | `<batch-key>-preview` |
 | `IMAGE_BATCH_MIGRATE_INDEXES` | Empty; comma-separated prior accepted indexes |
-| `IMAGE_BATCH_PRIMARY_MODEL` | `gpt-image-2` |
+| `IMAGE_BATCH_PRIMARY_MODEL` | `gpt-image-2.5-flare` |
 | `IMAGE_BATCH_PRIMARY_API_MODE` | `images` |
 | `IMAGE_BATCH_REVISION_MODEL` | `gpt-5.6-sol` |
 | `IMAGE_BATCH_REVISION_API_MODE` | `responses` |

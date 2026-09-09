@@ -31,7 +31,8 @@ const DEFAULT_API_URL_PATCH = isImportableConfigUrl(RAW_DEFAULT_API_URL)
   ? null
   : parseDefaultApiUrl(RAW_DEFAULT_API_URL || (DOCKER_DEPLOYMENT && DEFAULT_OPENAI_API_PROXY ? '' : OPENAI_DEFAULT_BASE_URL))
 const DEFAULT_BASE_URL = DEFAULT_API_URL_PATCH?.baseUrl ?? ''
-export const DEFAULT_IMAGES_MODEL = 'gpt-image-2'
+export const DEFAULT_IMAGES_MODEL = 'gpt-image-2.5-flare'
+export const LEGACY_DEFAULT_IMAGES_MODEL = 'gpt-image-2'
 export const DEFAULT_RESPONSES_MODEL = 'gpt-5.6-sol'
 export const LEGACY_DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
 export const DEFAULT_FAL_BASE_URL = 'https://fal.run'
@@ -46,6 +47,7 @@ export function getDefaultOpenAIModel(apiMode: ApiMode): string {
 export function isManagedDefaultOpenAIModel(model: string): boolean {
   const normalized = model.trim()
   return normalized === DEFAULT_IMAGES_MODEL ||
+    normalized === LEGACY_DEFAULT_IMAGES_MODEL ||
     normalized === DEFAULT_RESPONSES_MODEL ||
     normalized === LEGACY_DEFAULT_RESPONSES_MODEL
 }
@@ -56,6 +58,9 @@ function normalizeOpenAIModelForMode(model: unknown, apiMode: ApiMode): string {
   if (!normalized) return getDefaultOpenAIModel(apiMode)
   if (apiMode === 'responses' && normalized === LEGACY_DEFAULT_RESPONSES_MODEL) {
     return DEFAULT_RESPONSES_MODEL
+  }
+  if (apiMode === 'images' && normalized === LEGACY_DEFAULT_IMAGES_MODEL) {
+    return DEFAULT_IMAGES_MODEL
   }
   return rawModel
 }

@@ -577,6 +577,8 @@ export default function InputBar() {
         { label: 'low', value: 'low' },
         { label: 'medium', value: 'medium' },
         { label: 'high', value: 'high' },
+        { label: 'xhigh', value: 'xhigh' },
+        { label: 'max', value: 'max' },
       ]
   const transparentOutputHint = useHintTooltip()
   const handleTransparentOutputMenuOpenChange = useCallback((open: boolean) => {

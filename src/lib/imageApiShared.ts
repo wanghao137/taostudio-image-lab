@@ -351,6 +351,29 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
   return blobToDataUrl(blob, fallbackMime)
 }
 
+const MODERATION_STAGE_LABELS: Record<string, string> = {
+  input: '输入提示词',
+  output: '生成结果',
+  unknown: '未知阶段',
+}
+
+/** gpt-image-2.5 结构化审核错误（error.moderation_details）转可读后缀；非该结构返回空串。 */
+function formatModerationDetails(error: unknown): string {
+  if (!error || typeof error !== 'object') return ''
+  const details = (error as { moderation_details?: unknown }).moderation_details
+  if (!details || typeof details !== 'object') return ''
+  const record = details as { moderation_stage?: unknown; categories?: unknown }
+  const parts: string[] = []
+  if (typeof record.moderation_stage === 'string' && record.moderation_stage.trim()) {
+    parts.push(MODERATION_STAGE_LABELS[record.moderation_stage] ?? record.moderation_stage)
+  }
+  if (Array.isArray(record.categories)) {
+    const categories = record.categories.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+    if (categories.length) parts.push(`类别：${categories.join('、')}`)
+  }
+  return parts.join('，')
+}
+
 export async function getApiErrorMessage(response: Response): Promise<string> {
   let errorMsg = `HTTP ${response.status}`
   const textResponse = response.clone()
@@ -362,6 +385,8 @@ export async function getApiErrorMessage(response: Response): Promise<string> {
     else if (Array.isArray(errJson.detail)) errorMsg = errJson.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
     else if (typeof errJson.error === 'string') errorMsg = errJson.error
     else if (errJson.message) errorMsg = errJson.message
+    const moderationSuffix = formatModerationDetails(errJson.error)
+    if (moderationSuffix) errorMsg = `${errorMsg}（${moderationSuffix}）`
   } catch {
     try {
       errorMsg = await textResponse.text()
@@ -378,7 +403,7 @@ export function pickActualParams(source: unknown): Partial<TaskParams> {
   const actualParams: Partial<TaskParams> = {}
 
   if (typeof record.size === 'string') actualParams.size = record.size
-  if (record.quality === 'auto' || record.quality === 'low' || record.quality === 'medium' || record.quality === 'high') {
+  if (record.quality === 'auto' || record.quality === 'low' || record.quality === 'medium' || record.quality === 'high' || record.quality === 'xhigh' || record.quality === 'max') {
     actualParams.quality = record.quality
   }
   if (record.output_format === 'png' || record.output_format === 'jpeg' || record.output_format === 'webp') {

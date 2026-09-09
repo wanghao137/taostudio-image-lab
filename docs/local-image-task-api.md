@@ -12,7 +12,7 @@ Image Task API 是 TaoStudio 的服务端任务参考实现，负责排队、重
 6. 同一个 `idempotencyKey` 代表同一个生成意图；自动重试不会创建重复计费任务。
 7. 同一状态目录只允许一个服务实例。跨进程锁用于阻止两个 worker 同时驱动同一 SQLite。
 8. `generation.apiMode` 决定 Provider 端点路由：
-   - `images`（默认）→ `POST /images/generations`，用于图像模型（如 `gpt-image-2`）。
+   - `images`（默认）→ `POST /images/generations`，用于图像模型（如 `gpt-image-2.5-flare`）。
    - `responses` → `POST /responses` + `image_generation` 工具，用于通过 Responses API 输出图片的文本模型（如 `gpt-5.6-sol`）。
    两种 mode 可在同一个服务实例上共存；不填 `apiMode` 时走 `images`，所有旧请求行为不变。两种 mode 都复用同一条 cover 规范化 + Lanczos 放大管线，最终产物满足相同的严格同率约束。
 
@@ -43,7 +43,7 @@ IMAGE_TASK_API_PROVIDER_RETRY_BASE_MS=15000
 IMAGE_TASK_API_ALLOWED_ORIGINS=https://image.taostudioai.com
 IMAGE_TASK_PROVIDER_BASE_URL=https://provider.example/v1
 IMAGE_TASK_PROVIDER_API_KEY=provider-secret
-IMAGE_TASK_PROVIDER_MODEL=gpt-image-2
+IMAGE_TASK_PROVIDER_MODEL=gpt-image-2.5-flare
 ```
 
 ```powershell
@@ -73,7 +73,7 @@ Content-Type: application/json
   "composition": { "ratio": "9:16" },
   "generation": {
     "provider": "configured",
-    "model": "gpt-image-2",
+    "model": "gpt-image-2.5-flare",
     "baseSize": "720x1280"
   },
   "output": {

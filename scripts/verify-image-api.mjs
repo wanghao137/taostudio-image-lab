@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const DEFAULT_MODEL = 'gpt-image-2'
+const DEFAULT_MODEL = 'gpt-image-2.5-flare'
 const DEFAULT_SIZE = '1024x1024'
 const DEFAULT_TIMEOUT_MS = 600_000
 const PROMPT_REWRITE_GUARD_PREFIX = 'Use the following text as the complete prompt. Do not rewrite it:'

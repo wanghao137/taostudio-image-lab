@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { DEFAULT_SETTINGS } from './apiProfiles'
 import { callImageApi } from './api'
-import { maybeAppendStreamingHint } from './imageApiShared'
+import { getApiErrorMessage, maybeAppendStreamingHint } from './imageApiShared'
 
 describe('API error hints', () => {
   it.each([false, true])('uses the transparent background hint when streaming is %s', (streamImages) => {
@@ -11,6 +11,46 @@ describe('API error hints', () => {
     expect(maybeAppendStreamingHint(message, 400, streamImages)).toBe(
       `${message}\n提示：当前使用的 API 不支持为该模型使用原生透明背景，请将「透明背景实现方式」切换为「本地后处理」。`,
     )
+  })
+})
+
+describe('getApiErrorMessage moderation details', () => {
+  it('appends readable stage and categories from gpt-image-2.5 structured moderation errors', async () => {
+    const response = new Response(JSON.stringify({
+      error: {
+        message: 'Your request was rejected as a result of our moderation system.',
+        type: 'image_generation_user_error',
+        code: 'moderation_blocked',
+        moderation_details: {
+          moderation_stage: 'input',
+          categories: ['hate_symbol', 'harassing_behavior'],
+        },
+      },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+
+    await expect(getApiErrorMessage(response)).resolves.toBe(
+      'Your request was rejected as a result of our moderation system.（输入提示词，类别：hate_symbol、harassing_behavior）',
+    )
+  })
+
+  it('falls back to the error code as the message when moderation blocks without a message', async () => {
+    const response = new Response(JSON.stringify({
+      error: {
+        type: 'image_generation_user_error',
+        code: 'moderation_blocked',
+        moderation_details: { moderation_stage: 'output', categories: [] },
+      },
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+
+    await expect(getApiErrorMessage(response)).resolves.toBe('moderation_blocked（生成结果）')
+  })
+
+  it('leaves legacy gateway error payloads unchanged', async () => {
+    const response = new Response(JSON.stringify({
+      error: { message: 'Insufficient quota' },
+    }), { status: 429, headers: { 'Content-Type': 'application/json' } })
+
+    await expect(getApiErrorMessage(response)).resolves.toBe('Insufficient quota')
   })
 })
 
@@ -1730,7 +1770,7 @@ describe('callImageApi', () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe('https://sub2api.example.com/v1/images/generations/async')
     expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toMatchObject({
-      model: 'gpt-image-2',
+      model: 'gpt-image-2.5-flare',
       prompt: 'prompt',
       n: 1,
     })

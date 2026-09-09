@@ -6500,7 +6500,7 @@ describe('reused task API profile', () => {
     expect(getTaskApiProfile(useStore.getState().settings, sourceTask)).toMatchObject({
       id: profile.id,
       provider: 'provider-old',
-      model: 'gpt-image-2',
+      model: 'gpt-image-2.5-flare',
     })
   })
 
