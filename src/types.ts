@@ -92,6 +92,9 @@ export interface ApiProfile {
   /** 请求尺寸收口开关：设为 true 表示服务商真实支持大尺寸原生输出，
    * 跳过 exact_size 大目标的请求尺寸收口（默认收口到 ~1.5MP 原生档）。 */
   nativeLargeOutput?: boolean
+  /** 按接口类型记忆的模型 ID：切换 Images/Responses 时互相恢复，
+   * 避免单一 model 字段被另一接口类型的模型覆盖。 */
+  modelByApiMode?: { images?: string; responses?: string }
   providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
 }
 

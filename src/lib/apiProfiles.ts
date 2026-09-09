@@ -59,10 +59,44 @@ function normalizeOpenAIModelForMode(model: unknown, apiMode: ApiMode): string {
   if (apiMode === 'responses' && normalized === LEGACY_DEFAULT_RESPONSES_MODEL) {
     return DEFAULT_RESPONSES_MODEL
   }
-  if (apiMode === 'images' && normalized === LEGACY_DEFAULT_IMAGES_MODEL) {
-    return DEFAULT_IMAGES_MODEL
-  }
+  // 注意：Images 侧不做旧默认自动迁移。gpt-image-2 未被官方弃用，
+  // 且自定义网关（如 chatgpt2api）可能长期只支持旧模型 ID，用户手填的值必须粘住。
   return rawModel
+}
+
+function normalizeModelByApiMode(value: unknown): ApiProfile['modelByApiMode'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const result: NonNullable<ApiProfile['modelByApiMode']> = {}
+  for (const mode of ['images', 'responses'] as const) {
+    const model = typeof record[mode] === 'string' ? (record[mode] as string).trim() : ''
+    if (model) result[mode] = model
+  }
+  return Object.keys(result).length ? result : undefined
+}
+
+/** 切换 Images/Responses 接口类型：切换前把当前模型存入对应类型的记忆槽，
+ * 目标类型有记忆则恢复，否则按托管默认规则换默认（自定义模型保持不动）。 */
+export function switchOpenAIProfileApiMode(profile: ApiProfile, apiMode: ApiMode): Pick<ApiProfile, 'apiMode' | 'model' | 'modelByApiMode'> {
+  if (apiMode === profile.apiMode) {
+    return { apiMode, model: profile.model, modelByApiMode: profile.modelByApiMode }
+  }
+  const modelByApiMode = { ...profile.modelByApiMode }
+  const currentModel = profile.model.trim()
+  if (currentModel) modelByApiMode[profile.apiMode] = currentModel
+  const remembered = modelByApiMode[apiMode]?.trim()
+  const model = remembered
+    || (isManagedDefaultOpenAIModel(profile.model) ? getDefaultOpenAIModel(apiMode) : profile.model)
+  return { apiMode, model, modelByApiMode: Object.keys(modelByApiMode).length ? modelByApiMode : undefined }
+}
+
+/** 提交模型 ID 时同步写入当前接口类型的记忆槽。 */
+export function rememberOpenAIProfileModel(profile: ApiProfile, model: string): Pick<ApiProfile, 'model' | 'modelByApiMode'> {
+  const trimmed = model.trim()
+  const modelByApiMode = { ...profile.modelByApiMode }
+  if (trimmed) modelByApiMode[profile.apiMode] = trimmed
+  else delete modelByApiMode[profile.apiMode]
+  return { model, modelByApiMode: Object.keys(modelByApiMode).length ? modelByApiMode : undefined }
 }
 
 export const DEFAULT_LOCAL_AUTO_SAVE_SETTINGS: LocalAutoSaveSettings = {
@@ -641,6 +675,7 @@ export function normalizeApiProfile(
     transparentBackgroundMethod: !nativeTransparentBackgroundUnavailable && (record.transparentBackgroundMethod === 'api' || record.transparentBackgroundMethod === 'local')
       ? record.transparentBackgroundMethod
       : defaults.transparentBackgroundMethod,
+    modelByApiMode: normalizeModelByApiMode(record.modelByApiMode),
     providerDrafts: normalizeProviderDrafts(record.providerDrafts, customProviderIds, nativeTransparentProviderIds),
   }
 }

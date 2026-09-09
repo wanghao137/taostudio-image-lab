@@ -21,14 +21,15 @@ import {
   importCustomProviderSettingsFromJson,
   isDefaultConfigOnlyEnabled,
   isAgentTextApiProfile,
-  isManagedDefaultOpenAIModel,
   isOpenAICompatibleProvider,
   mergeImportedSettings,
   normalizeAgentMaxToolRounds,
   normalizeCustomProviderDefinition,
   normalizeSettings,
   normalizeStreamPartialImages,
+  rememberOpenAIProfileModel,
   switchApiProfileProvider,
+  switchOpenAIProfileApiMode,
 } from '../lib/apiProfiles'
 import { customProviderSupportsNativeTransparentBackground } from '../lib/customProviderCapabilities'
 import { getPresetProfileDescription, isPresetProfileLocked } from '../lib/presetConfig'
@@ -1586,11 +1587,7 @@ export default function SettingsModal() {
                   <Select
                     value={activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode}
                     onChange={(value) => {
-                      const apiMode = value as AppSettings['apiMode']
-                      const nextModel = isManagedDefaultOpenAIModel(activeProfile.model)
-                        ? getDefaultOpenAIModel(apiMode)
-                        : activeProfile.model
-                      updateActiveProfile({ apiMode, model: nextModel }, true)
+                      updateActiveProfile(switchOpenAIProfileApiMode(activeProfile, value as AppSettings['apiMode']), true)
                     }}
                     options={[
                       { label: 'Images API (/v1/images)', value: 'images' },
@@ -1612,7 +1609,14 @@ export default function SettingsModal() {
                 <input
                   value={activeProfile.model}
                   onChange={(e) => updateActiveProfile({ model: e.target.value })}
-                  onBlur={(e) => commitActiveProfilePatch({ model: e.target.value })}
+                  onBlur={(e) => {
+                    const model = e.target.value
+                    if (activeProfile.provider !== 'openai') {
+                      commitActiveProfilePatch({ model })
+                      return
+                    }
+                    commitActiveProfilePatch(rememberOpenAIProfileModel(activeProfile, model))
+                  }}
                   type="text"
                   placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultOpenAIModel(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"

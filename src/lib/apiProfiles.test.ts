@@ -25,7 +25,9 @@ import {
   mergeImportedSettings,
   normalizeApiProfile,
   normalizeSettings,
+  rememberOpenAIProfileModel,
   switchApiProfileProvider,
+  switchOpenAIProfileApiMode,
   validateApiProfile,
 } from './apiProfiles'
 import { CUSTOM_PROVIDER_LLM_PROMPT, DEFAULT_CUSTOM_PROVIDER_JSON } from './settingsCustomProvider'
@@ -171,7 +173,7 @@ describe('OpenAI model defaults by API mode', () => {
     expect(DEFAULT_RESPONSES_MODEL).toBe('gpt-5.6-sol')
   })
 
-  it('migrates the legacy Images default model while preserving custom models', () => {
+  it('preserves the legacy Images default model instead of auto-migrating it', () => {
     const legacyProfile = {
       ...createDefaultOpenAIProfile({ id: 'legacy-images', apiMode: 'images', model: 'custom-placeholder' }),
       model: 'gpt-image-2',
@@ -188,8 +190,41 @@ describe('OpenAI model defaults by API mode', () => {
       activeProfileId: legacyProfile.id,
     })
 
-    expect(normalized.profiles.find((profile) => profile.id === legacyProfile.id)?.model).toBe('gpt-image-2.5-flare')
+    // gpt-image-2 未弃用，且部分网关（如 chatgpt2api）长期只支持旧 ID，用户填的值必须粘住。
+    expect(normalized.profiles.find((profile) => profile.id === legacyProfile.id)?.model).toBe('gpt-image-2')
     expect(normalized.profiles.find((profile) => profile.id === customProfile.id)?.model).toBe('gpt-image-2-official')
+  })
+
+  it('remembers and restores per-api-mode models when switching API modes', () => {
+    const imagesProfile = createDefaultOpenAIProfile({ id: 'mode-memory', apiMode: 'images', model: 'gpt-image-2.5-flare' })
+    expect(imagesProfile.model).toBe('gpt-image-2.5-flare')
+
+    // 用户在 Images 模式填 flare 后切到 Responses：存 images 记忆，Responses 无记忆 → 换托管默认
+    const switched = switchOpenAIProfileApiMode({ ...imagesProfile }, 'responses')
+    expect(switched.apiMode).toBe('responses')
+    expect(switched.model).toBe('gpt-5.6-sol')
+    expect(switched.modelByApiMode).toEqual({ images: 'gpt-image-2.5-flare' })
+
+    // 用户在 Responses 模式改填 gpt-6-astra 后提交：写入 responses 记忆
+    const remembered = rememberOpenAIProfileModel({ ...imagesProfile, ...switched }, 'gpt-6-astra')
+    expect(remembered.modelByApiMode).toEqual({ images: 'gpt-image-2.5-flare', responses: 'gpt-6-astra' })
+
+    // 切回 Images：恢复 images 记忆的 flare，而不是停留在 gpt-6-astra
+    const backToImages = switchOpenAIProfileApiMode({ ...imagesProfile, ...switched, ...remembered }, 'images')
+    expect(backToImages.model).toBe('gpt-image-2.5-flare')
+    expect(backToImages.modelByApiMode).toEqual({ images: 'gpt-image-2.5-flare', responses: 'gpt-6-astra' })
+
+    // 再切回 Responses：恢复 gpt-6-astra，而不是被托管默认覆盖
+    const backToResponses = switchOpenAIProfileApiMode({ ...imagesProfile, ...backToImages }, 'responses')
+    expect(backToResponses.model).toBe('gpt-6-astra')
+
+    // 记忆字段经 normalizeSettings 持久化往返后保留
+    const normalized = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [{ ...imagesProfile, ...backToImages }],
+      activeProfileId: imagesProfile.id,
+    })
+    expect(normalized.profiles[0].modelByApiMode).toEqual({ images: 'gpt-image-2.5-flare', responses: 'gpt-6-astra' })
   })
 
   it('migrates the legacy Responses default model while preserving custom models', () => {
