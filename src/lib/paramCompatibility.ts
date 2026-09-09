@@ -1,5 +1,6 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
 import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
+import { getImageGenerationModel, isGptImage25Model } from './imageModels'
 import { calculateImageSize, normalizeCodexCliImageSize, normalizeImageSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
@@ -63,6 +64,11 @@ export function normalizeParamsForSettings(
     if (nextParams.quality === 'auto') nextParams.quality = 'high'
     nextParams.moderation = DEFAULT_PARAMS.moderation
     nextParams.output_compression = DEFAULT_PARAMS.output_compression
+  }
+
+  // gpt-image-2.5 才支持 xhigh/max 质量档；其他模型提交前降为 high，避免网关报参数错误。
+  if ((nextParams.quality === 'xhigh' || nextParams.quality === 'max') && !isGptImage25Model(getImageGenerationModel(activeProfile))) {
+    nextParams.quality = 'high'
   }
 
   if (nextParams.output_format === 'png') {
