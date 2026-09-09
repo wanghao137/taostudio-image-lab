@@ -173,4 +173,40 @@ describe('capRequestSize (non-codexCli exact-size 4K asset requests)', () => {
 
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2048x2048' }, settings).size).toBe('2048x2048')
   })
+
+  it.each(['gpt-image-2.5-sunburst', 'gpt-image-2.5-flare'] as const)('keeps 2.5 quality levels for %s', (model) => {
+    const profile = createDefaultOpenAIProfile({ model })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile] })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'xhigh' }, settings).quality).toBe('xhigh')
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'max' }, settings).quality).toBe('max')
+  })
+
+  it.each(['openai/gpt-image-2.5/sunburst', 'openai/gpt-image-2.5/flare'] as const)('keeps fal.ai 2.5 quality levels for %s', (model) => {
+    const profile = createDefaultFalProfile({ model })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'xhigh' }, settings).quality).toBe('xhigh')
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'max' }, settings).quality).toBe('max')
+  })
+
+  it.each(['vendor/gpt-image-2.5-custom', 'my-gpt-image-2.5-proxy'])('keeps 2.5 quality levels for a custom provider model %s', (model) => {
+    const profile = { ...createDefaultOpenAIProfile({ model }), provider: 'custom-provider' }
+    const settings = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      customProviders: [{ id: 'custom-provider', name: 'Custom Provider', submit: { path: 'images/generations' } }],
+      profiles: [profile],
+      activeProfileId: profile.id,
+    })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'xhigh' }, settings).quality).toBe('xhigh')
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'max' }, settings).quality).toBe('max')
+  })
+
+  it('falls back to high when an older image model receives a 2.5 quality level', () => {
+    const profile = createDefaultOpenAIProfile({ model: 'gpt-image-2' })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile] })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, quality: 'max' }, settings).quality).toBe('high')
+  })
 })

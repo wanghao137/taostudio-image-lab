@@ -80,6 +80,8 @@ export interface ApiProfile {
   baseUrl: string
   apiKey: string
   model: string
+  /** Responses 模式下 image_generation 工具独立使用的图像模型 ID；留空时不发送工具模型 ID（走 API 默认）。 */
+  imageGenerationModel?: string
   timeout: number
   apiMode: ApiMode
   reasoningEffort?: ReasoningEffort
@@ -95,7 +97,7 @@ export interface ApiProfile {
   /** 按接口类型记忆的模型 ID：切换 Images/Responses 时互相恢复，
    * 避免单一 model 字段被另一接口类型的模型覆盖。 */
   modelByApiMode?: { images?: string; responses?: string }
-  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
+  providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'imageGenerationModel' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
 }
 
 export type LocalAutoSaveStatus =
