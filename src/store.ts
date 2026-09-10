@@ -24,7 +24,7 @@ import type {
   RefusalRecoveryRecord,
 } from './types'
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_PARAMS } from './types'
-import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
+import { DEFAULT_SETTINGS, getActiveApiProfile, getAgentImageApiProfile, getAgentTextApiProfile, getCustomProviderDefinition, getSceneImageApiProfile, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
 import { remapImageMentionsForOrder, replaceImageMentionsForApi, stripImageMentionMarkers } from './lib/promptImageMentions'
@@ -2044,7 +2044,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     useStore.getState()
 
   const normalizedSettings = normalizeSettings(settings)
-  let activeProfile = getActiveApiProfile(settings)
+  let activeProfile = getSceneImageApiProfile(settings)
   let requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
   if (normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
     const reusedProfile = getReusedTaskApiProfile(normalizedSettings, reusedTaskApiProfileId)
@@ -2158,6 +2158,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     outputImages: [],
     status: 'running',
     error: null,
+    sceneId: settings.activeScene,
     createdAt: Date.now(),
     finishedAt: null,
     elapsed: null,
@@ -4043,7 +4044,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     })
     return
   }
-  const activeProfile = taskProfile ?? getActiveApiProfile(settings)
+  const activeProfile = taskProfile ?? getSceneImageApiProfile(settings)
   const requestSettings = createSettingsForApiProfile(settings, activeProfile)
   const taskProvider = taskProfile?.provider ?? task.apiProvider ?? activeProfile.provider
   let falRequestInfo: { requestId: string; endpoint: string } | null = task.falRequestId && task.falEndpoint
@@ -4709,8 +4710,9 @@ export async function retryTask(task: TaskRecord) {
   tasksCleared = false
   await refreshTaskStorageGeneration()
   const { settings } = useStore.getState()
-  const activeProfile = getActiveApiProfile(settings)
-  const normalizedParams = normalizeParamsForSettings(task.params, settings, {
+  const activeProfile = getSceneImageApiProfile(settings)
+  const requestSettings = createSettingsForApiProfile(settings, activeProfile)
+  const normalizedParams = normalizeParamsForSettings(task.params, requestSettings, {
     hasInputImages: task.inputImageIds.length > 0,
     preserveExactSizeIntent: true,
   })
@@ -4741,6 +4743,7 @@ export async function retryTask(task: TaskRecord) {
     outputImages: [],
     status: 'running',
     error: null,
+    sceneId: settings.activeScene,
     createdAt: Date.now(),
     finishedAt: null,
     elapsed: null,

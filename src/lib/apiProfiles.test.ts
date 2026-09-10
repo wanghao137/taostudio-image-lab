@@ -2069,6 +2069,14 @@ describe('场景配置归一化与解析', () => {
     expect(getSceneImageApiProfile(s).id).toBe(s.activeProfileId)
   })
 
+  it('getSceneImageApiProfile：回落全局链时保留旧版顶层镜像覆盖（语义不变）', () => {
+    const s = normalizeSettings({})
+    const raw = { ...s, baseUrl: 'https://legacy.example.com/v1', apiKey: 'legacy-key' }
+    const resolved = getSceneImageApiProfile(raw)
+    expect(resolved.baseUrl).toBe('https://legacy.example.com/v1')
+    expect(resolved.apiKey).toBe('legacy-key')
+  })
+
   it('getSceneTextApiProfileResolution：场景文本引用优先，无引用走全局链', () => {
     const text = { ...createDefaultOpenAIProfile(), id: 'text-1', apiMode: 'responses' as const }
     const s = normalizeSettings({

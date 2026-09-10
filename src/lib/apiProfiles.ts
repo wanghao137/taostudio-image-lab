@@ -929,7 +929,8 @@ export function getTextApiProfile(settings: Partial<AppSettings> | unknown): Api
 /**
  * 场景生图解析：场景显式引用优先，干净返回该 profile 本体（不套 getActiveApiProfile
  * 的旧版顶层镜像字段覆盖——顶层 baseUrl/apiKey/model 只描述全局激活配置，对场景引用
- * 无意义）；无引用或引用失效时回落全局激活链。
+ * 无意义）；无引用或引用失效时回落全局激活链（传入原始 settings，保留旧版顶层镜像
+ * 覆盖，语义与直接调用 getActiveApiProfile 完全一致）。
  */
 export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
   const normalized = normalizeSettings(settings)
@@ -938,7 +939,7 @@ export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown
     const profile = normalized.profiles.find((p) => p.id === sceneProfileId)
     if (profile) return profile
   }
-  return getActiveApiProfile(normalized)
+  return getActiveApiProfile(settings)
 }
 
 /** 场景文本解析：场景显式引用优先，否则走全局 textApiProfileId 自动链（语义不变）。 */

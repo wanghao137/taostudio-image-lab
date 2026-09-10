@@ -1106,6 +1106,23 @@ describe('mask draft lifecycle in store actions', () => {
     expect(state.showToast).toHaveBeenCalledWith('任务已提交', 'success')
   })
 
+  it('提交的任务记录提交时的场景 sceneId', async () => {
+    useStore.setState({ settings: { ...useStore.getState().settings, activeScene: 'sticker' } })
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const task = useStore.getState().tasks[0]
+    expect(task.sceneId).toBe('sticker')
+  })
+
+  it('重试生成的新任务记录重试时的场景 sceneId', async () => {
+    useStore.setState({ settings: { ...useStore.getState().settings, activeScene: 'sticker' } })
+    await retryTask(task())
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(useStore.getState().tasks[0].sceneId).toBe('sticker')
+  })
+
   it('stores decoded image size as actual size when the API omits size', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockClear()
