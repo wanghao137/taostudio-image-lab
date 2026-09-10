@@ -12,7 +12,7 @@ import {
   getActiveApiProfile,
   getApiProviderLabel,
   getSceneTextApiProfileResolution,
-  isAgentTextApiProfile,
+  isTextCapableApiProfile,
 } from '../lib/apiProfiles'
 import { COMMON_IMAGE_RATIOS, type SizeTier } from '../lib/size'
 import type { SceneDefaults, SceneId, SceneSettings } from '../types'
@@ -81,7 +81,7 @@ export function SceneSettingsDrawer({ scene, onClose }: { scene: SceneId; onClos
     })),
   ]
 
-  const textProfiles = settings.profiles.filter(isAgentTextApiProfile)
+  const textProfiles = settings.profiles.filter(isTextCapableApiProfile)
   const textProfileOptions = [
     { label: '跟随全局文本路由', value: '' },
     ...textProfiles.map((profile) => ({

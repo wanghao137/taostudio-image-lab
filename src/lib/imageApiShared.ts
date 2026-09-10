@@ -422,7 +422,7 @@ export function mergeActualParams(...sources: Array<Partial<TaskParams> | undefi
   return Object.keys(merged).length ? merged : undefined
 }
 
-// ===== Responses API 共享请求/解析函数（自 agentApi 下沉，函数体保持原样） =====
+// ===== Responses API 共享请求/解析函数（供生图/文本类 API 共用） =====
 
 export function createHeaders(profile: ApiProfile): Record<string, string> {
   return {

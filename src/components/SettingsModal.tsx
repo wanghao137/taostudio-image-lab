@@ -20,7 +20,7 @@ import {
   getTextApiProfileResolution,
   importCustomProviderSettingsFromJson,
   isDefaultConfigOnlyEnabled,
-  isAgentTextApiProfile,
+  isTextCapableApiProfile,
   isOpenAICompatibleProvider,
   mergeImportedSettings,
   normalizeCustomProviderDefinition,
@@ -270,7 +270,7 @@ export default function SettingsModal() {
     ? `已开启 ${enabledZipDownloadRouteCount} 项使用压缩包进行批量下载的途径`
     : '未开启任何使用压缩包进行批量下载的途径'
 
-  const textCapableProfiles = draft.profiles.filter(isAgentTextApiProfile)
+  const textCapableProfiles = draft.profiles.filter(isTextCapableApiProfile)
   const textApiResolution = getTextApiProfileResolution(draft)
   const textApiProfileOptions = [
     { label: '自动（跟随生图配置，或唯一的文本配置）', value: '' },

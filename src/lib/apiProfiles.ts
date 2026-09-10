@@ -231,7 +231,7 @@ function normalizeProviderOrder(value: unknown, customProviders: CustomProviderD
   return [...ordered, ...providerIds.filter((id) => !ordered.includes(id))]
 }
 
-export function isAgentTextApiProfile(profile: ApiProfile): boolean {
+export function isTextCapableApiProfile(profile: ApiProfile): boolean {
   return profile.provider === 'openai' && profile.apiMode === 'responses'
 }
 
@@ -795,13 +795,13 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   const active = profiles.find((p) => p.id === activeProfileId) ?? profiles[0]
   // 文本路由只校验显式值有效性（须指向 Responses 类型 profile），缺省/无效一律回到 auto；
   // 不在这里固化任何推导结果，否则「跟随激活配置」的语义会被旧推导值覆盖失效。
-  const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isAgentTextApiProfile(p))
+  const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isTextCapableApiProfile(p))
     ? record.textApiProfileId
     : null
   // 场景配置：只校验显式引用有效性（生图任意 profile / 文本须 Responses 型），
   // 缺失或非法一律回默认；不固化推导值，不迁移用户数据。
   const sceneProfileIds = new Set(profiles.map((p) => p.id))
-  const textCapableIds = new Set(profiles.filter(isAgentTextApiProfile).map((p) => p.id))
+  const textCapableIds = new Set(profiles.filter(isTextCapableApiProfile).map((p) => p.id))
   const normalizeSceneSettings = (raw: unknown): SceneSettings => {
     const rec = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
     const defaults = rec.defaults && typeof rec.defaults === 'object' ? rec.defaults as Record<string, unknown> : {}
@@ -883,8 +883,8 @@ export function getTextApiProfileResolution(settings: Partial<AppSettings> | unk
   // profile 值，先 normalize 再取激活配置会丢旧版 URL 参数覆盖语义（getActiveApiProfile 内部
   // 自会 normalize）。对已归一化输入（全部既有调用方）两者结果完全一致。
   const active = getActiveApiProfile(settings)
-  if (isAgentTextApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
-  const textProfiles = normalized.profiles.filter(isAgentTextApiProfile)
+  if (isTextCapableApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
+  const textProfiles = normalized.profiles.filter(isTextCapableApiProfile)
   if (textProfiles.length === 1) return { profile: textProfiles[0], resolvedBy: 'sole', reason: null }
   return { profile: null, resolvedBy: null, reason: textProfiles.length === 0 ? 'none' : 'ambiguous' }
 }
