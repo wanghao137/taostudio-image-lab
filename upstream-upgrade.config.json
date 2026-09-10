@@ -46,5 +46,17 @@
     "src/lib/devProxy.test.ts",
     "src/lib/size.ts",
     "src/index.css"
+  ],
+  "removedPaths": [
+    "src/components/AgentWorkspace.tsx",
+    "src/components/HistoryModal.tsx",
+    "src/components/settings/AgentSettingsTab.tsx",
+    "src/lib/agentApi.ts",
+    "src/lib/agentAssistantBlocks.ts",
+    "src/lib/agentConversationState.ts",
+    "src/lib/agentImageReferences.ts",
+    "src/lib/agentInputBuilder.ts",
+    "src/lib/agentResponseState.ts",
+    "src/lib/agentWebSearch.ts"
   ]
 }
