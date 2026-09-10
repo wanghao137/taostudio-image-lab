@@ -856,6 +856,11 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   }
 }
 
+/**
+ * 旧版全局链文本解析（等价 getTextApiProfile）。反推 UI 已改走
+ * getSceneTextApiProfileResolution（场景覆盖 > 全局链）；保留导出供既有测试，
+ * 新调用方请使用 getSceneTextApiProfileResolution。
+ */
 export function getPromptReverseApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   return getTextApiProfile(settings)
 }

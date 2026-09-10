@@ -5,10 +5,10 @@ import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettin
 import { createDefaultOpenAIProfile, hasDefaultPresetConfig, normalizeSettings } from './lib/apiProfiles'
 import { getCustomProviderConfigUrl, hasEmbeddedDefaultConfig, loadCustomProviderSettingsFromUrl, loadEmbeddedDefaultConfig } from './lib/customProviderConfigUrl'
 import { getDefaultPresetProfileId, getPresetProfileIds, isPresetConfigOnlyEnabled, setPresetConfig } from './lib/presetConfig'
-import type { AppSettings } from './types'
+import type { AppSettings, SceneId } from './types'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
 import { useIsMobile } from './hooks/useIsMobile'
-import Header from './components/Header'
+import Header, { SCENE_TABS } from './components/Header'
 import SearchBar from './components/SearchBar'
 import InputBar from './components/InputBar'
 import Toast from './components/Toast'
@@ -45,12 +45,22 @@ const SceneSettingsDrawer = lazy(() =>
   import('./components/SceneSettingsDrawer').then((module) => ({ default: module.SceneSettingsDrawer })),
 )
 
-function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
+// P2 上线 Skill 工坊前 SCENE_TABS 不含 skill；预留中文名避免 SceneId 缺口（与 SceneSettingsDrawer 一致）。
+const SKILL_SCENE_LABEL = 'Skill 工坊'
+
+function getSceneLabel(scene: SceneId): string {
+  return SCENE_TABS.find((tab) => tab.id === scene)?.label ?? SKILL_SCENE_LABEL
+}
+
+export function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
   const tasks = useStore((s) => s.tasks)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const activeScene = useStore((s) => s.settings.activeScene)
+  const gallerySceneFilter = useStore((s) => s.gallerySceneFilter)
+  const setGallerySceneFilter = useStore((s) => s.setGallerySceneFilter)
   const isMobile = useIsMobile()
 
   const stats = useMemo(() => {
@@ -105,6 +115,15 @@ function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSettings: 
               <span className="rounded-md border border-[#356c82]/20 bg-[#356c82]/10 px-2 py-0.5 text-[11px] font-medium text-[#356c82] dark:border-[#8ec5d7]/20 dark:bg-[#8ec5d7]/10 dark:text-[#8ec5d7]">
                 {scopeLabel}
               </span>
+              {/* 一键全部开关：当前场景过滤 ↔ 全部场景，文案随状态翻转（桌面与移动共用头部） */}
+              <button
+                type="button"
+                onClick={() => setGallerySceneFilter(gallerySceneFilter === 'all' ? activeScene : 'all')}
+                title={gallerySceneFilter === 'all' ? `只看「${getSceneLabel(activeScene)}」场景的任务` : '查看全部场景的任务'}
+                className="shrink-0 rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 transition-colors hover:border-stone-300 hover:bg-stone-100 hover:text-stone-700 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300 dark:hover:bg-white/[0.1] dark:hover:text-stone-100"
+              >
+                {gallerySceneFilter === 'all' ? `仅${getSceneLabel(activeScene)}` : '全部'}
+              </button>
               <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300">
                 {statusLabel}
               </span>

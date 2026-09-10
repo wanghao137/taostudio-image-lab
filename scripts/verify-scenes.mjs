@@ -49,10 +49,21 @@ try {
   }
   if (await page.getByRole('button', { name: '智能体', exact: true }).count()) fail('桌面仍存在智能体 Tab')
 
-  // 检查点2: 点场景 → 齿轮开抽屉 → 四分区在位
+  // 检查点2: 点场景 → 画廊头部「一键全部」切换 chip → 齿轮开抽屉 → 四分区在位
   // 齿轮缺失时只 fail 不继续点击，避免对不存在元素 click 抛异常中断后续检查点
   await page.getByRole('button', { name: '人像写真', exact: true }).first().click()
   await page.waitForTimeout(300)
+  const sceneScopeChip = page.getByRole('button', { name: '全部', exact: true }).first()
+  if (!(await sceneScopeChip.count())) {
+    fail('画廊头部「全部」切换 chip 缺失')
+  } else {
+    await sceneScopeChip.click()
+    await page.waitForTimeout(200)
+    if (!(await page.getByRole('button', { name: '仅人像写真', exact: true }).count())) fail('切到全部后未显示「仅人像写真」')
+    await page.getByRole('button', { name: '仅人像写真', exact: true }).first().click()
+    await page.waitForTimeout(200)
+    if (!(await page.getByRole('button', { name: '全部', exact: true }).count())) fail('切回场景后未显示「全部」')
+  }
   const gear = page.getByRole('button', { name: '场景设置' }).first()
   if (!(await gear.count())) {
     fail('场景设置齿轮缺失')

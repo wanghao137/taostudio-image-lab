@@ -153,7 +153,7 @@ export default function SettingsModal() {
   const settings = useStore((s) => s.settings)
   const setSettings = useStore((s) => s.setSettings)
   const selectLocalAutoSaveDirectory = useStore((s) => s.selectLocalAutoSaveDirectory)
-  const authorizeLocalAutoSaveDirectory = useStore((s) => s.authorizeLocalAutoSaveDirectory)
+  const authorizeAllLocalAutoSaveDirectories = useStore((s) => s.authorizeAllLocalAutoSaveDirectories)
   const retryPendingLocalAutoSaves = useStore((s) => s.retryPendingLocalAutoSaves)
   const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
   const setReusedTaskApiProfile = useStore((s) => s.setReusedTaskApiProfile)
@@ -460,7 +460,8 @@ export default function SettingsModal() {
   }
 
   const handleRetryLocalAutoSaves = async () => {
-    if (localAutoSaveNeedsPermission && !(await authorizeLocalAutoSaveDirectory())) return
+    // 前置门用逐句柄授权（全局 + 各场景目录）：无全局目录、只有场景目录时也能补保存（F2）
+    if (localAutoSaveNeedsPermission && !(await authorizeAllLocalAutoSaveDirectories())) return
     await retryPendingLocalAutoSaves()
   }
 

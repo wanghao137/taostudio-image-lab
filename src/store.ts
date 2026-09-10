@@ -376,6 +376,8 @@ interface AppState {
   localAutoSaveRunningTaskIds: Record<string, true>
   selectLocalAutoSaveDirectory: () => Promise<void>
   authorizeLocalAutoSaveDirectory: () => Promise<boolean>
+  /** 补保存前置门（逐句柄授权）：全局目录 + 全部场景目录，任一授权成功即 true 并补跑 pending */
+  authorizeAllLocalAutoSaveDirectories: () => Promise<boolean>
   retryPendingLocalAutoSaves: () => Promise<void>
 
   // 场景
@@ -860,12 +862,18 @@ export const useStore = create<AppState>()(
       localAutoSaveRunningTaskIds: {},
       selectLocalAutoSaveDirectory: async () => selectLocalAutoSaveDirectory(),
       authorizeLocalAutoSaveDirectory: async () => authorizeLocalAutoSaveDirectory(),
+      authorizeAllLocalAutoSaveDirectories: async () => authorizeAllLocalAutoSaveDirectories(),
       retryPendingLocalAutoSaves: async () => retryPendingLocalAutoSaves(),
 
       // Scenes
       setActiveScene: (scene) => {
         const state = get()
-        if (state.settings.activeScene === scene) return
+        // 同场景重复点击：不重放默认参数，但要修复漂移的画廊过滤
+        //（filter 不持久化，刷新后可能停在别的场景 → 当前场景任务不可见的 Tab 死点）。
+        if (state.settings.activeScene === scene) {
+          if (state.gallerySceneFilter !== scene) set({ gallerySceneFilter: scene })
+          return
+        }
         set({ settings: { ...state.settings, activeScene: scene }, gallerySceneFilter: scene })
         applySceneDefaults(scene)
       },
@@ -1416,6 +1424,15 @@ async function recoverFalTask(taskId: string) {
 }
 
 /** 初始化：从 IndexedDB 加载任务，按需恢复输入图片，并清理孤立图片 */
+/** 刷新后 gallerySceneFilter 不持久化：跟随 persist 恢复的 activeScene 同步一次，
+ *  防止非 general 场景的新任务停在 general 过滤下不可见（setActiveScene 同场景兜底之外的第二道防线）。 */
+function syncGallerySceneFilterToActiveScene() {
+  const { gallerySceneFilter, settings } = useStore.getState()
+  if (gallerySceneFilter !== settings.activeScene) {
+    useStore.setState({ gallerySceneFilter: settings.activeScene })
+  }
+}
+
 export async function initStore() {
   // 页面加载/刷新：重置数据清除标志，允许从（已清空后的）IndexedDB 正常加载，
   // 并允许后续生成正常写入。
@@ -1448,6 +1465,7 @@ export async function initStore() {
     taskStorageGeneration = latestTaskStorageGeneration
     tasksCleared = true
     useStore.setState({ tasks: [] })
+    syncGallerySceneFilterToActiveScene()
     return
   }
   useStore.getState().setTasks(tasks)
@@ -1566,6 +1584,8 @@ export async function initStore() {
     }
   }
 
+  // 场景过滤跟随持久化恢复的 activeScene（F1：防刷新后过滤停在旧值导致当前场景任务不可见）
+  syncGallerySceneFilterToActiveScene()
   // 启动后尝试恢复本地自动保存的会话级权限（若有目录已选且权限降级为 prompt）
   void restoreLocalAutoSavePermissionOnUserActivation()
   // 存量 base64 图片后台迁移为 Blob（省 ~25-33% 空间）：让步式、幂等、
@@ -2209,6 +2229,50 @@ export async function authorizeLocalAutoSaveDirectory() {
     }
 
     useStore.getState().showToast('原保存位置已重新授权', 'success')
+    return true
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    useStore.getState().showToast(`重新授权保存位置失败：${message}`, 'error')
+    return false
+  }
+}
+
+/**
+ * 设置页「重新授权并补保存」的前置门（逐句柄授权）：全局目录句柄 + 全部场景目录句柄
+ * 在同一次用户手势内逐把 requestPermission（readwrite），任一 granted 即返回 true 并补跑
+ * pending 归档——无全局目录、只有场景目录时不再被单句柄版本堵死（F2）。
+ * 单把失败（如用户手势耗尽）只跳过该把，不影响其余句柄的授权结果。
+ */
+export async function authorizeAllLocalAutoSaveDirectories() {
+  try {
+    const targets: PermissionCapableDirectoryHandle[] = []
+    const globalHandle = await getSelectedLocalAutoSaveDirectoryHandle() as PermissionCapableDirectoryHandle | null
+    if (globalHandle) targets.push(globalHandle)
+    for (const record of await listSceneDirectoryHandles()) {
+      const handle = record?.handle as PermissionCapableDirectoryHandle | undefined
+      if (handle) targets.push(handle)
+    }
+    if (!targets.length) {
+      useStore.getState().showToast('未找到已保存的位置，请重新选择文件夹', 'error')
+      return false
+    }
+
+    const descriptor = { mode: 'readwrite' as const }
+    let granted = false
+    for (const handle of targets) {
+      try {
+        const queried = await handle.queryPermission?.(descriptor)
+        const permission = queried === 'granted' ? queried : await handle.requestPermission?.(descriptor)
+        if (permission === 'granted') granted = true
+      } catch { /* 单把失败不阻断其余句柄 */ }
+    }
+    if (!granted) {
+      useStore.getState().showToast('未获得文件夹写入权限，请允许后重试', 'error')
+      return false
+    }
+
+    useStore.getState().showToast('保存位置已重新授权', 'success')
+    await retryPendingLocalAutoSaves()
     return true
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

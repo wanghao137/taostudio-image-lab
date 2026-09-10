@@ -3552,6 +3552,37 @@ describe('场景 actions 与保存链', () => {
     expect(useStore.getState().params.size).toBe('1024x1536')
   })
 
+  it('setActiveScene 同场景重复调用修复漂移的画廊过滤，但不重放默认参数', () => {
+    useStore.setState({
+      settings: normalizeSettings({
+        activeScene: 'sticker',
+        scenes: { sticker: { defaults: { ratio: '1:1', tier: '1K' } } },
+      }),
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+      gallerySceneFilter: 'all',
+    })
+
+    // 刷新后 filter 漂移到 all（或别的场景）时，再点当前场景 Tab 只同步过滤、不重放默认参数
+    useStore.getState().setActiveScene('sticker')
+
+    expect(useStore.getState().settings.activeScene).toBe('sticker')
+    expect(useStore.getState().gallerySceneFilter).toBe('sticker')
+    expect(useStore.getState().params.size).toBe('1024x1536')
+  })
+
+  it('initStore 刷新后画廊过滤跟随持久化恢复的 activeScene', async () => {
+    // 模拟刷新：activeScene 由 persist 恢复为 portrait，filter 停在初始 general
+    useStore.setState({
+      settings: { ...sceneSettings(), activeScene: 'portrait' },
+      gallerySceneFilter: 'general',
+    })
+
+    await initStore()
+
+    expect(useStore.getState().settings.activeScene).toBe('portrait')
+    expect(useStore.getState().gallerySceneFilter).toBe('portrait')
+  })
+
   it('场景配置 actions 只更新目标场景字段', () => {
     const profile = createDefaultOpenAIProfile({ id: 'scene-bind-profile', apiKey: 'test-key' })
     useStore.setState({
@@ -3661,5 +3692,54 @@ describe('场景 actions 与保存链', () => {
     expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({ rootHandle: globalDirectory })
     expect(await getSceneDirectoryHandle('sticker')).toBeUndefined()
     expect(useStore.getState().settings.scenes.sticker.saveDirectoryName).toBeNull()
+  })
+
+  it('authorizeAllLocalAutoSaveDirectories：全局句柄缺失但场景句柄授权成功，返回 true 并补跑 pending 归档', async () => {
+    const requestPermission = vi.fn(async () => 'granted' as PermissionState)
+    const sceneHandle = {
+      name: 'StickerFolder',
+      queryPermission: vi.fn(async () => 'prompt' as PermissionState),
+      requestPermission,
+    } as unknown as FileSystemDirectoryHandle
+    await putSceneDirectoryHandle('sticker', sceneHandle)
+    await putImage(localAutoSaveImage())
+    // 无全局目录配置（directoryName 为空、IndexedDB 无全局句柄），只有场景目录
+    const settings = sceneSettings({ sticker: 'StickerFolder' })
+    useStore.setState({
+      settings: { ...settings, localAutoSave: { ...settings.localAutoSave, directoryName: null } },
+      tasks: [localAutoSaveTask({
+        id: 'scene-needs-permission-task',
+        sceneId: 'sticker',
+        localAutoSave: { status: 'needs_permission', error: '需要重新授权保存位置' },
+      })],
+    })
+
+    await expect(useStore.getState().authorizeAllLocalAutoSaveDirectories()).resolves.toBe(true)
+
+    expect(requestPermission).toHaveBeenCalledWith({ mode: 'readwrite' })
+    expect(writeLocalAutoSaveArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({ rootHandle: sceneHandle })
+    expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'saved' })
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('保存位置已重新授权', 'success')
+  })
+
+  it('authorizeAllLocalAutoSaveDirectories：全部句柄拒绝授权时返回 false 且不写盘', async () => {
+    const sceneHandle = {
+      name: 'StickerFolder',
+      queryPermission: vi.fn(async () => 'prompt' as PermissionState),
+      requestPermission: vi.fn(async () => 'denied' as PermissionState),
+    } as unknown as FileSystemDirectoryHandle
+    await putSceneDirectoryHandle('sticker', sceneHandle)
+    const settings = sceneSettings({ sticker: 'StickerFolder' })
+    useStore.setState({
+      settings: { ...settings, localAutoSave: { ...settings.localAutoSave, directoryName: null } },
+      tasks: [localAutoSaveTask({ id: 'scene-denied-task', sceneId: 'sticker', localAutoSave: { status: 'needs_permission' } })],
+    })
+
+    await expect(useStore.getState().authorizeAllLocalAutoSaveDirectories()).resolves.toBe(false)
+
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'needs_permission' })
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('未获得文件夹写入权限，请允许后重试', 'error')
   })
 })
