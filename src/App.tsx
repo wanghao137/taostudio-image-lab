@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { Settings2 } from 'lucide-react'
 import { initStore, restoreExplicitPresetConfig, useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './lib/urlSettings'
 import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
@@ -41,8 +42,11 @@ const ManageCollectionsModal = lazy(() =>
   import('./components/FavoriteCollections').then((module) => ({ default: module.ManageCollectionsModal })),
 )
 const MobileComposeSheet = lazy(() => import('./components/MobileComposeSheet'))
+const SceneSettingsDrawer = lazy(() =>
+  import('./components/SceneSettingsDrawer').then((module) => ({ default: module.SceneSettingsDrawer })),
+)
 
-function GalleryWorkspaceHeader() {
+function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
   const tasks = useStore((s) => s.tasks)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
@@ -105,6 +109,16 @@ function GalleryWorkspaceHeader() {
               <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300">
                 {statusLabel}
               </span>
+              {/* 场景设置抽屉入口：仅画廊工作台头部渲染（桌面与移动共用），绑定当前 activeScene */}
+              <button
+                type="button"
+                onClick={onOpenSceneSettings}
+                aria-label="场景设置"
+                title="场景设置"
+                className="ml-auto shrink-0 rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100"
+              >
+                <Settings2 className="h-4 w-4" aria-hidden />
+              </button>
             </div>
             {searchQuery.trim() ? (
               <p className="mt-1 truncate text-xs text-stone-500 dark:text-stone-400">
@@ -143,9 +157,12 @@ export default function App() {
   const promptReverseSource = useStore((s) => s.promptReverseSource)
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
+  const activeScene = useStore((s) => s.settings.activeScene)
   const isMobile = useIsMobile()
   // composeOpen 由 Task 5 的 MobileComposeSheet 消费；setComposeOpen 由 FAB 触发。
   const [composeOpen, setComposeOpen] = useState(false)
+  // 场景设置抽屉：从画廊工作台头部齿轮打开，始终绑定当前 activeScene。
+  const [sceneSettingsOpen, setSceneSettingsOpen] = useState(false)
   useDockerApiUrlMigrationNotice()
   useGlobalClickSuppression()
 
@@ -277,7 +294,7 @@ export default function App() {
               </div>
             ) : (
               <div className="safe-area-x max-w-7xl mx-auto">
-                <GalleryWorkspaceHeader />
+                <GalleryWorkspaceHeader onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
                 <SearchBar />
                 {filterFavorite && !activeFavoriteCollectionId ? (
                   <Suspense fallback={null}>
@@ -307,7 +324,7 @@ export default function App() {
             ) : (
               <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">
                 <div className="safe-area-x max-w-7xl mx-auto">
-                  <GalleryWorkspaceHeader />
+                  <GalleryWorkspaceHeader onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
                   <SearchBar />
                   {filterFavorite && !activeFavoriteCollectionId ? (
                     <Suspense fallback={null}>
@@ -336,7 +353,7 @@ export default function App() {
       {/* 模态层：移动/桌面两端共用，保持在 Suspense 里；崩溃只炸单个模态不炸整页。
           key 随活动模态变化：切换查看对象时重置错误态，不让上一个崩溃污染下一个。 */}
       <ErrorBoundary
-        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (promptReverseSource ? 'prompt-reverse' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : 'none')}
+        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (promptReverseSource ? 'prompt-reverse' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : null) ?? (sceneSettingsOpen ? 'scene-settings' : null) ?? 'none'}
         sectionLabel="弹窗"
       >
         <Suspense fallback={null}>
@@ -350,6 +367,7 @@ export default function App() {
           {promptReverseSource ? <PromptReverseModal /> : null}
           {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}
           {isManageCollectionsModalOpen ? <ManageCollectionsModal /> : null}
+          {sceneSettingsOpen ? <SceneSettingsDrawer scene={activeScene} onClose={() => setSceneSettingsOpen(false)} /> : null}
         </Suspense>
       </ErrorBoundary>
       <Toast />
