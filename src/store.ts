@@ -977,20 +977,23 @@ export const useStore = create<AppState>()(
       runSkillExpansion: async () => {
         const state = get()
         const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
+        // 校验失败不动 entries：保留已扩写结果，用户修正输入后重试不丢条目
         if (!activeSkill) {
-          set({ skillExpansion: { status: 'error', error: '请先选择一个 skill', entries: [] } })
+          set((prev) => ({ skillExpansion: { status: 'error', error: '请先选择一个 skill', entries: prev.skillExpansion.entries } }))
           return
         }
         const userInput = state.skillInputDraft.trim()
         if (!userInput) {
-          set({ skillExpansion: { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）', entries: [] } })
+          set((prev) => ({ skillExpansion: { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）', entries: prev.skillExpansion.entries } }))
           return
         }
         const resolution = getSceneTextApiProfileResolution(state.settings)
         if (!resolution.profile) {
-          set({ skillExpansion: { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', entries: [] } })
+          set((prev) => ({ skillExpansion: { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', entries: prev.skillExpansion.entries } }))
           return
         }
+        // 新扩写开始前先 abort 旧请求：旧请求 await 返回后被下方「最新 run」守卫拦截，不再回写污染状态
+        skillExpansionAbortController?.abort()
         const controller = new AbortController()
         skillExpansionAbortController = controller
         set((prev) => ({ skillExpansion: { status: 'running', error: null, entries: prev.skillExpansion.entries } }))
@@ -1002,9 +1005,12 @@ export const useStore = create<AppState>()(
             userInput,
             signal: controller.signal,
           })
+          // 仅最新一次扩写允许回写：被 abort/替换的孤儿请求后到也不得覆盖新结果
+          if (skillExpansionAbortController !== controller) return
           const entries = parseExpansionEntries(raw).map((entry) => ({ ...entry, enabled: true }))
           set({ skillExpansion: { status: 'idle', error: null, entries } })
         } catch (err) {
+          if (skillExpansionAbortController !== controller) return
           if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
             set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
             return
@@ -1023,6 +1029,8 @@ export const useStore = create<AppState>()(
       abortSkillExpansion: () => {
         skillExpansionAbortController?.abort()
         skillExpansionAbortController = null
+        // 立即回 idle 清空条目；在飞请求随后返回时被「最新 run」守卫拦截，不回写
+        set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
       },
       updateSkillEntry: (id, patch) => set((state) => ({
         skillExpansion: {
@@ -1057,9 +1065,17 @@ export const useStore = create<AppState>()(
         }
         const skillMeta = { skillId: activeSkill.id, skillInput: state.skillInputDraft }
         const taskCountBefore = useStore.getState().tasks.length
-        for (const entry of enabledEntries) {
-          useStore.getState().setPrompt(entry.text)
-          await submitTask({ skillMeta })
+        let submittedCount = 0
+        try {
+          for (const entry of enabledEntries) {
+            useStore.getState().setPrompt(entry.text)
+            await submitTask({ skillMeta })
+            submittedCount += 1
+          }
+        } catch {
+          // 单条提交抛错即中断循环：捕获 rejection 避免 unhandled，按已完成数提示失败位置
+          state.showToast(`已提交 ${submittedCount} 个生成任务（第 ${submittedCount + 1} 条提交失败）`, 'error')
+          return
         }
         const submitted = useStore.getState().tasks.length - taskCountBefore
         state.showToast(`已提交 ${submitted} 个生成任务`, submitted > 0 ? 'success' : 'error')

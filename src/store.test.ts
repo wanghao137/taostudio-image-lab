@@ -3850,6 +3850,24 @@ describe('Skill 工坊 store 链', () => {
     expect(useStore.getState().skills.builtinLoading).toBe(false)
   })
 
+  it('loadBuiltinSkills：已有选中 skill 时再次加载不覆盖用户选择', async () => {
+    fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: RequestInfo | URL) => {
+      if (String(url).includes(BUILTIN_SKILL_A)) return new Response(skillFrontmatterMarkdown('Vibeshot 抓拍', '生活感人像'), { status: 200 })
+      if (String(url).includes(BUILTIN_SKILL_B)) return new Response(skillFrontmatterMarkdown('Voyeur 风格', '偷窥风格描述'), { status: 200 })
+      return new Response('not found', { status: 404 })
+    })
+
+    await useStore.getState().loadBuiltinSkills()
+    expect(useStore.getState().activeSkillId).toBe(BUILTIN_SKILL_A)
+
+    // 用户手动切到 B 后再次加载（组件重挂载等场景）：不得把选中拉回第一个
+    useStore.getState().setActiveSkill(BUILTIN_SKILL_B)
+    await useStore.getState().loadBuiltinSkills()
+
+    expect(useStore.getState().skills.builtin).toHaveLength(2)
+    expect(useStore.getState().activeSkillId).toBe(BUILTIN_SKILL_B)
+  })
+
   it('runSkillExpansion：无文本模型配置时进入 error 且文案引导设置，不调 API', async () => {
     useStore.setState({
       settings: normalizeSettings({ ...DEFAULT_SETTINGS }),
@@ -3910,6 +3928,95 @@ describe('Skill 工坊 store 链', () => {
 
     expect(useStore.getState().skillExpansion.status).toBe('error')
     expect(useStore.getState().skillExpansion.error).toContain('未返回文本内容')
+  })
+
+  it('runSkillExpansion：校验失败（输入为空）时进入 error 且保留既有条目', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '   ',
+      skillExpansion: {
+        status: 'idle',
+        error: null,
+        entries: [{ id: 'entry-1', text: '已扩写的条目', enabled: true }],
+      },
+      showToast: vi.fn(),
+    })
+
+    await useStore.getState().runSkillExpansion()
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('error')
+    expect(expansion.error).toContain('请输入锚点内容')
+    // 校验失败不动 entries：保留已扩写结果供用户改输入后重试
+    expect(expansion.entries).toEqual([{ id: 'entry-1', text: '已扩写的条目', enabled: true }])
+    expect(callSkillExpansionApi).not.toHaveBeenCalled()
+  })
+
+  it('runSkillExpansion：重复触发时旧请求被 abort，后 resolve 的旧结果不回写', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: { status: 'idle', error: null, entries: [] },
+      showToast: vi.fn(),
+    })
+
+    let resolveSlow!: (value: string) => void
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveSlow = resolve }),
+    )
+    const slowRun = useStore.getState().runSkillExpansion()
+    expect(useStore.getState().skillExpansion.status).toBe('running')
+
+    // 第二次触发：应 abort 第一次的请求并接管「最新 run」
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(async () => '### 01\n第二次扩写条目内容')
+    await useStore.getState().runSkillExpansion()
+    expect(useStore.getState().skillExpansion.entries.map((entry) => entry.text)).toEqual(['第二次扩写条目内容'])
+
+    // 第一次请求此时才 resolve：守卫应拦截回写，状态不得被拉乱
+    resolveSlow('### 01\n第一次过期扩写条目内容')
+    await slowRun
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.error).toBeNull()
+    expect(expansion.entries.map((entry) => entry.text)).toEqual(['第二次扩写条目内容'])
+  })
+
+  it('abortSkillExpansion：中断在飞请求立即回 idle 清空条目，孤儿结果后到不回写', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: { status: 'idle', error: null, entries: [] },
+      showToast: vi.fn(),
+    })
+
+    let resolveInFlight!: (value: string) => void
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveInFlight = resolve }),
+    )
+    const inFlight = useStore.getState().runSkillExpansion()
+    expect(useStore.getState().skillExpansion.status).toBe('running')
+
+    useStore.getState().abortSkillExpansion()
+    expect(useStore.getState().skillExpansion.status).toBe('idle')
+    expect(useStore.getState().skillExpansion.entries).toEqual([])
+
+    // 在飞请求最终 resolve：不得把过期结果写回
+    resolveInFlight('### 01\n过期扩写条目内容')
+    await inFlight
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.entries).toEqual([])
   })
 
   it('setActiveSkill 切换 skill 时重置扩写条目，updateSkillEntry/removeSkillEntry 精确增改', () => {
@@ -4006,6 +4113,41 @@ describe('Skill 工坊 store 链', () => {
 
     expect(useStore.getState().tasks).toHaveLength(0)
     expect(useStore.getState().showToast).toHaveBeenCalledWith('没有已启用的提示词条目', 'error')
+  })
+
+  it('generateFromSkillEntries：单条提交抛错时中断循环并 toast 失败位置，不产生 unhandled rejection', async () => {
+    const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'test-key' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [imageProfile], activeProfileId: imageProfile.id, activeScene: 'skill' }),
+      prompt: '',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '锚点输入原文',
+      skillExpansion: {
+        status: 'idle',
+        error: null,
+        entries: [
+          { id: 'entry-1', text: '第一条生成提示词', enabled: true },
+          { id: 'entry-2', text: '第二条生成提示词', enabled: true },
+        ],
+      },
+      showToast: vi.fn(),
+    })
+    const dbModule = await import('./lib/db')
+    vi.mocked(putDbTask).mockRejectedValueOnce(new dbModule.StorageQuotaError({ imageId: 'quota-task-1' }))
+
+    await useStore.getState().generateFromSkillEntries()
+
+    // 第 1 条提交即抛错：循环中断，第 2 条不再提交（任务记录在 persist 前已入列，保留可见）
+    const tasks = useStore.getState().tasks
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0].prompt).toBe('第一条生成提示词')
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('已提交 0 个生成任务（第 1 条提交失败）', 'error')
+    expect(useStore.getState().showToast).not.toHaveBeenCalledWith('已提交 2 个生成任务', 'success')
   })
 
   it('importSkillsRootDirectory：选目录后扫描一级子目录 SKILL.md 并持久化句柄', async () => {
