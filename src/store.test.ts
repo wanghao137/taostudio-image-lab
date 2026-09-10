@@ -296,7 +296,7 @@ import { calculateImageSize } from './lib/size'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, updateTaskInStore, useStore } from './store'
+import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -2104,6 +2104,78 @@ describe('data import', () => {
     expect(imported).toBe(true)
   })
 
+})
+
+// clearFailedTasks 目前没有 UI 调用方，但仍是 store 导出；保留其测试直到有明确清理决定。
+describe('gallery failed-task cleanup and filtering', () => {
+  beforeEach(async () => {
+    __resetTasksClearedForTests()
+    await clearTasks()
+  })
+
+  it('clears only failed gallery tasks', async () => {
+    const failedA = task({ id: 'failed-a', status: 'error', error: '生成失败', outputImages: ['failed-image-a'] })
+    const failedB = task({ id: 'failed-b', status: 'error', error: '生成失败', outputImages: ['failed-image-b'] })
+    const done = task({ id: 'done-task', status: 'done', outputImages: ['done-image'] })
+    const running = task({ id: 'running-task', status: 'running', finishedAt: null, elapsed: null })
+    useStore.setState({
+      tasks: [failedA, done, failedB, running],
+      selectedTaskIds: ['failed-a', 'done-task', 'failed-b'],
+      showToast: vi.fn(),
+    })
+
+    await clearFailedTasks()
+
+    const state = useStore.getState()
+    expect(state.tasks.map((item) => item.id)).toEqual(['done-task', 'running-task'])
+    expect(state.selectedTaskIds).toEqual(['done-task'])
+    expect(state.showToast).toHaveBeenCalledWith('已删除 2 个任务', 'success')
+  })
+
+  it('matches partial failures in failed filters and searches error text', () => {
+    const partial = task({
+      id: 'partial-task',
+      status: 'done',
+      outputImages: ['done-image-a', 'done-image-b'],
+      outputErrors: [{ requestIndex: 2, error: 'Failed to fetch' }],
+    })
+
+    expect(taskMatchesFilterStatus(partial, 'error')).toBe(true)
+    expect(taskMatchesFilterStatus(partial, 'done')).toBe(true)
+    expect(taskMatchesSearchQuery(partial, 'failed to fetch')).toBe(true)
+  })
+
+  it('clears partial failure markers without deleting successful outputs', async () => {
+    const partial = task({
+      id: 'partial-task',
+      status: 'done',
+      outputImages: ['done-image-a'],
+      outputErrors: [{ requestIndex: 1, error: 'Failed to fetch' }],
+    })
+    useStore.setState({ tasks: [partial], selectedTaskIds: ['partial-task'], showToast: vi.fn() })
+
+    await clearFailedTasks(['partial-task'])
+
+    const state = useStore.getState()
+    expect(state.tasks).toHaveLength(1)
+    expect(state.tasks[0]).toMatchObject({ id: 'partial-task', outputImages: ['done-image-a'], outputErrors: undefined })
+    expect(state.selectedTaskIds).toEqual([])
+    expect(state.showToast).toHaveBeenCalledWith('已清除 1 条部分失败记录', 'success')
+  })
+
+  it('keeps failed tasks created after the cleanup snapshot', async () => {
+    const failedAtConfirmOpen = task({ id: 'failed-at-confirm-open', status: 'error', error: '生成失败' })
+    const failedAfterConfirmOpen = task({ id: 'failed-after-confirm-open', status: 'error', error: '生成失败' })
+    useStore.setState({ tasks: [failedAtConfirmOpen] })
+    const failedTaskIds = useStore.getState().tasks
+      .filter((item) => item.status === 'error')
+      .map((item) => item.id)
+    useStore.setState({ tasks: [failedAtConfirmOpen, failedAfterConfirmOpen] })
+
+    await clearFailedTasks(failedTaskIds)
+
+    expect(useStore.getState().tasks.map((item) => item.id)).toEqual(['failed-after-confirm-open'])
+  })
 })
 
 describe('task deletion', () => {
