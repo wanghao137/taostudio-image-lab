@@ -18,6 +18,9 @@ import type {
   FavoriteCollection,
   PromptHistoryEntry,
   ResponsesOutputItem,
+  SceneDefaults,
+  SceneId,
+  SceneSettings,
   StoredImage,
   StoredImageThumbnail,
   ExactSizeTransformRecord,
@@ -44,6 +47,11 @@ import {
   putLocalAutoSaveDirectoryHandle,
   clearLocalAutoSaveDirectoryHandle,
   clearEngineDeliveryDirectoryHandle,
+  getSceneDirectoryHandle,
+  putSceneDirectoryHandle,
+  clearSceneDirectoryHandle,
+  listSceneDirectoryHandles,
+  type StoredLocalAutoSaveDirectoryHandle,
   getImage,
   getImageMetadata,
   getImageRecord,
@@ -79,7 +87,7 @@ import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExpo
 import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { storeGeneratedOutputImage, storeTaskOutputImages } from './lib/taskOutputPersistence'
 import { appendTargetAspectPromptHint, createTargetAspectPromptHint } from './lib/targetAspectPrompt'
-import { formatImageRatio, parseImageSize } from './lib/size'
+import { calculateImageSize, formatImageRatio, parseImageSize } from './lib/size'
 import {
   createImageTaskGeneration,
   executeImageTask,
@@ -489,6 +497,14 @@ interface AppState {
   authorizeLocalAutoSaveDirectory: () => Promise<boolean>
   retryPendingLocalAutoSaves: () => Promise<void>
 
+  // 场景
+  setActiveScene: (scene: SceneId) => void
+  setSceneImageProfileId: (scene: SceneId, profileId: string | null) => void
+  setSceneTextProfileId: (scene: SceneId, profileId: string | null) => void
+  setSceneDefaults: (scene: SceneId, defaults: Partial<SceneDefaults>) => void
+  selectSceneSaveDirectory: (scene: SceneId) => Promise<void>
+  clearSceneSaveDirectory: (scene: SceneId) => Promise<void>
+
   // 搜索和筛选
   searchQuery: string
   setSearchQuery: (q: string) => void
@@ -496,6 +512,9 @@ interface AppState {
   setFilterStatus: (status: AppState['filterStatus']) => void
   filterFavorite: boolean
   setFilterFavorite: (f: boolean) => void
+  /** 画廊任务列表的场景过滤：'all' 不限，其余只看对应场景（旧任务无 sceneId 视为 general） */
+  gallerySceneFilter: 'all' | SceneId
+  setGallerySceneFilter: (filter: AppState['gallerySceneFilter']) => void
 
   // 多选
   selectedTaskIds: string[]
@@ -1136,6 +1155,26 @@ export const useStore = create<AppState>()(
       authorizeLocalAutoSaveDirectory: async () => authorizeLocalAutoSaveDirectory(),
       retryPendingLocalAutoSaves: async () => retryPendingLocalAutoSaves(),
 
+      // Scenes
+      setActiveScene: (scene) => {
+        const state = get()
+        if (state.settings.activeScene === scene) return
+        set({ settings: { ...state.settings, activeScene: scene }, gallerySceneFilter: scene })
+        applySceneDefaults(scene)
+      },
+      setSceneImageProfileId: (scene, profileId) => {
+        patchSceneSettings(scene, { imageProfileId: profileId })
+      },
+      setSceneTextProfileId: (scene, profileId) => {
+        patchSceneSettings(scene, { textProfileId: profileId })
+      },
+      setSceneDefaults: (scene, defaults) => {
+        const current = useStore.getState().settings.scenes[scene]
+        patchSceneSettings(scene, { defaults: { ...current.defaults, ...defaults } })
+      },
+      selectSceneSaveDirectory: async (scene) => selectSceneSaveDirectory(scene),
+      clearSceneSaveDirectory: async (scene) => clearSceneSaveDirectory(scene),
+
       // Search & Filter
       searchQuery: '',
       setSearchQuery: (searchQuery) => set({ searchQuery }),
@@ -1143,6 +1182,8 @@ export const useStore = create<AppState>()(
       setFilterStatus: (filterStatus) => set({ filterStatus }),
       filterFavorite: false,
       setFilterFavorite: (filterFavorite) => set(filterFavorite ? { filterFavorite, selectedTaskIds: [], selectedFavoriteCollectionIds: [] } : { filterFavorite, activeFavoriteCollectionId: null, selectedTaskIds: [], selectedFavoriteCollectionIds: [] }),
+      gallerySceneFilter: 'general',
+      setGallerySceneFilter: (gallerySceneFilter) => set({ gallerySceneFilter }),
 
       // Selection
       selectedTaskIds: [],
@@ -4365,6 +4406,64 @@ export async function selectLocalAutoSaveDirectory() {
   }
 }
 
+// ===== 场景配置与场景保存目录 =====
+
+/** 只 patch 单个场景的设置字段，不影响其他场景；不做归一化迁移（显式 false 等运行期语义需原样保留） */
+function patchSceneSettings(sceneId: SceneId, patch: Partial<SceneSettings>) {
+  const state = useStore.getState()
+  const scene = state.settings.scenes[sceneId]
+  useStore.setState({
+    settings: {
+      ...state.settings,
+      scenes: {
+        ...state.settings.scenes,
+        [sceneId]: { ...scene, ...patch },
+      },
+    },
+  })
+}
+
+/** 切换场景时应用场景默认参数：只覆盖场景显式给出的维度，其余参数保持用户当前值 */
+function applySceneDefaults(sceneId: SceneId) {
+  const { settings, params } = useStore.getState()
+  const defaults = settings.scenes[sceneId].defaults
+  const patch: Partial<TaskParams> = {}
+  if (defaults.ratio || defaults.tier) {
+    // calculateImageSize 对无法解析的比例返回 null（如 '1:1' 缺省回落始终有效，此保护针对异常自定义值）
+    const size = calculateImageSize(defaults.tier ?? '1K', defaults.ratio ?? '1:1')
+    if (size) patch.size = size
+  }
+  if (defaults.transparentBackground === true && params.output_format === 'png') patch.transparent_output = true
+  if (defaults.transparentBackground === false) patch.transparent_output = false
+  if (Object.keys(patch).length) useStore.getState().setParams(patch)
+}
+
+export async function selectSceneSaveDirectory(sceneId: SceneId) {
+  if (typeof window === 'undefined' || !isLocalAutoSaveSupported(window)) {
+    useStore.getState().showToast('本地自动保存仅支持桌面 Chrome/Edge', 'error')
+    return
+  }
+
+  try {
+    const handle = await (window as unknown as {
+      showDirectoryPicker: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
+    }).showDirectoryPicker({ mode: 'readwrite' })
+    await putSceneDirectoryHandle(sceneId, handle)
+    void (navigator.storage?.persist?.() ?? Promise.resolve(false)).catch(() => false)
+    patchSceneSettings(sceneId, { saveDirectoryName: handle.name })
+    useStore.getState().showToast('场景保存位置已设置', 'success')
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return
+    const message = err instanceof Error ? err.message : String(err)
+    useStore.getState().showToast(`设置场景保存位置失败：${message}`, 'error')
+  }
+}
+
+export async function clearSceneSaveDirectory(sceneId: SceneId) {
+  await clearSceneDirectoryHandle(sceneId)
+  patchSceneSettings(sceneId, { saveDirectoryName: null })
+}
+
 type PermissionCapableDirectoryHandle = FileSystemDirectoryHandle & {
   queryPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
   requestPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
@@ -4432,7 +4531,7 @@ function attachOneShotPermissionRequestor(handle: PermissionCapableHandle, direc
 }
 
 /**
- * 应用启动后调用一次：检查本地自动保存的目录权限，若已降级为 prompt，
+ * 应用启动后调用一次：检查本地自动保存的目录权限（全局目录 + 各场景目录），若已降级为 prompt，
  * 则挂一次性 user-activation 监听器，用户下次点击页面时自动 requestPermission。
  * handle 仍在 IndexedDB 中（不随会话失效），只是权限状态会降级，因此无需重选文件夹。
  */
@@ -4440,25 +4539,36 @@ export async function restoreLocalAutoSavePermissionOnUserActivation() {
   try {
     const { localAutoSave } = useStore.getState().settings
     if (!localAutoSave.enabled) return
-    const directoryName = localAutoSave.directoryName?.trim()
-    if (!directoryName) return
 
-    const stored = await getLocalAutoSaveDirectoryHandle()
-    const handle = stored?.handle as PermissionCapableHandle | undefined
-    if (!handle) return
-
-    const descriptor = { mode: 'readwrite' as const }
-    const permission = await handle.queryPermission?.(descriptor)
-    if (permission === 'granted') {
-      // 会话内仍有效，顺手补一次 pending（若有）
-      await retryPendingLocalAutoSaves()
-      return
-    }
-    // denied / prompt / undefined
+    // 单把句柄的恢复路径：granted 顺手补一次 pending；prompt 挂一次性监听器；
     // denied：用户曾显式拒绝，不打扰，留给设置页处理
-    // prompt：注册一次性 user-activation 监听器
-    if (permission === 'prompt') {
-      attachOneShotPermissionRequestor(handle, directoryName)
+    const restoreHandle = async (handle: PermissionCapableHandle, directoryName: string) => {
+      const descriptor = { mode: 'readwrite' as const }
+      const permission = await handle.queryPermission?.(descriptor)
+      if (permission === 'granted') {
+        // 会话内仍有效，顺手补一次 pending（若有）
+        await retryPendingLocalAutoSaves()
+        return
+      }
+      // denied / prompt / undefined
+      if (permission === 'prompt') {
+        attachOneShotPermissionRequestor(handle, directoryName)
+      }
+    }
+
+    const directoryName = localAutoSave.directoryName?.trim()
+    if (directoryName) {
+      const stored = await getLocalAutoSaveDirectoryHandle()
+      const handle = stored?.handle as PermissionCapableHandle | undefined
+      if (handle) await restoreHandle(handle, directoryName)
+    }
+
+    // 场景目录句柄逐把走同一恢复路径（只恢复授权，不弹选择器）
+    const sceneStored = await listSceneDirectoryHandles()
+    for (const record of sceneStored) {
+      const handle = record?.handle as PermissionCapableHandle | undefined
+      if (!handle) continue
+      await restoreHandle(handle, record.name ?? handle.name)
     }
   } catch {
     // 全流程静默，绝不打断用户
@@ -4472,6 +4582,21 @@ export async function retryPendingLocalAutoSaves() {
   }
 }
 
+/** 句柄存储记录与设置目录名的一致性校验（从 getSelectedLocalAutoSaveDirectoryHandle 提取复用）：
+ *  目录被重命名/移动后记录即失效——通过则返回句柄；不通过时清除失效句柄并返回 null。 */
+async function authorizeStoredDirectoryHandle(options: {
+  stored: StoredLocalAutoSaveDirectoryHandle | undefined
+  selectedName: string | null | undefined
+  clearStored: () => Promise<unknown>
+}): Promise<FileSystemDirectoryHandle | null> {
+  const storedName = options.stored?.name ?? options.stored?.handle.name
+  if (options.stored?.handle && storedName && options.selectedName?.trim() === storedName) {
+    return options.stored.handle
+  }
+  if (options.stored?.handle) await options.clearStored()
+  return null
+}
+
 async function getSelectedLocalAutoSaveDirectoryHandle() {
   const selectedName = useStore.getState().settings.localAutoSave.directoryName?.trim()
   if (!selectedName) {
@@ -4480,22 +4605,42 @@ async function getSelectedLocalAutoSaveDirectoryHandle() {
   }
 
   const directory = await getLocalAutoSaveDirectoryHandle()
-  const storedName = directory?.name ?? directory?.handle.name
-  if (!directory?.handle || !storedName || storedName !== selectedName) {
-    if (directory?.handle) await clearLocalAutoSaveDirectoryHandle()
-    const settings = useStore.getState().settings.localAutoSave
-    if (settings.directoryName !== null) {
-      useStore.getState().setSettings({
-        localAutoSave: {
-          ...settings,
-          directoryName: null,
-        },
-      })
-    }
-    return null
-  }
+  const handle = await authorizeStoredDirectoryHandle({
+    stored: directory,
+    selectedName,
+    clearStored: () => clearLocalAutoSaveDirectoryHandle(),
+  })
+  if (handle) return handle
 
-  return directory.handle
+  const settings = useStore.getState().settings.localAutoSave
+  if (settings.directoryName !== null) {
+    useStore.getState().setSettings({
+      localAutoSave: {
+        ...settings,
+        directoryName: null,
+      },
+    })
+  }
+  return null
+}
+
+/** 任务落盘目录解析：场景任务优先用场景目录句柄（名称不一致时清除场景句柄与记录后回落），否则走全局目录 */
+async function resolveTaskSaveDirectoryHandle(task: TaskRecord): Promise<FileSystemDirectoryHandle | null> {
+  const sceneId = task.sceneId
+  if (sceneId) {
+    const stored = await getSceneDirectoryHandle(sceneId)
+    const sceneSettings = useStore.getState().settings.scenes[sceneId]
+    const handle = await authorizeStoredDirectoryHandle({
+      stored,
+      selectedName: sceneSettings?.saveDirectoryName,
+      clearStored: () => clearSceneDirectoryHandle(sceneId),
+    })
+    if (handle) return handle
+    if (sceneSettings?.saveDirectoryName) {
+      patchSceneSettings(sceneId, { saveDirectoryName: null })
+    }
+  }
+  return getSelectedLocalAutoSaveDirectoryHandle()
 }
 
 export async function runLocalAutoSaveForTask(taskId: string) {
@@ -4529,7 +4674,7 @@ export async function runLocalAutoSaveForTask(taskId: string) {
       return
     }
 
-    const directoryHandle = await getSelectedLocalAutoSaveDirectoryHandle()
+    const directoryHandle = await resolveTaskSaveDirectoryHandle(task)
     if (!directoryHandle) {
       await updateTaskLocalAutoSave(taskId, {
         status: 'pending',

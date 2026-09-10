@@ -5,7 +5,11 @@ import TaskCard from './TaskCard'
 import type { TaskRecord } from '../types'
 
 export default function TaskGrid() {
-  const tasks = useStore((s) => s.tasks)
+  // 画廊按场景过滤：'all' 看全部；旧任务无 sceneId 视为 general。
+  // 过滤发生在搜索/收藏筛选之前的数据源上，SearchBar 逻辑作用于过滤后的列表。
+  const tasks = useStore((s) => s.gallerySceneFilter === 'all'
+    ? s.tasks
+    : s.tasks.filter((t) => (t.sceneId ?? 'general') === s.gallerySceneFilter))
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)

@@ -303,11 +303,12 @@ vi.mock('./lib/agentApi', async (importOriginal) => {
     })),
   }
 })
-import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getEngineDeliveryDirectoryHandle, getImage, getLocalAutoSaveDirectoryHandle, getStoredFreshImageThumbnail, putAgentConversation, putEngineDeliveryDirectoryHandle, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putTask as putDbTask } from './lib/db'
+import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearSceneDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getEngineDeliveryDirectoryHandle, getImage, getLocalAutoSaveDirectoryHandle, getSceneDirectoryHandle, getStoredFreshImageThumbnail, listSceneDirectoryHandles, putAgentConversation, putEngineDeliveryDirectoryHandle, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putSceneDirectoryHandle, putTask as putDbTask, SCENE_DIRECTORY_KEY_PREFIX } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { formatExportFileTime } from './lib/exportFileName'
+import { calculateImageSize } from './lib/size'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import * as imageTaskApi from './lib/imageTaskApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
@@ -7327,5 +7328,212 @@ describe('prompt reverse drop-zone state', () => {
     useStore.getState().setPromptReverseSource(null)
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(await dbModule.getImage(b)).toBeUndefined()
+  })
+})
+
+describe('场景 actions 与保存链', () => {
+  // 场景句柄 Map 在 db mock 中跨测试持久（Task 3 事实），需显式清到空起始。
+  async function clearAllSceneDirectoryHandles() {
+    for (const record of await listSceneDirectoryHandles()) {
+      await clearSceneDirectoryHandle(record.id.slice(SCENE_DIRECTORY_KEY_PREFIX.length))
+    }
+  }
+
+  function sceneSettings(sceneSaveDirectoryNames: Partial<Record<'portrait' | 'general' | 'sticker' | 'skill', string>> = {}) {
+    const profile = createDefaultOpenAIProfile({ id: 'scene-settings-profile', apiKey: 'test-key' })
+    return normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      apiKey: 'test-key',
+      profiles: [profile],
+      activeProfileId: profile.id,
+      localAutoSave: {
+        enabled: true,
+        directoryName: 'GlobalArchive',
+        lastSavedAt: null,
+        lastSavedFolderName: null,
+      },
+      scenes: Object.fromEntries(
+        Object.entries(sceneSaveDirectoryNames).map(([sceneId, directoryName]) => [
+          sceneId,
+          { saveDirectoryName: directoryName },
+        ]),
+      ),
+    })
+  }
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearLocalAutoSaveDirectoryHandle()
+    await clearAllSceneDirectoryHandles()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(putDbTask).mockClear()
+    vi.mocked(writeLocalAutoSaveArchive).mockClear()
+    const testWindow = getLocalAutoSaveTestWindow()
+    Object.defineProperty(testWindow, 'showDirectoryPicker', {
+      configurable: true,
+      value: undefined,
+    })
+    Object.defineProperty(testWindow.navigator, 'userAgentData', {
+      configurable: true,
+      value: undefined,
+    })
+    useStore.setState({
+      settings: sceneSettings(),
+      params: { ...DEFAULT_PARAMS },
+      tasks: [],
+      localAutoSaveRunningTaskIds: {},
+      gallerySceneFilter: 'general',
+      showToast: vi.fn(),
+    })
+  })
+
+  afterEach(async () => {
+    // 场景句柄 Map 跨测试持久：结束时也清一次，避免泄漏到文件内后续新增的用例
+    await clearAllSceneDirectoryHandles()
+  })
+
+  it('setActiveScene 切换场景并应用默认参数、重置画廊过滤', () => {
+    useStore.setState({
+      settings: normalizeSettings({
+        scenes: { sticker: { defaults: { ratio: '1:1', tier: '1K', transparentBackground: true } } },
+      }),
+      params: { ...DEFAULT_PARAMS },
+    })
+    useStore.getState().setActiveScene('sticker')
+    expect(useStore.getState().settings.activeScene).toBe('sticker')
+    expect(useStore.getState().gallerySceneFilter).toBe('sticker')
+    expect(useStore.getState().params.transparent_output).toBe(true)
+    expect(useStore.getState().params.size).toBe(calculateImageSize('1K', '1:1'))
+  })
+
+  it('setActiveScene 不重复触发同场景切换', () => {
+    useStore.setState({
+      settings: normalizeSettings({
+        scenes: { sticker: { defaults: { ratio: '1:1', tier: '1K' } } },
+      }),
+      params: { ...DEFAULT_PARAMS, size: '1536x1024' },
+      gallerySceneFilter: 'all',
+    })
+    // activeScene 默认 general → sticker 会应用默认参数
+    useStore.getState().setActiveScene('sticker')
+    expect(useStore.getState().params.size).toBe(calculateImageSize('1K', '1:1'))
+
+    // sticker → sticker：场景与参数都不再变化（用户手动改过的 size 不被覆盖）
+    useStore.setState({ params: { ...DEFAULT_PARAMS, size: '1024x1536' } })
+    useStore.getState().setActiveScene('sticker')
+    expect(useStore.getState().settings.activeScene).toBe('sticker')
+    expect(useStore.getState().params.size).toBe('1024x1536')
+  })
+
+  it('场景配置 actions 只更新目标场景字段', () => {
+    const profile = createDefaultOpenAIProfile({ id: 'scene-bind-profile', apiKey: 'test-key' })
+    useStore.setState({
+      settings: normalizeSettings({ profiles: [profile], activeProfileId: profile.id }),
+    })
+
+    useStore.getState().setSceneImageProfileId('portrait', profile.id)
+    useStore.getState().setSceneTextProfileId('portrait', null)
+    useStore.getState().setSceneDefaults('sticker', { ratio: '3:4', tier: '2K' })
+
+    const scenes = useStore.getState().settings.scenes
+    expect(scenes.portrait.imageProfileId).toBe('scene-bind-profile')
+    expect(scenes.portrait.textProfileId).toBeNull()
+    expect(scenes.sticker.defaults).toMatchObject({ ratio: '3:4', tier: '2K' })
+    expect(scenes.general.imageProfileId).toBeNull()
+    expect(scenes.general.defaults.ratio).toBeUndefined()
+  })
+
+  it('setGallerySceneFilter 支持 all 与具体场景', () => {
+    useStore.getState().setGallerySceneFilter('all')
+    expect(useStore.getState().gallerySceneFilter).toBe('all')
+    useStore.getState().setGallerySceneFilter('portrait')
+    expect(useStore.getState().gallerySceneFilter).toBe('portrait')
+  })
+
+  it('selectSceneSaveDirectory 选择目录后写入场景句柄与场景设置，不动全局目录', async () => {
+    const sceneDirectory = fakeDirectoryHandle('StickerFolder')
+    const picker = setLocalAutoSaveBrowserSupport(true, vi.fn(async () => sceneDirectory))
+
+    await useStore.getState().selectSceneSaveDirectory('sticker')
+
+    expect(picker).toHaveBeenCalledWith({ mode: 'readwrite' })
+    expect(await getSceneDirectoryHandle('sticker')).toMatchObject({ handle: sceneDirectory, name: 'StickerFolder' })
+    expect(useStore.getState().settings.scenes.sticker.saveDirectoryName).toBe('StickerFolder')
+    // 全局目录与全局 localAutoSave 设置不受场景选择影响
+    expect(await getLocalAutoSaveDirectoryHandle()).toBeUndefined()
+    expect(useStore.getState().settings.localAutoSave.directoryName).toBe('GlobalArchive')
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('场景保存位置已设置', 'success')
+  })
+
+  it('selectSceneSaveDirectory 在不支持的浏览器提示且不抛错', async () => {
+    const unsupportedPicker = setLocalAutoSaveBrowserSupport(false)
+
+    await useStore.getState().selectSceneSaveDirectory('sticker')
+
+    expect(unsupportedPicker).not.toHaveBeenCalled()
+    expect(await getSceneDirectoryHandle('sticker')).toBeUndefined()
+    expect(useStore.getState().settings.scenes.sticker.saveDirectoryName).toBeNull()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('本地自动保存仅支持桌面 Chrome/Edge', 'error')
+  })
+
+  it('clearSceneSaveDirectory 清除场景句柄与场景设置', async () => {
+    const sceneDirectory = fakeDirectoryHandle('StickerFolder')
+    await putSceneDirectoryHandle('sticker', sceneDirectory)
+    useStore.setState({ settings: sceneSettings({ sticker: 'StickerFolder' }) })
+
+    await useStore.getState().clearSceneSaveDirectory('sticker')
+
+    expect(await getSceneDirectoryHandle('sticker')).toBeUndefined()
+    expect(useStore.getState().settings.scenes.sticker.saveDirectoryName).toBeNull()
+  })
+
+  it('场景句柄可用时，任务落盘收到场景句柄', async () => {
+    const globalDirectory = fakeDirectoryHandle('GlobalArchive')
+    const sceneDirectory = fakeDirectoryHandle('StickerFolder')
+    await putLocalAutoSaveDirectoryHandle(globalDirectory)
+    await putSceneDirectoryHandle('sticker', sceneDirectory)
+    await putImage(localAutoSaveImage())
+    useStore.setState({ settings: sceneSettings({ sticker: 'StickerFolder' }) })
+    const sceneTask = localAutoSaveTask({ id: 'scene-save-task', sceneId: 'sticker' })
+    useStore.getState().setTasks([sceneTask])
+
+    await runLocalAutoSaveForTask(sceneTask.id)
+
+    expect(writeLocalAutoSaveArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({ rootHandle: sceneDirectory })
+    expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'saved' })
+  })
+
+  it('场景句柄缺失时，任务落盘回落全局句柄', async () => {
+    const globalDirectory = fakeDirectoryHandle('GlobalArchive')
+    await putLocalAutoSaveDirectoryHandle(globalDirectory)
+    await putImage(localAutoSaveImage())
+    useStore.setState({ settings: sceneSettings() })
+    const sceneTask = localAutoSaveTask({ id: 'scene-fallback-task', sceneId: 'sticker' })
+    useStore.getState().setTasks([sceneTask])
+
+    await runLocalAutoSaveForTask(sceneTask.id)
+
+    expect(writeLocalAutoSaveArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({ rootHandle: globalDirectory })
+    expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'saved' })
+  })
+
+  it('场景句柄目录名与设置不一致时，清除场景句柄并回落全局', async () => {
+    const globalDirectory = fakeDirectoryHandle('GlobalArchive')
+    const renamedDirectory = fakeDirectoryHandle('RenamedElsewhere')
+    await putLocalAutoSaveDirectoryHandle(globalDirectory)
+    await putSceneDirectoryHandle('sticker', renamedDirectory)
+    await putImage(localAutoSaveImage())
+    useStore.setState({ settings: sceneSettings({ sticker: 'StickerFolder' }) })
+    const sceneTask = localAutoSaveTask({ id: 'scene-mismatch-task', sceneId: 'sticker' })
+    useStore.getState().setTasks([sceneTask])
+
+    await runLocalAutoSaveForTask(sceneTask.id)
+
+    expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({ rootHandle: globalDirectory })
+    expect(await getSceneDirectoryHandle('sticker')).toBeUndefined()
+    expect(useStore.getState().settings.scenes.sticker.saveDirectoryName).toBeNull()
   })
 })
