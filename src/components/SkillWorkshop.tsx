@@ -31,6 +31,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const loadBuiltinSkills = useStore((s) => s.loadBuiltinSkills)
   const importSkillsRootDirectory = useStore((s) => s.importSkillsRootDirectory)
   const refreshLocalSkills = useStore((s) => s.refreshLocalSkills)
+  const clearSkillsRootDirectory = useStore((s) => s.clearSkillsRootDirectory)
   const setActiveSkill = useStore((s) => s.setActiveSkill)
   const setSkillInputDraft = useStore((s) => s.setSkillInputDraft)
   const runSkillExpansion = useStore((s) => s.runSkillExpansion)
@@ -154,6 +155,19 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                 <RefreshCw className={`h-3.5 w-3.5 ${skills.scanning ? 'animate-spin' : ''}`} aria-hidden />
                 重新扫描
               </button>
+              {skills.localRootName && (
+                <button
+                  type="button"
+                  onClick={() => { void clearSkillsRootDirectory() }}
+                  disabled={skills.scanning}
+                  aria-label="清除已绑定的本地 skills 目录"
+                  title="解绑本地 skills 目录，并清空已导入的本地列表"
+                  className={SECONDARY_BUTTON_CLASS_NAME + ' px-2 py-2 text-xs'}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                  清除
+                </button>
+              )}
             </div>
           </div>
         </aside>

@@ -1069,6 +1069,10 @@ export const useStore = create<AppState>()(
           return
         }
         const skillMeta = { skillId: activeSkill.id, skillInput: state.skillInputDraft }
+        // 工坊批量生成为「纯文生图」语义：提交前清空画廊遗留的参考图/遮罩，
+        // 避免逐条生成静默携带输入图变成计费编辑请求（全覆盖遮罩还会触发确认循环）。
+        useStore.getState().clearInputImages()
+        useStore.getState().clearMaskDraft()
         const taskCountBefore = useStore.getState().tasks.length
         let submittedCount = 0
         try {

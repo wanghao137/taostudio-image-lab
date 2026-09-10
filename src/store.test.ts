@@ -4161,6 +4161,44 @@ describe('Skill 工坊 store 链', () => {
     expect(useStore.getState().showToast).toHaveBeenCalledWith('已提交 2 个生成任务', 'success')
   })
 
+  it('generateFromSkillEntries：提交前清空画廊遗留参考图与遮罩，任务保持纯文生图', async () => {
+    const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'test-key' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [imageProfile], activeProfileId: imageProfile.id, activeScene: 'skill' }),
+      prompt: '',
+      params: { ...DEFAULT_PARAMS },
+      // 模拟用户在画廊挂了参考图与遮罩但未提交，随后切到工坊批量生成
+      inputImages: [imageA],
+      maskDraft: { targetImageId: imageA.id, maskDataUrl: 'data:image/png;base64,mask', updatedAt: 1 },
+      tasks: [],
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '锚点输入原文',
+      skillExpansion: {
+        status: 'idle',
+        error: null,
+        entries: [{ id: 'entry-1', text: '第一条生成提示词', enabled: true }],
+      },
+      showToast: vi.fn(),
+    })
+
+    await useStore.getState().generateFromSkillEntries()
+
+    const tasks = useStore.getState().tasks
+    expect(tasks).toHaveLength(1)
+    // 提交的任务不含参考图/遮罩字段：不会变成计费编辑请求
+    expect(tasks[0].inputImageIds).toEqual([])
+    expect(tasks[0].maskImageId).toBeNull()
+    expect(tasks[0].maskTargetImageId).toBeNull()
+    // skill 溯源字段不受影响
+    expect(tasks[0].skillId).toBe('builtin-skill')
+    expect(tasks[0].skillInput).toBe('锚点输入原文')
+    expect(tasks[0].sceneId).toBe('skill')
+    // 全局输入态已被清空
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().maskDraft).toBeNull()
+  })
+
   it('generateFromSkillEntries：没有 enabled 条目时 toast 提示且零提交', async () => {
     const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'test-key' })
     useStore.setState({

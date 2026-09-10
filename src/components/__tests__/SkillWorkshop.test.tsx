@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SkillWorkshop } from '../SkillWorkshop'
 import { useStore } from '../../store'
 import { DEFAULT_SETTINGS, createDefaultOpenAIProfile, normalizeSettings } from '../../lib/apiProfiles'
@@ -175,5 +175,35 @@ describe('SkillWorkshop', () => {
 
     fireEvent.click(screen.getByText('内置 skill 加载失败，点击重试'))
     expect(loadBuiltinSkills).toHaveBeenCalled()
+  })
+
+  it('未绑定本地目录时不显示「清除」按钮', () => {
+    seedStore()
+    useStore.setState({ skills: { ...useStore.getState().skills, localRootName: null } })
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    expect(screen.queryByRole('button', { name: '清除已绑定的本地 skills 目录' })).toBeNull()
+  })
+
+  it('已绑定本地目录时显示「清除」，点击调用解绑并断言 store 状态清空', async () => {
+    seedStore()
+    // jsdom 无 IndexedDB：mock action 复刻 store 真实行为（清 local 列表 + localRootName）
+    const clearSkillsRootDirectory = vi
+      .spyOn(useStore.getState(), 'clearSkillsRootDirectory')
+      .mockImplementation(async () => {
+        useStore.setState((state) => ({ skills: { ...state.skills, local: [], localRootName: null } }))
+      })
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    const clearButton = screen.getByRole('button', { name: '清除已绑定的本地 skills 目录' })
+    expect(clearButton.getAttribute('title')).toBe('解绑本地 skills 目录，并清空已导入的本地列表')
+
+    fireEvent.click(clearButton)
+    await waitFor(() => expect(clearSkillsRootDirectory).toHaveBeenCalled())
+
+    expect(useStore.getState().skills.local).toEqual([])
+    expect(useStore.getState().skills.localRootName).toBeNull()
+    // localRootName 清空后按钮随之消失
+    await waitFor(() => expect(screen.queryByRole('button', { name: '清除已绑定的本地 skills 目录' })).toBeNull())
   })
 })

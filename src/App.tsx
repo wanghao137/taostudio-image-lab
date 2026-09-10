@@ -283,7 +283,7 @@ export default function App() {
   return (
     <>
       {isMobile ? (
-        <MobileShell composeHidden={activeScene === 'skill'} onOpenCompose={() => setComposeOpen(true)}>
+        <MobileShell composeHidden={appMode === 'gallery' && activeScene === 'skill'} onOpenCompose={() => setComposeOpen(true)}>
           <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : '画廊'}>
             {appMode === 'engine' ? (
               <>
