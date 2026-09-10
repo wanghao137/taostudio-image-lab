@@ -1,6 +1,6 @@
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type RefusalRecoveryRecord, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
-import { appendStreamingFormatHint, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
+import { appendStreamingFormatHint, createHeaders, extractText, getApiErrorMessage, getResponsesImageResultBase64, isRecordValue, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, normalizeResponsePayload, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
@@ -100,13 +100,6 @@ const AGENT_TITLE_INSTRUCTIONS = [
 ].join('\n')
 
 const AGENT_TITLE_MAX_LENGTH = 28
-
-export function createHeaders(profile: ApiProfile): Record<string, string> {
-  return {
-    Authorization: `Bearer ${profile.apiKey}`,
-    'Content-Type': 'application/json',
-  }
-}
 
 function createImageTool(params: TaskParams, profile: ApiProfile, maskDataUrl?: string): Record<string, unknown> {
   const tool: Record<string, unknown> = {
@@ -247,10 +240,6 @@ function createAgentTools(params: TaskParams, profile: ApiProfile, settings: App
   return tools
 }
 
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-}
-
 function getStringValue(source: Record<string, unknown>, key: string): string | undefined {
   const value = source[key]
   return typeof value === 'string' && value ? value : undefined
@@ -259,44 +248,6 @@ function getStringValue(source: Record<string, unknown>, key: string): string | 
 function getNumberValue(source: Record<string, unknown>, key: string): number | undefined {
   const value = source[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function escapeMarkdownLinkLabel(text: string) {
-  return text.replace(/\\/g, '\\\\').replace(/\]/g, '\\]')
-}
-
-type ResponseTextAnnotation = NonNullable<NonNullable<ResponsesOutputItem['content']>[number]['annotations']>[number]
-
-function applyUrlCitations(text: string, annotations: ResponseTextAnnotation[] | undefined) {
-  const citations = (annotations ?? [])
-    .filter((annotation) =>
-      annotation.type === 'url_citation' &&
-      typeof annotation.url === 'string' &&
-      annotation.url.trim() &&
-      typeof annotation.start_index === 'number' &&
-      typeof annotation.end_index === 'number' &&
-      annotation.start_index >= 0 &&
-      annotation.end_index > annotation.start_index &&
-      annotation.end_index <= text.length,
-    )
-    .sort((a, b) => (a.start_index ?? 0) - (b.start_index ?? 0))
-
-  if (citations.length === 0) return text
-
-  let cursor = 0
-  let output = ''
-  for (const citation of citations) {
-    const start = citation.start_index ?? 0
-    const end = citation.end_index ?? start
-    if (start < cursor) continue
-
-    output += text.slice(cursor, start)
-    const label = text.slice(start, end) || citation.title || citation.url || 'source'
-    output += `[${escapeMarkdownLinkLabel(label)}](${citation.url})`
-    cursor = end
-  }
-  output += text.slice(cursor)
-  return output
 }
 
 function getStreamEventErrorMessage(event: Record<string, unknown>): string | null {
@@ -338,23 +289,6 @@ function getImageToolFailureFromOutputItem(event: Record<string, unknown>, item?
     toolCallId,
     error,
   }
-}
-
-export function extractText(payload: ResponsesApiResponse) {
-  const chunks: string[] = []
-
-  for (const item of payload.output ?? []) {
-    if (item.type !== 'message') continue
-    for (const part of item.content ?? []) {
-      if ((part.type === 'output_text' || part.type === 'text') && typeof part.text === 'string') {
-        chunks.push(applyUrlCitations(part.text, part.annotations))
-      } else if (part.type === 'refusal' && typeof part.refusal === 'string') {
-        chunks.push(part.refusal)
-      }
-    }
-  }
-
-  return chunks.join('\n').trim()
 }
 
 function decodeXmlText(text: string) {
@@ -411,15 +345,6 @@ function extractImageFromOutputItem(item: ResponsesOutputItem, fallbackMime: str
     dataUrl: normalizeBase64Image(b64, fallbackMime),
     actualParams: pickActualParams(item),
     revisedPrompt: typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined,
-  }
-}
-
-export function normalizeResponsePayload(value: unknown): ResponsesApiResponse | null {
-  if (!isRecordValue(value)) return null
-  return {
-    ...value,
-    ...(typeof value.id === 'string' ? { id: value.id } : { id: undefined }),
-    output: normalizeResponsesOutputItems(value.output),
   }
 }
 

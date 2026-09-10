@@ -3,9 +3,8 @@
 // 设计文档：docs/superpowers/specs/2026-08-29-image-to-prompt-design.md
 // ---------------------------------------------------------------------------
 
-import { createHeaders, extractText, normalizeResponsePayload } from './agentApi'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
-import { getApiErrorMessage } from './imageApiShared'
+import { createHeaders, extractText, getApiErrorMessage, normalizeResponsePayload } from './imageApiShared'
 import type { ApiProfile, AppSettings } from '../types'
 
 export type PromptReverseImageType = 'portrait' | 'illustration' | 'poster' | 'product' | 'general'
