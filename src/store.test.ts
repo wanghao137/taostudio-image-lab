@@ -7407,6 +7407,17 @@ describe('场景 actions 与保存链', () => {
     expect(useStore.getState().params.size).toBe(calculateImageSize('1K', '1:1'))
   })
 
+  it('场景默认 transparentBackground:false 时，setActiveScene 强制关闭已开启的 transparent_output', () => {
+    useStore.setState({
+      settings: normalizeSettings({
+        scenes: { sticker: { defaults: { transparentBackground: false } } },
+      }),
+      params: { ...DEFAULT_PARAMS, transparent_output: true, output_format: 'png' },
+    })
+    useStore.getState().setActiveScene('sticker')
+    expect(useStore.getState().params.transparent_output).toBe(false)
+  })
+
   it('setActiveScene 不重复触发同场景切换', () => {
     useStore.setState({
       settings: normalizeSettings({

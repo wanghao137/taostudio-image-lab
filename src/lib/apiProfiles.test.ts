@@ -2053,6 +2053,23 @@ describe('场景配置归一化与解析', () => {
     expect(normalizeSettings({ activeScene: 'nope' }).activeScene).toBe('general')
   })
 
+  it('场景 defaults.transparentBackground 归一化保留显式 false（true/缺省/非法值语义不变）', () => {
+    const s = normalizeSettings({
+      scenes: {
+        sticker: { defaults: { transparentBackground: false } },
+        portrait: { defaults: { transparentBackground: true } },
+        skill: { defaults: {} },
+        general: { defaults: { transparentBackground: 'yes' } },
+      },
+    })
+    // 显式 false 必须存活归一化：applySceneDefaults 依赖 === false 关闭 transparent_output
+    expect(s.scenes.sticker.defaults.transparentBackground).toBe(false)
+    expect(s.scenes.portrait.defaults.transparentBackground).toBe(true)
+    expect(s.scenes.skill.defaults.transparentBackground).toBeUndefined()
+    // 非法值仍回 undefined
+    expect(s.scenes.general.defaults.transparentBackground).toBeUndefined()
+  })
+
   it('getSceneImageApiProfile：场景显式引用优先，且不套用顶层镜像字段', () => {
     const a = { ...createDefaultOpenAIProfile(), id: 'a', name: 'A', model: 'model-a' }
     const b = { ...createDefaultOpenAIProfile(), id: 'b', name: 'B', model: 'model-b' }
@@ -2085,5 +2102,23 @@ describe('场景配置归一化与解析', () => {
     })
     expect(getSceneTextApiProfileResolution(s).profile?.id).toBe('text-1')
     expect(getSceneTextApiProfileResolution({ ...s, activeScene: 'general' }).resolvedBy).not.toBe('explicit')
+  })
+
+  it('getSceneTextApiProfileResolution：回落全局链时保留旧版顶层镜像覆盖（语义不变）', () => {
+    const text = {
+      ...createDefaultOpenAIProfile(),
+      id: 'text-1', apiMode: 'responses' as const,
+      baseUrl: 'https://profile.example.com/v1', apiKey: 'profile-key', model: 'profile-model',
+    }
+    const s = normalizeSettings({ profiles: [text], activeProfileId: 'text-1' })
+    const raw = {
+      ...s,
+      baseUrl: 'https://legacy.example.com/v1', apiKey: 'legacy-key', model: 'legacy-model', apiMode: 'responses' as const,
+    }
+    const resolved = getSceneTextApiProfileResolution(raw)
+    expect(resolved.resolvedBy).toBe('active')
+    expect(resolved.profile?.baseUrl).toBe('https://legacy.example.com/v1')
+    expect(resolved.profile?.apiKey).toBe('legacy-key')
+    expect(resolved.profile?.model).toBe('legacy-model')
   })
 })

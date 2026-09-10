@@ -832,7 +832,9 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
       defaults: {
         ratio: typeof defaults.ratio === 'string' ? defaults.ratio : undefined,
         tier: defaults.tier === '1K' || defaults.tier === '2K' || defaults.tier === '4K' ? defaults.tier : undefined,
-        transparentBackground: defaults.transparentBackground === true ? true : undefined,
+        // 显式 false 必须原样保留：applySceneDefaults 依赖 === false 关闭 transparent_output，
+        // 折叠成 undefined 会让持久化后的显式 false 默认值失效。非法值仍回 undefined。
+        transparentBackground: typeof defaults.transparentBackground === 'boolean' ? defaults.transparentBackground : undefined,
       },
     }
   }
@@ -915,7 +917,10 @@ export function getTextApiProfileResolution(settings: Partial<AppSettings> | unk
     const explicit = normalized.profiles.find((profile) => profile.id === normalized.textApiProfileId)
     if (explicit) return { profile: explicit, resolvedBy: 'explicit', reason: null }
   }
-  const active = getActiveApiProfile(normalized)
+  // active 分支传原始 settings 给 getActiveApiProfile：normalize 会把顶层镜像字段折叠成激活
+  // profile 值，先 normalize 再取激活配置会丢旧版 URL 参数覆盖语义（getActiveApiProfile 内部
+  // 自会 normalize）。对已归一化输入（全部既有调用方）两者结果完全一致。
+  const active = getActiveApiProfile(settings)
   if (isAgentTextApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
   const textProfiles = normalized.profiles.filter(isAgentTextApiProfile)
   if (textProfiles.length === 1) return { profile: textProfiles[0], resolvedBy: 'sole', reason: null }
@@ -942,7 +947,11 @@ export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown
   return getActiveApiProfile(settings)
 }
 
-/** 场景文本解析：场景显式引用优先，否则走全局 textApiProfileId 自动链（语义不变）。 */
+/**
+ * 场景文本解析：场景显式引用优先，否则走全局 textApiProfileId 自动链（语义不变）。
+ * 回落分支传原始 settings 而非 normalized：normalize 会用激活 profile 值覆盖顶层
+ * 镜像字段（baseUrl/apiKey/model），丢掉旧版 URL 参数覆盖语义（与 getSceneImageApiProfile 一致）。
+ */
 export function getSceneTextApiProfileResolution(settings: Partial<AppSettings> | unknown): TextApiResolution {
   const normalized = normalizeSettings(settings)
   const sceneTextProfileId = normalized.scenes[normalized.activeScene].textProfileId
@@ -950,7 +959,7 @@ export function getSceneTextApiProfileResolution(settings: Partial<AppSettings> 
     const profile = normalized.profiles.find((p) => p.id === sceneTextProfileId)
     if (profile) return { profile, resolvedBy: 'explicit', reason: null }
   }
-  return getTextApiProfileResolution(normalized)
+  return getTextApiProfileResolution(settings)
 }
 
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
