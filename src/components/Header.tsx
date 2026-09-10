@@ -1,11 +1,12 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { ExternalLink, Monitor, Moon, Sun } from 'lucide-react'
+import { LayoutGrid, Monitor, Moon, Sun } from 'lucide-react'
 import { getFavoriteCollectionTitle, useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { useTooltip } from '../hooks/useTooltip'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import ViewportTooltip from './ViewportTooltip'
 import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, SettingsIcon } from './icons'
+import type { SceneId } from '../types'
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
@@ -17,7 +18,14 @@ type ThemeValue = 'light' | 'dark'
 
 const THEME_KEY = 'taostudio.imageLab.theme'
 // 无限画布（独立应用，Vercel 项目 infinite-canvas）入口地址；置空字符串即可隐藏入口。
-const CANVAS_WORKSPACE_URL: string = 'https://canvas.taostudioai.com'
+export const CANVAS_WORKSPACE_URL: string = 'https://canvas.taostudioai.com'
+// 顶层导航的场景 Tab（桌面与移动端共用）；P2 上线 Skill 工坊视图后在数组中追加即可。
+export const SCENE_TABS: Array<{ id: SceneId; label: string }> = [
+  { id: 'portrait', label: '人像写真' },
+  { id: 'general', label: '通用创作' },
+  { id: 'sticker', label: '表情与头像' },
+  // P2 上线 Skill 工坊视图后追加：{ id: 'skill', label: 'Skill 工坊' }
+]
 const HelpModal = lazy(() => import('./HelpModal'))
 const HistoryModal = lazy(() => import('./HistoryModal'))
 
@@ -46,6 +54,8 @@ function isInstalledPwa() {
 export default function Header() {
   const appMode = useStore((s) => s.appMode)
   const setAppMode = useStore((s) => s.setAppMode)
+  const activeScene = useStore((s) => s.settings.activeScene)
+  const setActiveScene = useStore((s) => s.setActiveScene)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const agentMobileHeaderVisible = useStore((s) => s.agentMobileHeaderVisible)
@@ -279,20 +289,16 @@ export default function Header() {
             </div>
           )}
           <div className="hidden sm:flex items-center gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mr-4">
-            <button
-              type="button"
-              onClick={() => setAppMode('gallery')}
-              className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
-            >
-              画廊
-            </button>
-            <button
-              type="button"
-              onClick={() => setAppMode('agent')}
-              className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
-            >
-              智能体
-            </button>
+            {SCENE_TABS.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => { setAppMode('gallery'); setActiveScene(id); }}
+                className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' && activeScene === id ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+              >
+                {label}
+              </button>
+            ))}
             <button
               type="button"
               onClick={() => setAppMode('engine')}
@@ -300,20 +306,20 @@ export default function Header() {
             >
               引擎
             </button>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
             {CANVAS_WORKSPACE_URL !== '' && (
               <a
                 href={CANVAS_WORKSPACE_URL}
                 target="_blank"
                 rel="noopener noreferrer"
-                title="在新标签页打开无限画布（独立应用）"
-                className="flex items-center gap-1 px-4 py-1.5 rounded-lg text-sm transition-colors text-gray-500 hover:text-gray-800 dark:hover:text-gray-200"
+                title="无限画布（独立应用，新标签页打开）"
+                aria-label="无限画布"
+                className="flex items-center rounded-lg p-2 text-stone-600 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100"
               >
-                无限画布
-                <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+                <LayoutGrid className="h-5 w-5" aria-hidden />
               </a>
             )}
-          </div>
-          <div className="flex items-center gap-1 shrink-0">
             <button
               type="button"
               onClick={() => setThemeMode(themeMode === 'system' ? 'light' : themeMode === 'light' ? 'dark' : 'system')}

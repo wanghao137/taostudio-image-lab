@@ -1,6 +1,8 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react'
-import { Image as ImageIcon, Star, Sparkles, User, Moon, Sun, BookOpen, Bot, Cpu } from 'lucide-react'
+import { Bot, BookOpen, Camera, Cpu, Image as ImageIcon, LayoutGrid, Moon, Smile, Sparkles, Sun, User } from 'lucide-react'
 import { useStore } from '../store'
+import { CANVAS_WORKSPACE_URL, SCENE_TABS } from './Header'
+import type { SceneId } from '../types'
 
 interface MobileShellProps {
   children: ReactNode
@@ -9,25 +11,27 @@ interface MobileShellProps {
 
 const THEME_KEY = 'taostudio.imageLab.theme'
 
+// 场景 chip 图标（与 Header 的 SCENE_TABS 对齐；P2 上线 skill 后替换专属图标）。
+const SCENE_TAB_ICONS: Record<SceneId, ComponentType<{ className?: string }>> = {
+  portrait: Camera,
+  general: ImageIcon,
+  sticker: Smile,
+  skill: Sparkles,
+}
+
 export default function MobileShell({ children, onOpenCompose }: MobileShellProps) {
   const appMode = useStore((s) => s.appMode)
   const setAppMode = useStore((s) => s.setAppMode)
-  const filterFavorite = useStore((s) => s.filterFavorite)
-  const setFilterFavorite = useStore((s) => s.setFilterFavorite)
+  const activeScene = useStore((s) => s.settings.activeScene)
+  const setActiveScene = useStore((s) => s.setActiveScene)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const [myOpen, setMyOpen] = useState(false)
 
-  const goGallery = () => {
+  // 与桌面顶层导航一致：场景 chip 点击进入画廊并切换场景
+  const goScene = (scene: SceneId) => {
     setAppMode('gallery')
-    setFilterFavorite(false)
+    setActiveScene(scene)
   }
-  const goFavorites = () => {
-    setAppMode('gallery')
-    setFilterFavorite(true)
-  }
-
-  // 当前激活 tab（用于高亮）
-  const tab = appMode === 'agent' ? 'agent' : appMode === 'engine' ? 'engine' : filterFavorite ? 'favorites' : 'gallery'
 
   return (
     <div className="max-sm:flex max-sm:min-h-screen max-sm:flex-col sm:hidden">
@@ -43,10 +47,21 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
       {/* 右下角 FAB + 底部 Tab */}
       <div data-mobile-navigation className="safe-area-bottom fixed inset-x-0 bottom-0 z-40 border-t border-stone-200/70 bg-white/95 backdrop-blur dark:border-white/[0.08] dark:bg-[#13100d]/95">
         <div className="relative flex items-center justify-between px-4 py-1.5">
-          <TabButton icon={ImageIcon} label="画廊" active={tab === 'gallery'} onClick={goGallery} />
-          <TabButton icon={Star} label="收藏" active={tab === 'favorites'} onClick={goFavorites} />
+          {/* 场景 chips：窄屏横向滚动 */}
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto hide-scrollbar">
+            {SCENE_TABS.map(({ id, label }) => (
+              <TabButton
+                key={id}
+                icon={SCENE_TAB_ICONS[id]}
+                label={label}
+                active={appMode === 'gallery' && activeScene === id}
+                onClick={() => goScene(id)}
+                className="shrink-0 px-1.5"
+              />
+            ))}
+          </div>
           <div className="w-16 shrink-0" aria-hidden /> {/* FAB 占位，加宽避免遮挡两侧 */}
-          <TabButton icon={Cpu} label="引擎" active={tab === 'engine'} onClick={() => setAppMode('engine')} />
+          <TabButton icon={Cpu} label="引擎" active={appMode === 'engine'} onClick={() => setAppMode('engine')} />
           <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} />
         </div>
         {/* FAB */}
@@ -70,16 +85,18 @@ function TabButton({
   label,
   active,
   onClick,
+  className = 'flex-1',
 }: {
   icon: ComponentType<{ className?: string }>
   label: string
   active: boolean
   onClick: () => void
+  className?: string
 }) {
   return (
     <button
       onClick={onClick}
-      className={`flex flex-1 flex-col items-center gap-0.5 rounded-lg py-1.5 ${
+      className={`flex ${className} flex-col items-center gap-0.5 rounded-lg py-1.5 ${
         active ? 'text-[#df7b57]' : 'text-stone-500 dark:text-stone-400'
       }`}
     >
@@ -172,6 +189,17 @@ function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSetti
 
         <EntryRow icon={BookOpen} label="操作指南" onClick={openGuide} />
         <EntryRow icon={Bot} label="智能体工作台" onClick={openAgent} />
+        {CANVAS_WORKSPACE_URL !== '' && (
+          <a
+            href={CANVAS_WORKSPACE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm text-stone-700 active:bg-stone-100 dark:text-stone-200 dark:active:bg-white/5"
+          >
+            <LayoutGrid className="h-4 w-4 text-stone-400 dark:text-stone-500" />
+            无限画布
+          </a>
+        )}
         <EntryRow icon={User} label="设置" onClick={() => { onOpenSettings(); onClose() }} />
       </div>
     </div>
