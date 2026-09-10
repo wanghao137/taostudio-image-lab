@@ -11,6 +11,10 @@ const db = vi.hoisted(() => ({
   putSceneDirectoryHandle: vi.fn(),
   clearSceneDirectoryHandle: vi.fn(),
   listSceneDirectoryHandles: vi.fn(),
+  SKILLS_ROOT_DIRECTORY_KEY: 'skillsDirectory',
+  getSkillsRootDirectoryHandle: vi.fn(),
+  putSkillsRootDirectoryHandle: vi.fn(),
+  clearSkillsRootDirectoryHandle: vi.fn(),
 }))
 
 vi.mock('./db', () => db)
@@ -38,6 +42,9 @@ describe('imageCache', () => {
     db.putSceneDirectoryHandle.mockResolvedValue(undefined)
     db.clearSceneDirectoryHandle.mockResolvedValue(undefined)
     db.listSceneDirectoryHandles.mockResolvedValue([])
+    db.getSkillsRootDirectoryHandle.mockResolvedValue(undefined)
+    db.putSkillsRootDirectoryHandle.mockResolvedValue(undefined)
+    db.clearSkillsRootDirectoryHandle.mockResolvedValue(undefined)
   })
 
   afterEach(() => {

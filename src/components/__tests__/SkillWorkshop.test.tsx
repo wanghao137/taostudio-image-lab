@@ -1,0 +1,209 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { SkillWorkshop } from '../SkillWorkshop'
+import { useStore } from '../../store'
+import { DEFAULT_SETTINGS, createDefaultOpenAIProfile, normalizeSettings } from '../../lib/apiProfiles'
+import type { SkillSummary, TaskRecord } from '../../types'
+
+const SKILL_A: SkillSummary = {
+  id: 'vibeshot',
+  name: 'Vibeshot 抓拍',
+  description: '生活感人像抓拍风格',
+  source: 'builtin',
+  body: '# 正文 A',
+}
+const SKILL_B: SkillSummary = {
+  id: 'voyeur',
+  name: 'Voyeur 风格',
+  description: '偷窥视角摄影风格',
+  source: 'builtin',
+  body: '# 正文 B',
+}
+const SKILL_LOCAL: SkillSummary = {
+  id: 'my-skill',
+  name: '我的本地 Skill',
+  description: '本地导入的风格',
+  source: 'local',
+  body: '# 正文 C',
+}
+
+const IMAGE_PROFILE = createDefaultOpenAIProfile({ id: 'image-a', name: '生图配置A' })
+const TEXT_PROFILE = createDefaultOpenAIProfile({ id: 'text-c', name: '文本配置C', apiMode: 'responses', model: 'gpt-test-text' })
+
+function buildSettings(withTextProfile: boolean) {
+  const profiles = withTextProfile ? [IMAGE_PROFILE, TEXT_PROFILE] : [IMAGE_PROFILE]
+  return normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    profiles,
+    activeProfileId: IMAGE_PROFILE.id,
+    activeScene: 'skill',
+  })
+}
+
+function buildTask(id: string, createdAt: number, sceneId?: TaskRecord['sceneId']): TaskRecord {
+  return {
+    id,
+    prompt: `任务 ${id}`,
+    params: {},
+    status: 'done',
+    outputImages: [`img-${id}`],
+    createdAt,
+    sceneId,
+  } as unknown as TaskRecord
+}
+
+function seedStore(options: { withTextProfile?: boolean } = {}) {
+  useStore.setState({
+    settings: buildSettings(options.withTextProfile ?? true),
+    skills: {
+      builtin: [SKILL_A, SKILL_B],
+      builtinLoading: false,
+      local: [SKILL_LOCAL],
+      localRootName: 'my-skills',
+      scanning: false,
+    },
+    activeSkillId: SKILL_A.id,
+    skillInputDraft: '主题：夜市人像',
+    skillExpansion: {
+      status: 'idle',
+      error: null,
+      entries: [
+        { id: 'e1', text: '提示词一', enabled: true },
+        { id: 'e2', text: '提示词二', enabled: true },
+      ],
+    },
+    tasks: [
+      buildTask('skill-1', 3000, 'skill'),
+      buildTask('general-1', 2500, 'general'),
+      buildTask('skill-2', 2000, 'skill'),
+    ],
+  })
+}
+
+describe('SkillWorkshop', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('渲染 skill 列表（内置/本地分区）、激活 skill 详情与锚点输入', () => {
+    seedStore()
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    // 左列：分区标题与计数、三个 skill 条目（激活 skill 的名称/描述在左列与右列各出现一次）
+    expect(screen.getByText('内置 (2)')).toBeTruthy()
+    expect(screen.getByText('本地 (1)')).toBeTruthy()
+    expect(screen.getAllByText('Vibeshot 抓拍')).toHaveLength(2)
+    expect(screen.getAllByText('生活感人像抓拍风格')).toHaveLength(2)
+    expect(screen.getByText('Voyeur 风格')).toBeTruthy()
+    expect(screen.getByText('我的本地 Skill')).toBeTruthy()
+    expect(screen.getByText('导入目录')).toBeTruthy()
+    expect(screen.getByText('重新扫描')).toBeTruthy()
+    const anchor = screen.getByLabelText('锚点输入') as HTMLTextAreaElement
+    expect(anchor.value).toBe('主题：夜市人像')
+
+    // 扩写结果条目与生成按钮计数（2 条全部启用）
+    expect(screen.getByLabelText('条目 1 提示词')).toBeTruthy()
+    expect(screen.getByLabelText('条目 2 提示词')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '生成 2 张图片' })).toBeTruthy()
+  })
+
+  it('最近生成条只显示 sceneId=skill 的任务且点击打开详情', () => {
+    seedStore()
+    const setDetailTaskId = vi.spyOn(useStore.getState(), 'setDetailTaskId').mockImplementation(() => {})
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    expect(screen.getByText('最近生成')).toBeTruthy()
+    const thumbs = screen.getAllByRole('button', { name: '查看任务详情' })
+    expect(thumbs).toHaveLength(2)
+
+    fireEvent.click(thumbs[0])
+    expect(setDetailTaskId).toHaveBeenCalledWith('skill-1')
+  })
+
+  it('勾掉一条扩写条目后生成按钮计数变化且 store 同步', () => {
+    seedStore()
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    fireEvent.click(screen.getByRole('checkbox', { name: '启用条目 1' }))
+
+    expect(screen.getByRole('button', { name: '生成 1 张图片' })).toBeTruthy()
+    expect(useStore.getState().skillExpansion.entries[0].enabled).toBe(false)
+  })
+
+  it('扩写进行中左列点击不切换 skill（防误触中断在飞请求）', () => {
+    seedStore()
+    useStore.setState({
+      skillExpansion: {
+        status: 'running',
+        error: null,
+        entries: [{ id: 'e1', text: '提示词一', enabled: true }],
+      },
+    })
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Voyeur 风格/ }))
+
+    expect(useStore.getState().activeSkillId).toBe(SKILL_A.id)
+  })
+
+  it('无可用文本模型时扩写按钮位置显示引导与「打开设置」', () => {
+    seedStore({ withTextProfile: false })
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    expect(screen.queryByRole('button', { name: '扩写提示词' })).toBeNull()
+    expect(screen.getByText('未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '打开设置' }))
+    expect(useStore.getState().showSettings).toBe(true)
+  })
+
+  it('内置 skill 为空时显示加载失败引导，点击重试调用 loadBuiltinSkills', () => {
+    seedStore()
+    useStore.setState({
+      skills: {
+        builtin: [],
+        builtinLoading: false,
+        local: [],
+        localRootName: null,
+        scanning: false,
+      },
+    })
+    const loadBuiltinSkills = vi.spyOn(useStore.getState(), 'loadBuiltinSkills').mockResolvedValue(undefined)
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    fireEvent.click(screen.getByText('内置 skill 加载失败，点击重试'))
+    expect(loadBuiltinSkills).toHaveBeenCalled()
+  })
+
+  it('未绑定本地目录时不显示「清除」按钮', () => {
+    seedStore()
+    useStore.setState({ skills: { ...useStore.getState().skills, localRootName: null } })
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    expect(screen.queryByRole('button', { name: '清除已绑定的本地 skills 目录' })).toBeNull()
+  })
+
+  it('已绑定本地目录时显示「清除」，点击调用解绑并断言 store 状态清空', async () => {
+    seedStore()
+    // jsdom 无 IndexedDB：mock action 复刻 store 真实行为（清 local 列表 + localRootName）
+    const clearSkillsRootDirectory = vi
+      .spyOn(useStore.getState(), 'clearSkillsRootDirectory')
+      .mockImplementation(async () => {
+        useStore.setState((state) => ({ skills: { ...state.skills, local: [], localRootName: null } }))
+      })
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    const clearButton = screen.getByRole('button', { name: '清除已绑定的本地 skills 目录' })
+    expect(clearButton.getAttribute('title')).toBe('解绑本地 skills 目录，并清空已导入的本地列表')
+
+    fireEvent.click(clearButton)
+    await waitFor(() => expect(clearSkillsRootDirectory).toHaveBeenCalled())
+
+    expect(useStore.getState().skills.local).toEqual([])
+    expect(useStore.getState().skills.localRootName).toBeNull()
+    // localRootName 清空后按钮随之消失
+    await waitFor(() => expect(screen.queryByRole('button', { name: '清除已绑定的本地 skills 目录' })).toBeNull())
+  })
+})

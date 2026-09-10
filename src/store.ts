@@ -20,9 +20,10 @@ import type {
   StoredImage,
   StoredImageThumbnail,
   RefusalRecoveryRecord,
+  SkillSummary,
 } from './types'
 import { DEFAULT_PARAMS } from './types'
-import { DEFAULT_SETTINGS, getActiveApiProfile, getCustomProviderDefinition, getSceneImageApiProfile, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
+import { DEFAULT_SETTINGS, getActiveApiProfile, getCustomProviderDefinition, getSceneImageApiProfile, getSceneTextApiProfileResolution, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
 import { remapImageMentionsForOrder, replaceImageMentionsForApi, stripImageMentionMarkers } from './lib/promptImageMentions'
@@ -43,6 +44,9 @@ import {
   putSceneDirectoryHandle,
   clearSceneDirectoryHandle,
   listSceneDirectoryHandles,
+  getSkillsRootDirectoryHandle,
+  putSkillsRootDirectoryHandle,
+  clearSkillsRootDirectoryHandle,
   type StoredLocalAutoSaveDirectoryHandle,
   getImage,
   getImageMetadata,
@@ -92,6 +96,10 @@ import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FA
 import { createPersistedState, migratePersistedState, normalizePersistedState } from './lib/persistedState'
 import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveFinalGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks, resolveFinalActualParams } from './lib/taskState'
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
+import { BUILTIN_SKILL_IDS, loadBuiltinSkill } from './lib/skillWorkshop/builtinSkills'
+import { scanLocalSkills } from './lib/skillWorkshop/localSkills'
+import { parseExpansionEntries } from './lib/skillWorkshop/expansion'
+import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
 
 export { ensureImageCached, getCachedImage } from './lib/imageCache'
 export { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_NAME } from './lib/favoriteState'
@@ -107,6 +115,10 @@ const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 // 仅在 initStore（页面加载）和新的用户生成（submitTask/retryTask）时重置。
 let tasksCleared = false
 let taskStorageGeneration = 0
+
+// Skill 扩写进行中的中止器（工坊单飞：新扩写开始时覆盖旧引用）。与
+// customRecoveryAbortControllers 同为模块级 AbortController 既有模式。
+let skillExpansionAbortController: AbortController | null = null
 
 // ===== 生成并发队列 =====
 // 浏览器同源约 6 个 HTTP 连接：>6 个长耗时图像任务并发时，排队任务的超时
@@ -300,6 +312,33 @@ function mergePersistedState(persistedState: unknown, currentState: AppState): A
 
 // ===== Store 类型 =====
 
+export interface SkillExpansionEntry {
+  id: string
+  text: string
+  enabled: boolean
+}
+
+export interface SkillExpansionState {
+  status: 'idle' | 'running' | 'error'
+  error: string | null
+  entries: SkillExpansionEntry[]
+}
+
+export interface SkillWorkshopState {
+  builtin: SkillSummary[]
+  builtinLoading: boolean
+  local: SkillSummary[]
+  localRootName: string | null
+  scanning: boolean
+}
+
+/** 按 id 在内置与本地 skill 列表中查找（内置优先） */
+function findSkillSummary(skills: SkillWorkshopState, id: string | null): SkillSummary | null {
+  if (!id) return null
+  return skills.builtin.find((skill) => skill.id === id) ??
+    skills.local.find((skill) => skill.id === id) ?? null
+}
+
 interface AppState {
   // 模式
   appMode: AppMode
@@ -387,6 +426,23 @@ interface AppState {
   setSceneDefaults: (scene: SceneId, defaults: Partial<SceneDefaults>) => void
   selectSceneSaveDirectory: (scene: SceneId) => Promise<void>
   clearSceneSaveDirectory: (scene: SceneId) => Promise<void>
+
+  // Skill 工坊
+  skills: SkillWorkshopState
+  activeSkillId: string | null
+  skillInputDraft: string
+  skillExpansion: SkillExpansionState
+  loadBuiltinSkills: () => Promise<void>
+  importSkillsRootDirectory: () => Promise<void>
+  refreshLocalSkills: () => Promise<void>
+  clearSkillsRootDirectory: () => Promise<void>
+  setActiveSkill: (id: string) => void
+  setSkillInputDraft: (draft: string) => void
+  runSkillExpansion: () => Promise<void>
+  abortSkillExpansion: () => void
+  updateSkillEntry: (id: string, patch: Partial<Pick<SkillExpansionEntry, 'text' | 'enabled'>>) => void
+  removeSkillEntry: (id: string) => void
+  generateFromSkillEntries: () => Promise<void>
 
   // 搜索和筛选
   searchQuery: string
@@ -889,6 +945,150 @@ export const useStore = create<AppState>()(
       },
       selectSceneSaveDirectory: async (scene) => selectSceneSaveDirectory(scene),
       clearSceneSaveDirectory: async (scene) => clearSceneSaveDirectory(scene),
+
+      // Skill 工坊
+      skills: { builtin: [], builtinLoading: false, local: [], localRootName: null, scanning: false },
+      activeSkillId: null,
+      skillInputDraft: '',
+      skillExpansion: { status: 'idle', error: null, entries: [] },
+      loadBuiltinSkills: async () => {
+        set((state) => ({ skills: { ...state.skills, builtinLoading: true } }))
+        const loaded = await Promise.all(BUILTIN_SKILL_IDS.map(async (id): Promise<SkillSummary | null> => {
+          const parsed = await loadBuiltinSkill(id)
+          if (!parsed) return null
+          return { id, name: parsed.name, description: parsed.description, body: parsed.body, source: 'builtin' }
+        }))
+        const builtin = loaded.filter((skill): skill is SkillSummary => skill !== null)
+        set((state) => ({
+          skills: { ...state.skills, builtin, builtinLoading: false },
+          // 首次加载自动选中第一个内置 skill（不覆盖用户已做的选择）
+          activeSkillId: state.activeSkillId ?? builtin[0]?.id ?? null,
+        }))
+      },
+      importSkillsRootDirectory: async () => importSkillsRootDirectory(),
+      refreshLocalSkills: async () => refreshLocalSkills(),
+      clearSkillsRootDirectory: async () => clearSkillsRootDirectory(),
+      setActiveSkill: (id) => {
+        // 同 skill 重复点击：幂等返回，不中断归属当前 skill 的在飞扩写
+        if (get().activeSkillId === id) return
+        // 切换 skill 即中断在飞扩写并重置结果：条目属于上一个 skill 的扩写输出，
+        // 且生成链的 skillMeta 取当前 activeSkillId，保留会造成溯源错配。
+        // 在飞请求随后返回时被「最新 run」守卫（controller 引用已变/为 null）拦截，不回写。
+        skillExpansionAbortController?.abort()
+        skillExpansionAbortController = null
+        set({ activeSkillId: id, skillExpansion: { status: 'idle', error: null, entries: [] } })
+      },
+      setSkillInputDraft: (skillInputDraft) => set({ skillInputDraft }),
+      runSkillExpansion: async () => {
+        const state = get()
+        const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
+        // 校验失败不动 entries：保留已扩写结果，用户修正输入后重试不丢条目
+        if (!activeSkill) {
+          set((prev) => ({ skillExpansion: { status: 'error', error: '请先选择一个 skill', entries: prev.skillExpansion.entries } }))
+          return
+        }
+        const userInput = state.skillInputDraft.trim()
+        if (!userInput) {
+          set((prev) => ({ skillExpansion: { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）', entries: prev.skillExpansion.entries } }))
+          return
+        }
+        const resolution = getSceneTextApiProfileResolution(state.settings)
+        if (!resolution.profile) {
+          set((prev) => ({ skillExpansion: { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', entries: prev.skillExpansion.entries } }))
+          return
+        }
+        // 新扩写开始前先 abort 旧请求：旧请求 await 返回后被下方「最新 run」守卫拦截，不再回写污染状态
+        skillExpansionAbortController?.abort()
+        const controller = new AbortController()
+        skillExpansionAbortController = controller
+        set((prev) => ({ skillExpansion: { status: 'running', error: null, entries: prev.skillExpansion.entries } }))
+        try {
+          const raw = await callSkillExpansionApi({
+            settings: state.settings,
+            profile: resolution.profile,
+            skillBody: activeSkill.body,
+            userInput,
+            signal: controller.signal,
+          })
+          // 仅最新一次扩写允许回写：被 abort/替换的孤儿请求后到也不得覆盖新结果
+          if (skillExpansionAbortController !== controller) return
+          const entries = parseExpansionEntries(raw).map((entry) => ({ ...entry, enabled: true }))
+          set({ skillExpansion: { status: 'idle', error: null, entries } })
+        } catch (err) {
+          if (skillExpansionAbortController !== controller) return
+          if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+            set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
+            return
+          }
+          set((prev) => ({
+            skillExpansion: {
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err),
+              entries: prev.skillExpansion.entries,
+            },
+          }))
+        } finally {
+          if (skillExpansionAbortController === controller) skillExpansionAbortController = null
+        }
+      },
+      abortSkillExpansion: () => {
+        skillExpansionAbortController?.abort()
+        skillExpansionAbortController = null
+        // 立即回 idle 清空条目；在飞请求随后返回时被「最新 run」守卫拦截，不回写
+        set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
+      },
+      updateSkillEntry: (id, patch) => set((state) => ({
+        skillExpansion: {
+          ...state.skillExpansion,
+          entries: state.skillExpansion.entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry)),
+        },
+      })),
+      removeSkillEntry: (id) => set((state) => ({
+        skillExpansion: {
+          ...state.skillExpansion,
+          entries: state.skillExpansion.entries.filter((entry) => entry.id !== id),
+        },
+      })),
+      generateFromSkillEntries: async () => {
+        const state = get()
+        const enabledEntries = state.skillExpansion.entries.filter((entry) => entry.enabled)
+        if (!enabledEntries.length) {
+          state.showToast('没有已启用的提示词条目', 'error')
+          return
+        }
+        const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
+        if (!activeSkill) {
+          state.showToast('请先选择一个 skill', 'error')
+          return
+        }
+        const imageProfile = getSceneImageApiProfile(state.settings)
+        const profileError = validateApiProfile(imageProfile)
+        if (profileError) {
+          state.showToast(`请先完善请求 API 配置：${profileError}`, 'error')
+          state.setShowSettings(true)
+          return
+        }
+        const skillMeta = { skillId: activeSkill.id, skillInput: state.skillInputDraft }
+        // 工坊批量生成为「纯文生图」语义：提交前清空画廊遗留的参考图/遮罩，
+        // 避免逐条生成静默携带输入图变成计费编辑请求（全覆盖遮罩还会触发确认循环）。
+        useStore.getState().clearInputImages()
+        useStore.getState().clearMaskDraft()
+        const taskCountBefore = useStore.getState().tasks.length
+        let submittedCount = 0
+        try {
+          for (const entry of enabledEntries) {
+            useStore.getState().setPrompt(entry.text)
+            await submitTask({ skillMeta })
+            submittedCount += 1
+          }
+        } catch {
+          // 单条提交抛错即中断循环：捕获 rejection 避免 unhandled，按已完成数提示失败位置
+          state.showToast(`已提交 ${submittedCount} 个生成任务（第 ${submittedCount + 1} 条提交失败）`, 'error')
+          return
+        }
+        const submitted = useStore.getState().tasks.length - taskCountBefore
+        state.showToast(`已提交 ${submitted} 个生成任务`, submitted > 0 ? 'success' : 'error')
+      },
 
       // Search & Filter
       searchQuery: '',
@@ -1600,7 +1800,7 @@ export async function initStore() {
 }
 
 /** 提交新任务 */
-export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean } = {}) {
+export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean; skillMeta?: { skillId: string; skillInput: string } } = {}) {
   // 用户发起新生成：重置数据清除标志，确保新任务能正常写入。
   tasksCleared = false
   await refreshTaskStorageGeneration()
@@ -1723,6 +1923,8 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     status: 'running',
     error: null,
     sceneId: settings.activeScene,
+    // Skill 工坊溯源（generateFromSkillEntries 逐条目提交时携带）
+    ...(options.skillMeta ? { skillId: options.skillMeta.skillId, skillInput: options.skillMeta.skillInput } : {}),
     createdAt: Date.now(),
     finishedAt: null,
     elapsed: null,
@@ -2205,9 +2407,81 @@ export async function clearSceneSaveDirectory(sceneId: SceneId) {
   patchSceneSettings(sceneId, { saveDirectoryName: null })
 }
 
+// ===== Skill 工坊本地目录 =====
+// 权限处理放在 store 侧（而非扫描函数内）：requestPermission 需要用户手势且
+// 结果要以 toast 反馈；scanLocalSkills 保持纯扫描便于单测。
+
 type PermissionCapableDirectoryHandle = FileSystemDirectoryHandle & {
   queryPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
   requestPermission?: (descriptor: { mode: 'readwrite' }) => Promise<PermissionState>
+}
+
+async function ensureSkillsRootPermission(handle: PermissionCapableDirectoryHandle): Promise<boolean> {
+  const descriptor = { mode: 'readwrite' as const }
+  const queried = await handle.queryPermission?.(descriptor)
+  if (queried === 'granted') return true
+  const permission = await handle.requestPermission?.(descriptor)
+  return permission === 'granted'
+}
+
+export async function importSkillsRootDirectory() {
+  if (typeof window === 'undefined' || !isLocalAutoSaveSupported(window)) {
+    useStore.getState().showToast('本地自动保存仅支持桌面 Chrome/Edge', 'error')
+    return
+  }
+
+  try {
+    const handle = await (window as unknown as {
+      showDirectoryPicker: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
+    }).showDirectoryPicker({ mode: 'readwrite' })
+    await putSkillsRootDirectoryHandle(handle)
+    useStore.setState((state) => ({ skills: { ...state.skills, scanning: true } }))
+    const local = await scanLocalSkills(handle)
+    useStore.setState((state) => ({
+      skills: { ...state.skills, local, localRootName: handle.name, scanning: false },
+    }))
+    useStore.getState().showToast(
+      local.length ? `已导入 ${local.length} 个本地 skill` : '该目录下没有可用的本地 skill',
+      'success',
+    )
+  } catch (err) {
+    useStore.setState((state) => ({ skills: { ...state.skills, scanning: false } }))
+    if (err instanceof DOMException && err.name === 'AbortError') return
+    const message = err instanceof Error ? err.message : String(err)
+    useStore.getState().showToast(`导入本地 skills 目录失败：${message}`, 'error')
+  }
+}
+
+export async function refreshLocalSkills() {
+  const record = await getSkillsRootDirectoryHandle()
+  const handle = record?.handle as PermissionCapableDirectoryHandle | undefined
+  if (!handle) {
+    useStore.getState().showToast('尚未导入本地 skills 目录，请先选择文件夹', 'error')
+    return
+  }
+  useStore.setState((state) => ({ skills: { ...state.skills, scanning: true } }))
+  try {
+    if (!(await ensureSkillsRootPermission(handle))) {
+      useStore.setState((state) => ({ skills: { ...state.skills, scanning: false } }))
+      useStore.getState().showToast('未获得文件夹访问权限，请允许后重新扫描', 'error')
+      return
+    }
+    const local = await scanLocalSkills(handle)
+    useStore.setState((state) => ({
+      skills: { ...state.skills, local, localRootName: handle.name, scanning: false },
+    }))
+  } catch (err) {
+    useStore.setState((state) => ({ skills: { ...state.skills, scanning: false } }))
+    const message = err instanceof Error ? err.message : String(err)
+    useStore.getState().showToast(`扫描本地 skills 失败：${message}`, 'error')
+  }
+}
+
+export async function clearSkillsRootDirectory() {
+  await clearSkillsRootDirectoryHandle()
+  useStore.setState((state) => ({
+    skills: { ...state.skills, local: [], localRootName: null },
+  }))
 }
 
 export async function authorizeLocalAutoSaveDirectory() {

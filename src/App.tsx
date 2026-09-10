@@ -44,12 +44,13 @@ const MobileComposeSheet = lazy(() => import('./components/MobileComposeSheet'))
 const SceneSettingsDrawer = lazy(() =>
   import('./components/SceneSettingsDrawer').then((module) => ({ default: module.SceneSettingsDrawer })),
 )
-
-// P2 上线 Skill 工坊前 SCENE_TABS 不含 skill；预留中文名避免 SceneId 缺口（与 SceneSettingsDrawer 一致）。
-const SKILL_SCENE_LABEL = 'Skill 工坊'
+const SkillWorkshop = lazy(() =>
+  import('./components/SkillWorkshop').then((module) => ({ default: module.SkillWorkshop })),
+)
 
 function getSceneLabel(scene: SceneId): string {
-  return SCENE_TABS.find((tab) => tab.id === scene)?.label ?? SKILL_SCENE_LABEL
+  // SCENE_TABS 已含全部场景，id 兜底仅防御
+  return SCENE_TABS.find((tab) => tab.id === scene)?.label ?? scene
 }
 
 export function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
@@ -282,8 +283,8 @@ export default function App() {
   return (
     <>
       {isMobile ? (
-        <MobileShell onOpenCompose={() => setComposeOpen(true)}>
-          <ErrorBoundary sectionLabel="引擎工作台">
+        <MobileShell composeHidden={appMode === 'gallery' && activeScene === 'skill'} onOpenCompose={() => setComposeOpen(true)}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : '画廊'}>
             {appMode === 'engine' ? (
               <>
                 <div className="safe-area-x">
@@ -295,6 +296,12 @@ export default function App() {
                   <EngineWorkspace />
                 </Suspense>
               </>
+            ) : activeScene === 'skill' ? (
+              <div className="safe-area-x max-w-7xl mx-auto">
+                <Suspense fallback={<div className="min-h-[320px]" />}>
+                  <SkillWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
+                </Suspense>
+              </div>
             ) : (
               <div className="safe-area-x max-w-7xl mx-auto">
                 <GalleryWorkspaceHeader onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
@@ -315,11 +322,19 @@ export default function App() {
       ) : (
         <>
           <Header />
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : '画廊'}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : '画廊'}>
             {appMode === 'engine' ? (
               <Suspense fallback={<div className="min-h-[320px]" />}>
                 <EngineWorkspace />
               </Suspense>
+            ) : activeScene === 'skill' ? (
+              <main data-home-main data-drag-select-surface className="pb-6">
+                <div className="safe-area-x max-w-7xl mx-auto">
+                  <Suspense fallback={<div className="min-h-[320px]" />}>
+                    <SkillWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
+                  </Suspense>
+                </div>
+              </main>
             ) : (
               <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">
                 <div className="safe-area-x max-w-7xl mx-auto">
@@ -337,7 +352,7 @@ export default function App() {
                 </div>
               </main>
             )}
-            {appMode !== 'engine' && <InputBar />}
+            {appMode === 'gallery' && activeScene !== 'skill' && <InputBar />}
           </ErrorBoundary>
         </>
       )}

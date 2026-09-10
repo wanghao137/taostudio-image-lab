@@ -391,6 +391,10 @@ export interface TaskRecord {
   sourceMode?: AppMode | 'agent'
   /** 提交时所属场景；旧任务无此字段视为 general */
   sceneId?: SceneId
+  /** Skill 工坊溯源：生成时使用的 skill 稳定 id（来源目录名） */
+  skillId?: string
+  /** Skill 工坊溯源：生成时的锚点输入原文 */
+  skillInput?: string
   /** Agent 对话 ID */
   agentConversationId?: string
   /** Agent 轮次 ID */
@@ -412,6 +416,18 @@ export interface FavoriteCollection {
   name: string
   createdAt: number
   updatedAt: number
+}
+
+// ===== Skill 工坊 =====
+
+export interface SkillSummary {
+  /** 展示名（frontmatter name，无则目录名） */
+  name: string
+  description: string
+  /** 来源目录名（内置=public/skills 目录名，本地=一级子目录名），作稳定 id */
+  id: string
+  source: 'builtin' | 'local'
+  body: string
 }
 
 // ===== Agent 模式 =====

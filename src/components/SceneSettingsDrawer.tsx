@@ -24,11 +24,9 @@ const EMPTY_SCENE_SETTINGS: SceneSettings = {
   defaults: {},
 }
 
-// P2 上线 Skill 工坊前 SCENE_TABS 不含 skill；预留其中文名避免 Record<SceneId> 缺口。
-const SKILL_SCENE_LABEL = 'Skill 工坊'
-
 function getSceneLabel(scene: SceneId): string {
-  return SCENE_TABS.find((tab) => tab.id === scene)?.label ?? SKILL_SCENE_LABEL
+  // SCENE_TABS 已含全部场景，id 兜底仅防御
+  return SCENE_TABS.find((tab) => tab.id === scene)?.label ?? scene
 }
 
 const TEXT_RESOLVED_BY_LABELS: Record<string, string> = {

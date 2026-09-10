@@ -460,6 +460,28 @@ export function listSceneDirectoryHandles(): Promise<StoredLocalAutoSaveDirector
     s.getAll(IDBKeyRange.bound(SCENE_DIRECTORY_KEY_PREFIX, `${SCENE_DIRECTORY_KEY_PREFIX}\uffff`)))
 }
 
+// ===== Skill workshop root directory =====
+// 本地 skills 根目录句柄（扫描一级子目录的 SKILL.md），独立授权。
+
+export const SKILLS_ROOT_DIRECTORY_KEY = 'skillsDirectory'
+
+export function getSkillsRootDirectoryHandle(): Promise<StoredLocalAutoSaveDirectoryHandle | undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readonly', (s) => s.get(SKILLS_ROOT_DIRECTORY_KEY))
+}
+
+export function putSkillsRootDirectoryHandle(handle: FileSystemDirectoryHandle): Promise<IDBValidKey> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.put({
+    id: SKILLS_ROOT_DIRECTORY_KEY,
+    handle,
+    name: handle.name,
+    updatedAt: Date.now(),
+  } satisfies StoredLocalAutoSaveDirectoryHandle))
+}
+
+export function clearSkillsRootDirectoryHandle(): Promise<undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(SKILLS_ROOT_DIRECTORY_KEY))
+}
+
 // ===== Images =====
 
 /** IndexedDB 内部记录：新格式以 blob 存二进制（省 ~25-33% 空间），旧格式/读取出口为 dataUrl。 */

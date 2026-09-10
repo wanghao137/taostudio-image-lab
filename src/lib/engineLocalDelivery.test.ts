@@ -41,6 +41,10 @@ vi.mock('./db', () => {
       sceneDirectoryHandles.delete(sceneId)
     }),
     listSceneDirectoryHandles: vi.fn(async () => [...sceneDirectoryHandles.values()]),
+    SKILLS_ROOT_DIRECTORY_KEY: 'skillsDirectory',
+    getSkillsRootDirectoryHandle: vi.fn(async () => undefined),
+    putSkillsRootDirectoryHandle: vi.fn(async () => undefined),
+    clearSkillsRootDirectoryHandle: vi.fn(async () => undefined),
     getEngineDeliveryRecord: async (kind: EngineDeliveryRecord['kind'], entityId: string) =>
       deliveryRecords.get(`${kind}:${entityId}`),
     putEngineDeliveryRecord: async (record: EngineDeliveryRecord) => {
