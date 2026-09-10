@@ -159,7 +159,7 @@ export default function SettingsModal() {
   const setReusedTaskApiProfile = useStore((s) => s.setReusedTaskApiProfile)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const showToast = useStore((s) => s.showToast)
-  const hasRunningOperations = useStore((s) => hasActiveDataOperations(s.tasks, s.agentConversations))
+  const hasRunningOperations = useStore((s) => hasActiveDataOperations(s.tasks))
   const importInputRef = useRef<HTMLInputElement>(null)
   const profileMenuRef = useRef<HTMLDivElement>(null)
   const profileMenuTriggerRef = useRef<HTMLButtonElement>(null)
@@ -270,14 +270,11 @@ export default function SettingsModal() {
     ? `已开启 ${enabledZipDownloadRouteCount} 项使用压缩包进行批量下载的途径`
     : '未开启任何使用压缩包进行批量下载的途径'
 
-  const agentTextProfiles = draft.profiles.filter(isAgentTextApiProfile)
-  const selectedAgentTextProfile = agentTextProfiles.find((profile) => profile.id === draft.agentTextProfileId)
-    ?? (isAgentTextApiProfile(activeProfile) ? activeProfile : agentTextProfiles[0])
-    ?? null
+  const textCapableProfiles = draft.profiles.filter(isAgentTextApiProfile)
   const textApiResolution = getTextApiProfileResolution(draft)
   const textApiProfileOptions = [
     { label: '自动（跟随生图配置，或唯一的文本配置）', value: '' },
-    ...agentTextProfiles.map((profile) => ({
+    ...textCapableProfiles.map((profile) => ({
       label: `${profile.name} · ${profile.model || DEFAULT_RESPONSES_MODEL}`,
       value: profile.id,
     })),
@@ -1385,12 +1382,7 @@ export default function SettingsModal() {
                   disabled={defaultConfigOnly}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
-                {draft.agentApiConfigMode !== 'off' && selectedAgentTextProfile ? (
-                  <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
-                    Agent 独立配置开启中：反推提示词与智能体优先使用 Agent 文本配置「{selectedAgentTextProfile.name}」，
-                    此处的选择在关闭 Agent 独立配置后生效。
-                  </p>
-                ) : textApiResolution.profile ? (
+                {textApiResolution.profile ? (
                   <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
                     反推提示词等文本功能当前使用：{textApiResolution.profile.name} · {textApiResolution.profile.model || DEFAULT_RESPONSES_MODEL}
                     （{textApiResolution.resolvedBy === 'explicit' ? '手动指定' : textApiResolution.resolvedBy === 'active' ? '自动跟随生图配置' : '自动采用唯一可用文本配置'}）

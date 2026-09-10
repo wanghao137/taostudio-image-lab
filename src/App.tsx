@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Settings2 } from 'lucide-react'
 import { initStore, restoreExplicitPresetConfig, useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './lib/urlSettings'
-import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
+import { createDefaultOpenAIProfile, hasDefaultPresetConfig, normalizeSettings } from './lib/apiProfiles'
 import { getCustomProviderConfigUrl, hasEmbeddedDefaultConfig, loadCustomProviderSettingsFromUrl, loadEmbeddedDefaultConfig } from './lib/customProviderConfigUrl'
 import { getDefaultPresetProfileId, getPresetProfileIds, isPresetConfigOnlyEnabled, setPresetConfig } from './lib/presetConfig'
 import type { AppSettings } from './types'
@@ -232,12 +232,6 @@ export default function App() {
               ...current.settings,
               activeProfileId: presetIds.has(current.settings.activeProfileId)
                 ? current.settings.activeProfileId
-                : defaultPresetId ?? [...presetIds][0],
-              agentTextProfileId: current.settings.agentTextProfileId && presetIds.has(current.settings.agentTextProfileId)
-                ? current.settings.agentTextProfileId
-                : current.settings.profiles.find((profile) => presetIds.has(profile.id) && isAgentTextApiProfile(profile))?.id ?? null,
-              agentImageProfileId: current.settings.agentImageProfileId && presetIds.has(current.settings.agentImageProfileId)
-                ? current.settings.agentImageProfileId
                 : defaultPresetId ?? [...presetIds][0],
             })
           : current.settings

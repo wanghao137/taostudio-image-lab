@@ -1830,18 +1830,6 @@ describe('custom providers', () => {
     expect(profile.baseUrl).toBe('')
   })
 
-  it('enables Agent submit auto scroll by default', () => {
-    expect(DEFAULT_SETTINGS.agentScrollToBottomAfterSubmit).toBe(true)
-    expect(normalizeSettings({}).agentScrollToBottomAfterSubmit).toBe(true)
-    expect(normalizeSettings({ agentScrollToBottomAfterSubmit: false }).agentScrollToBottomAfterSubmit).toBe(false)
-  })
-
-  it('enables Agent math formatting prompt by default', () => {
-    expect(DEFAULT_SETTINGS.agentMathFormattingPrompt).toBe(true)
-    expect(normalizeSettings({}).agentMathFormattingPrompt).toBe(true)
-    expect(normalizeSettings({ agentMathFormattingPrompt: false }).agentMathFormattingPrompt).toBe(false)
-  })
-
   it('disables prompt rewrite allowance by default', () => {
     expect(DEFAULT_SETTINGS.allowPromptRewrite).toBe(false)
     expect(normalizeSettings({}).allowPromptRewrite).toBe(false)
@@ -1908,51 +1896,27 @@ describe('getPromptReverseApiProfile', () => {
   const responsesProfile = createDefaultOpenAIProfile({ id: 'resp-profile', apiMode: 'responses' })
   const imagesProfile = createDefaultOpenAIProfile({ id: 'img-profile', apiMode: 'images' })
 
-  it('agent 模式开启时优先返回 Agent 文本配置', () => {
+  it('跟随全局 textApiProfileId 的显式选择', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'img-profile',
-      agentApiConfigMode: 'native',
-      agentTextProfileId: 'resp-profile',
-    })
-    expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
-  })
-
-  it('agent 文本配置优先于全局 textApiProfileId 显式选择', () => {
-    const settings = normalizeSettings({
-      profiles: [imagesProfile, responsesProfile],
-      activeProfileId: 'img-profile',
-      agentApiConfigMode: 'native',
-      agentTextProfileId: 'resp-profile',
       textApiProfileId: 'resp-profile',
     })
-    // 两者一致时无法区分，此处用不同 profile 锁定优先级语义
-    const another = createDefaultOpenAIProfile({ id: 'resp-profile-2', apiMode: 'responses' })
-    const settingsAmbiguous = normalizeSettings({
-      profiles: [imagesProfile, responsesProfile, another],
-      activeProfileId: 'img-profile',
-      agentApiConfigMode: 'native',
-      agentTextProfileId: 'resp-profile',
-      textApiProfileId: 'resp-profile-2',
-    })
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
-    expect(getPromptReverseApiProfile(settingsAmbiguous)?.id).toBe('resp-profile')
   })
 
-  it('agent 关闭时回退激活 profile（若为 responses 类型）', () => {
+  it('回退激活 profile（若为 responses 类型）', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'resp-profile',
-      agentApiConfigMode: 'off',
     })
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
   })
 
-  it('agent 关闭且激活 profile 是 images 类型时，自动采用唯一可用文本配置', () => {
+  it('激活 profile 是 images 类型时，自动采用唯一可用文本配置', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'img-profile',
-      agentApiConfigMode: 'off',
     })
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
   })

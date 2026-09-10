@@ -1,5 +1,4 @@
 import type {
-  AgentApiConfigMode,
   ApiMode,
   ApiProfile,
   ApiProvider,
@@ -17,7 +16,7 @@ import type {
   SceneId,
   SceneSettings,
 } from '../types'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, SCENE_ID_VALUES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
+import { DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, SCENE_ID_VALUES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
 import { customProviderSupportsNativeTransparentBackground } from './customProviderCapabilities'
 import { shouldUseApiProxy } from './devProxy'
 import { DEFAULT_IMAGES_MODEL } from './imageModels'
@@ -178,13 +177,6 @@ function getDefaultStreamImages(provider: ApiProvider, apiMode: ApiMode): boolea
 
 export { normalizeReasoningEffort, normalizeStreamPartialImages } from './defaultApiUrl'
 
-export function normalizeAgentMaxToolRounds(value: unknown, fallback: number | undefined = DEFAULT_AGENT_MAX_TOOL_ROUNDS): number {
-  const fallbackValue = fallback ?? DEFAULT_AGENT_MAX_TOOL_ROUNDS
-  const numeric = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(numeric)) return fallbackValue
-  return Math.min(50, Math.max(1, Math.trunc(numeric)))
-}
-
 export function normalizeLocalAutoSaveSettings(value: unknown): LocalAutoSaveSettings {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
@@ -237,10 +229,6 @@ function normalizeProviderOrder(value: unknown, customProviders: CustomProviderD
     .filter((id, idx, list) => knownIds.has(id) && list.indexOf(id) === idx)
 
   return [...ordered, ...providerIds.filter((id) => !ordered.includes(id))]
-}
-
-function normalizeAgentApiConfigMode(value: unknown): AgentApiConfigMode {
-  return value === 'native' || value === 'hybrid' ? value : 'off'
 }
 
 export function isAgentTextApiProfile(profile: ApiProfile): boolean {
@@ -805,14 +793,6 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     ? record.activeProfileId
     : profiles[0].id
   const active = profiles.find((p) => p.id === activeProfileId) ?? profiles[0]
-  const agentApiConfigMode = normalizeAgentApiConfigMode(record.agentApiConfigMode)
-  const firstAgentTextProfile = profiles.find(isAgentTextApiProfile)
-  const agentTextProfileId = typeof record.agentTextProfileId === 'string' && profiles.some((p) => p.id === record.agentTextProfileId && isAgentTextApiProfile(p))
-    ? record.agentTextProfileId
-    : (isAgentTextApiProfile(active) ? active.id : firstAgentTextProfile?.id ?? null)
-  const agentImageProfileId = typeof record.agentImageProfileId === 'string' && profiles.some((p) => p.id === record.agentImageProfileId)
-    ? record.agentImageProfileId
-    : active.id
   // 文本路由只校验显式值有效性（须指向 Responses 类型 profile），缺省/无效一律回到 auto；
   // 不在这里固化任何推导结果，否则「跟随激活配置」的语义会被旧推导值覆盖失效。
   const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isAgentTextApiProfile(p))
@@ -868,13 +848,6 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     referenceImageEditAction: normalizeReferenceImageEditAction(record.referenceImageEditAction),
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
     localAutoSave: normalizeLocalAutoSaveSettings(record.localAutoSave),
-    agentScrollToBottomAfterSubmit: typeof record.agentScrollToBottomAfterSubmit === 'boolean' ? record.agentScrollToBottomAfterSubmit : true,
-    agentMaxToolRounds: normalizeAgentMaxToolRounds(record.agentMaxToolRounds),
-    agentWebSearch: typeof record.agentWebSearch === 'boolean' ? record.agentWebSearch : false,
-    agentMathFormattingPrompt: typeof record.agentMathFormattingPrompt === 'boolean' ? record.agentMathFormattingPrompt : true,
-    agentApiConfigMode,
-    agentTextProfileId,
-    agentImageProfileId,
     textApiProfileId,
     profiles,
     activeProfileId,
@@ -883,19 +856,8 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   }
 }
 
-export function getAgentTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
-  const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode === 'off') return getActiveApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId) ?? null
-}
-
 export function getPromptReverseApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
-  const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode !== 'off') {
-    const textProfile = normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId)
-    if (textProfile && isAgentTextApiProfile(textProfile)) return textProfile
-  }
-  return getTextApiProfile(normalized)
+  return getTextApiProfile(settings)
 }
 
 export interface TextApiResolution {
@@ -960,12 +922,6 @@ export function getSceneTextApiProfileResolution(settings: Partial<AppSettings> 
     if (profile) return { profile, resolvedBy: 'explicit', reason: null }
   }
   return getTextApiProfileResolution(settings)
-}
-
-export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
-  const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentImageProfileId) ?? null
 }
 
 export function getCustomProviderDefinition(settings: Partial<AppSettings> | unknown, provider: ApiProvider): CustomProviderDefinition | null {
@@ -1477,11 +1433,4 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
   localAutoSave: DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
-  agentScrollToBottomAfterSubmit: true,
-  agentMaxToolRounds: DEFAULT_AGENT_MAX_TOOL_ROUNDS,
-  agentWebSearch: false,
-  agentMathFormattingPrompt: true,
-  agentApiConfigMode: 'off',
-  agentTextProfileId: null,
-  agentImageProfileId: null,
 })

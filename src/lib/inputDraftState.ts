@@ -1,26 +1,12 @@
-import type { AgentConversation, AgentInputDraft, AgentRound, AppMode, InputImage, MaskDraft, StoredImage } from '../types'
-import { remapAgentRoundMentionsForPathChange } from './agentConversationState'
+import type { AgentInputDraft, AppMode, InputImage, MaskDraft, StoredImage } from '../types'
 import { remapImageMentionsForOrder } from './promptImageMentions'
-
-const AGENT_INPUT_DRAFT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
-
-/** 存量/测试仍可能携带 'agent'（AppMode 已收窄为 gallery|engine）；agent 草稿链由 Task 3 删除。 */
-type RuntimeAppMode = AppMode | 'agent'
 
 type InputDraftFields = Pick<AgentInputDraft, 'prompt' | 'inputImages' | 'maskDraft' | 'maskEditorImageId'>
 
-type AgentInputDraftState = InputDraftFields & {
-  appMode: RuntimeAppMode
-  activeAgentConversationId: string | null
-  agentInputDrafts: Record<string, AgentInputDraft>
-}
-
 type GalleryInputDraftState = InputDraftFields & {
-  appMode: RuntimeAppMode
+  appMode: AppMode
   galleryInputDraft: AgentInputDraft | null
 }
-
-type ActiveInputDraftState = AgentInputDraftState & Pick<GalleryInputDraftState, 'galleryInputDraft'>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -89,40 +75,7 @@ export function normalizeAgentInputDraft(value: unknown, fallbackUpdatedAt = Dat
   }
 }
 
-export function normalizeAgentInputDrafts(value: unknown, conversations: Pick<AgentConversation, 'id'>[]): Record<string, AgentInputDraft> {
-  if (!isRecord(value)) return {}
-  const conversationIds = new Set(conversations.map((conversation) => conversation.id))
-  const drafts: Record<string, AgentInputDraft> = {}
-  for (const [conversationId, draft] of Object.entries(value)) {
-    if (!conversationIds.has(conversationId)) continue
-    const normalized = normalizeAgentInputDraft(draft)
-    if (!isEmptyAgentInputDraft(normalized)) drafts[conversationId] = normalized
-  }
-  return drafts
-}
-
-export function normalizeAgentInputDraftsByKey(value: unknown): Record<string, AgentInputDraft> {
-  if (!isRecord(value)) return {}
-  const drafts: Record<string, AgentInputDraft> = {}
-  for (const [conversationId, draft] of Object.entries(value)) {
-    const normalized = normalizeAgentInputDraft(draft)
-    if (!isEmptyAgentInputDraft(normalized)) drafts[conversationId] = normalized
-  }
-  return drafts
-}
-
-export function cleanStaleAgentInputDrafts(drafts: Record<string, AgentInputDraft>, activeConversationId: string | null, now = Date.now()) {
-  const cutoff = now - AGENT_INPUT_DRAFT_RETENTION_MS
-  const next: Record<string, AgentInputDraft> = {}
-  for (const [conversationId, draft] of Object.entries(drafts)) {
-    if (conversationId === activeConversationId || (draft.updatedAt ?? now) >= cutoff) {
-      next[conversationId] = draft
-    }
-  }
-  return next
-}
-
-export function clearInputDraftState(): InputDraftFields {
+function clearInputDraftState(): InputDraftFields {
   return {
     prompt: '',
     inputImages: [],
@@ -155,21 +108,6 @@ export function isEmptyAgentInputDraft(draft: AgentInputDraft) {
   return draft.prompt.length === 0 && draft.inputImages.length === 0 && !draft.maskDraft && !draft.maskEditorImageId
 }
 
-function setAgentInputDraft(drafts: Record<string, AgentInputDraft>, conversationId: string, draft: AgentInputDraft) {
-  const next = { ...drafts }
-  if (isEmptyAgentInputDraft(draft)) {
-    delete next[conversationId]
-  } else {
-    next[conversationId] = copyAgentInputDraft(draft)
-  }
-  return next
-}
-
-export function saveActiveAgentInputDrafts(state: AgentInputDraftState) {
-  if (state.appMode !== 'agent' || !state.activeAgentConversationId) return state.agentInputDrafts
-  return setAgentInputDraft(state.agentInputDrafts, state.activeAgentConversationId, getCurrentAgentInputDraft(state))
-}
-
 export function saveGalleryInputDraft(state: GalleryInputDraftState) {
   if (state.appMode !== 'gallery') return state.galleryInputDraft
   const draft = getCurrentAgentInputDraft(state)
@@ -186,31 +124,20 @@ export function restoreGalleryInputDraftState(draft: AgentInputDraft | null): In
   }
 }
 
-export function restoreAgentInputDraftState(drafts: Record<string, AgentInputDraft>, conversationId: string | null): InputDraftFields {
-  const draft = conversationId ? drafts[conversationId] : null
-  return restoreGalleryInputDraftState(draft ?? null)
-}
-
 export function syncActiveInputDraft<T extends Partial<AgentInputDraft>>(
-  state: ActiveInputDraftState,
+  state: GalleryInputDraftState,
   patch: T,
-): T & { agentInputDrafts?: Record<string, AgentInputDraft>; galleryInputDraft?: AgentInputDraft | null } {
+): T & { galleryInputDraft?: AgentInputDraft | null } {
+  if (state.appMode !== 'gallery') return patch
   const draft: AgentInputDraft = {
     prompt: patch.prompt ?? state.prompt,
     inputImages: patch.inputImages ?? state.inputImages,
     maskDraft: patch.maskDraft !== undefined ? patch.maskDraft : state.maskDraft,
     maskEditorImageId: patch.maskEditorImageId !== undefined ? patch.maskEditorImageId : state.maskEditorImageId,
   }
-  if (state.appMode === 'gallery') {
-    return {
-      ...patch,
-      galleryInputDraft: isEmptyAgentInputDraft(draft) ? null : copyAgentInputDraft(draft),
-    }
-  }
-  if (!state.activeAgentConversationId) return patch
   return {
     ...patch,
-    agentInputDrafts: setAgentInputDraft(state.agentInputDrafts, state.activeAgentConversationId, draft),
+    galleryInputDraft: isEmptyAgentInputDraft(draft) ? null : copyAgentInputDraft(draft),
   }
 }
 
@@ -225,37 +152,4 @@ export function updateInputDraftImages(
     prompt: remapImageMentionsForOrder(draft.prompt, draft.inputImages, inputImages, options.equivalentImageIds),
     ...(shouldClearMask ? { maskDraft: null, maskEditorImageId: null } : {}),
   }
-}
-
-export function remapAgentInputDraftMentionsForPathChange(
-  drafts: Record<string, AgentInputDraft>,
-  conversationId: string,
-  oldPath: AgentRound[],
-  newPath: AgentRound[],
-) {
-  const draft = drafts[conversationId]
-  if (!draft) return drafts
-  return {
-    ...drafts,
-    [conversationId]: {
-      ...draft,
-      prompt: remapAgentRoundMentionsForPathChange(draft.prompt, oldPath, newPath),
-    },
-  }
-}
-
-export function getPersistableAgentInputDrafts(
-  state: AgentInputDraftState & { agentConversations: Pick<AgentConversation, 'id'>[] },
-) {
-  const drafts = saveActiveAgentInputDrafts(state)
-  const conversationIds = new Set(state.agentConversations.map((conversation) => conversation.id))
-  const persistable: Record<string, AgentInputDraft> = {}
-  for (const [conversationId, draft] of Object.entries(drafts)) {
-    if (!conversationIds.has(conversationId) || isEmptyAgentInputDraft(draft)) continue
-    persistable[conversationId] = {
-      ...copyAgentInputDraft(draft),
-      inputImages: draft.inputImages.map(getPersistableInputImage),
-    }
-  }
-  return persistable
 }

@@ -321,7 +321,7 @@ describe('callAgentResponsesApi', () => {
     })
 
     const result = await callAgentResponsesApi({
-      settings: { ...DEFAULT_SETTINGS, agentWebSearch: true },
+      settings: { ...DEFAULT_SETTINGS, agentWebSearch: true } as typeof DEFAULT_SETTINGS,
       profile,
       params: DEFAULT_PARAMS,
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'prompt' }] }],
@@ -362,7 +362,7 @@ describe('callAgentResponsesApi', () => {
     expect(body.instructions).toContain('Use `$...$` for inline formulas.')
 
     await callAgentResponsesApi({
-      settings: { ...DEFAULT_SETTINGS, agentMathFormattingPrompt: false },
+      settings: { ...DEFAULT_SETTINGS, agentMathFormattingPrompt: false } as typeof DEFAULT_SETTINGS,
       profile,
       params: DEFAULT_PARAMS,
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'prompt' }] }],

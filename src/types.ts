@@ -4,7 +4,6 @@ export type ApiMode = 'images' | 'responses'
 export const REASONING_EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ReasoningEffort = typeof REASONING_EFFORT_VALUES[number]
 export type AppMode = 'gallery' | 'engine'
-export type AgentApiConfigMode = 'off' | 'native' | 'hybrid'
 export type ReferenceImageEditAction = 'ask' | 'replace-reference' | 'add-mask'
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
@@ -19,7 +18,6 @@ export type BuiltInApiProvider = 'openai' | 'sb2api-async' | 'fal'
 export type ApiProvider = BuiltInApiProvider | string
 export type CustomProviderTemplate = 'http-image'
 export const DEFAULT_STREAM_PARTIAL_IMAGES = 1
-export const DEFAULT_AGENT_MAX_TOOL_ROUNDS = 15
 
 export type CustomProviderRequestMethod = 'GET' | 'POST'
 export type CustomProviderContentType = 'json' | 'multipart'
@@ -166,13 +164,6 @@ export interface AppSettings {
   referenceImageEditAction: ReferenceImageEditAction
   zipDownloadRoutes: ZipDownloadRoute[]
   localAutoSave: LocalAutoSaveSettings
-  agentScrollToBottomAfterSubmit: boolean
-  agentMaxToolRounds: number
-  agentWebSearch: boolean
-  agentMathFormattingPrompt: boolean
-  agentApiConfigMode: AgentApiConfigMode
-  agentTextProfileId?: string | null
-  agentImageProfileId?: string | null
   /** 全局文本能力路由（反推/标题等文本类功能）：null=自动（跟随生图配置或唯一可用文本配置），
    *  指向 Responses 类型 profile 则显式使用它。归一化只校验有效性，不固化推导值。 */
   textApiProfileId?: string | null

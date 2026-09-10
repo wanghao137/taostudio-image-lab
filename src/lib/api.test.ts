@@ -165,13 +165,12 @@ describe('callImageApi', () => {
       settings: DEFAULT_SETTINGS,
       params: DEFAULT_PARAMS,
       dismissedCodexCliPrompts: [],
-      agentConversations: [],
       favoriteCollections: [],
       defaultFavoriteCollectionId: null,
     })!
 
     await callImageApi({
-      settings: restored.state.settings,
+      settings: restored.settings,
       prompt: 'prompt',
       params: DEFAULT_PARAMS,
       inputImageDataUrls: [],

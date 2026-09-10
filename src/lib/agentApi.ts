@@ -1,9 +1,25 @@
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type RefusalRecoveryRecord, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type RefusalRecoveryRecord, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
 import { appendStreamingFormatHint, createHeaders, extractText, getApiErrorMessage, getResponsesImageResultBase64, isRecordValue, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, normalizeResponsePayload, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
+
+/**
+ * Agent 设置字段已随智能体移除（P1b Task 3，2026-09），本文件整体由 Task 4 删除。
+ * 过渡期以 legacy 视图读取旧字段（运行时已无字段写入，读到的都是旧默认语义），
+ * 保持编译与既有测试通过。
+ */
+const LEGACY_DEFAULT_AGENT_MAX_TOOL_ROUNDS = 15
+type LegacyAgentSettings = {
+  agentMaxToolRounds?: number
+  agentApiConfigMode?: 'off' | 'native' | 'hybrid'
+  agentWebSearch?: boolean
+  agentMathFormattingPrompt?: boolean
+}
+function legacyAgentSettings(settings: AppSettings): LegacyAgentSettings {
+  return settings as AppSettings & LegacyAgentSettings
+}
 
 export interface AgentApiResultImage {
   toolCallId?: string
@@ -62,13 +78,14 @@ const AGENT_MATH_FORMATTING_INSTRUCTIONS = [
 ].join('\n')
 
 function createAgentInstructions(settings: AppSettings, codexCliSize?: string) {
-  const maxToolRounds = Number.isFinite(settings.agentMaxToolRounds)
-    ? Math.max(1, Math.trunc(settings.agentMaxToolRounds))
-    : DEFAULT_AGENT_MAX_TOOL_ROUNDS
-  const imageToolInstruction = settings.agentApiConfigMode === 'hybrid'
+  const legacy = legacyAgentSettings(settings)
+  const maxToolRounds = Number.isFinite(legacy.agentMaxToolRounds)
+    ? Math.max(1, Math.trunc(legacy.agentMaxToolRounds!))
+    : LEGACY_DEFAULT_AGENT_MAX_TOOL_ROUNDS
+  const imageToolInstruction = legacy.agentApiConfigMode === 'hybrid'
     ? 'Use generate_image for single-image requests and generate_image_batch for concurrent multi-image requests. The built-in image_generation tool is not available in this session.'
     : 'Use image_generation for single-image requests and generate_image_batch for concurrent multi-image requests.'
-  const imageInstructions = settings.agentApiConfigMode === 'hybrid'
+  const imageInstructions = legacy.agentApiConfigMode === 'hybrid'
     ? AGENT_IMAGE_INSTRUCTIONS.replace(/image_generation/g, 'generate_image')
     : AGENT_IMAGE_INSTRUCTIONS
   const instructions = [
@@ -86,7 +103,7 @@ function createAgentInstructions(settings: AppSettings, codexCliSize?: string) {
     instructions.push('', `- Start every image prompt with exactly "Generate at ${codexCliSize} resolution." followed by a space.`)
   }
 
-  if (settings.agentMathFormattingPrompt) instructions.push('', AGENT_MATH_FORMATTING_INSTRUCTIONS)
+  if (legacy.agentMathFormattingPrompt !== false) instructions.push('', AGENT_MATH_FORMATTING_INSTRUCTIONS)
 
   return instructions.join('\n')
 }
@@ -163,10 +180,11 @@ function createGenerateImageFunctionTool() {
 }
 
 function createAgentTools(params: TaskParams, profile: ApiProfile, settings: AppSettings, maskDataUrl?: string): Array<Record<string, unknown>> {
-  const tools: Array<Record<string, unknown>> = settings.agentApiConfigMode === 'hybrid'
+  const legacy = legacyAgentSettings(settings)
+  const tools: Array<Record<string, unknown>> = legacy.agentApiConfigMode === 'hybrid'
     ? [createGenerateImageFunctionTool()]
     : [createImageTool(params, profile, maskDataUrl)]
-  const singleImageToolInstruction = settings.agentApiConfigMode === 'hybrid'
+  const singleImageToolInstruction = legacy.agentApiConfigMode === 'hybrid'
     ? 'For single images or prerequisite/base images, use the generate_image tool instead.'
     : 'For single images or prerequisite/base images, use the built-in image_generation tool instead.'
 
@@ -234,7 +252,7 @@ function createAgentTools(params: TaskParams, profile: ApiProfile, settings: App
     strict: true,
   })
 
-  if (settings.agentWebSearch) {
+  if (legacyAgentSettings(settings).agentWebSearch === true) {
     tools.push({ type: 'web_search' })
   }
   return tools
