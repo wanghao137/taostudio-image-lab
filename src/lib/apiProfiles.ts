@@ -14,8 +14,10 @@ import type {
   CustomProviderTemplate,
   LocalAutoSaveSettings,
   ReferenceImageEditAction,
+  SceneId,
+  SceneSettings,
 } from '../types'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, SCENE_ID_VALUES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
 import { customProviderSupportsNativeTransparentBackground } from './customProviderCapabilities'
 import { shouldUseApiProxy } from './devProxy'
 import { DEFAULT_IMAGES_MODEL } from './imageModels'
@@ -816,6 +818,31 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isAgentTextApiProfile(p))
     ? record.textApiProfileId
     : null
+  // 场景配置：只校验显式引用有效性（生图任意 profile / 文本须 Responses 型），
+  // 缺失或非法一律回默认；不固化推导值，不迁移用户数据。
+  const sceneProfileIds = new Set(profiles.map((p) => p.id))
+  const textCapableIds = new Set(profiles.filter(isAgentTextApiProfile).map((p) => p.id))
+  const normalizeSceneSettings = (raw: unknown): SceneSettings => {
+    const rec = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const defaults = rec.defaults && typeof rec.defaults === 'object' ? rec.defaults as Record<string, unknown> : {}
+    return {
+      imageProfileId: typeof rec.imageProfileId === 'string' && sceneProfileIds.has(rec.imageProfileId) ? rec.imageProfileId : null,
+      textProfileId: typeof rec.textProfileId === 'string' && textCapableIds.has(rec.textProfileId) ? rec.textProfileId : null,
+      saveDirectoryName: typeof rec.saveDirectoryName === 'string' && rec.saveDirectoryName ? rec.saveDirectoryName : null,
+      defaults: {
+        ratio: typeof defaults.ratio === 'string' ? defaults.ratio : undefined,
+        tier: defaults.tier === '1K' || defaults.tier === '2K' || defaults.tier === '4K' ? defaults.tier : undefined,
+        transparentBackground: defaults.transparentBackground === true ? true : undefined,
+      },
+    }
+  }
+  const rawScenes = record.scenes && typeof record.scenes === 'object' ? record.scenes as Record<string, unknown> : {}
+  const scenes = Object.fromEntries(
+    SCENE_ID_VALUES.map((id) => [id, normalizeSceneSettings(rawScenes[id])]),
+  ) as Record<SceneId, SceneSettings>
+  const activeScene = (SCENE_ID_VALUES as readonly string[]).includes(record.activeScene as string)
+    ? record.activeScene as SceneId
+    : 'general'
 
   return {
     baseUrl: active.baseUrl,
@@ -849,6 +876,8 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     textApiProfileId,
     profiles,
     activeProfileId,
+    scenes,
+    activeScene,
   }
 }
 
@@ -895,6 +924,32 @@ export function getTextApiProfileResolution(settings: Partial<AppSettings> | unk
 
 export function getTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   return getTextApiProfileResolution(settings).profile
+}
+
+/**
+ * 场景生图解析：场景显式引用优先，干净返回该 profile 本体（不套 getActiveApiProfile
+ * 的旧版顶层镜像字段覆盖——顶层 baseUrl/apiKey/model 只描述全局激活配置，对场景引用
+ * 无意义）；无引用或引用失效时回落全局激活链。
+ */
+export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
+  const normalized = normalizeSettings(settings)
+  const sceneProfileId = normalized.scenes[normalized.activeScene].imageProfileId
+  if (sceneProfileId) {
+    const profile = normalized.profiles.find((p) => p.id === sceneProfileId)
+    if (profile) return profile
+  }
+  return getActiveApiProfile(normalized)
+}
+
+/** 场景文本解析：场景显式引用优先，否则走全局 textApiProfileId 自动链（语义不变）。 */
+export function getSceneTextApiProfileResolution(settings: Partial<AppSettings> | unknown): TextApiResolution {
+  const normalized = normalizeSettings(settings)
+  const sceneTextProfileId = normalized.scenes[normalized.activeScene].textProfileId
+  if (sceneTextProfileId) {
+    const profile = normalized.profiles.find((p) => p.id === sceneTextProfileId)
+    if (profile) return { profile, resolvedBy: 'explicit', reason: null }
+  }
+  return getTextApiProfileResolution(normalized)
 }
 
 export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {

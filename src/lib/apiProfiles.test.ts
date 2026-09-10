@@ -14,6 +14,8 @@ import {
   getActiveApiProfile,
   getDefaultOpenAIModel,
   getPromptReverseApiProfile,
+  getSceneImageApiProfile,
+  getSceneTextApiProfileResolution,
   getTextApiProfileResolution,
   isManagedDefaultOpenAIModel,
   getCustomProviderDefinition,
@@ -2025,5 +2027,55 @@ describe('getTextApiProfileResolution（全局文本能力路由）', () => {
     expect(settings.textApiProfileId).toBeNull()
     // 清回 auto 后按唯一文本配置解析
     expect(getTextApiProfileResolution(settings).profile?.id).toBe('resp-profile')
+  })
+})
+
+describe('场景配置归一化与解析', () => {
+  it('旧 settings 无 scenes 时补全四个场景默认值，activeScene 默认 general', () => {
+    const s = normalizeSettings({ profiles: [createDefaultOpenAIProfile()] })
+    expect(Object.keys(s.scenes).sort()).toEqual(['general', 'portrait', 'skill', 'sticker'])
+    expect(s.scenes.general).toEqual({ imageProfileId: null, textProfileId: null, saveDirectoryName: null, defaults: {} })
+    expect(s.activeScene).toBe('general')
+  })
+
+  it('非法 profile 引用回退 null，合法引用保留（文本引用须为 Responses 型）', () => {
+    const text = { ...createDefaultOpenAIProfile(), id: 'text-1', apiMode: 'responses' as const }
+    const s = normalizeSettings({
+      profiles: [createDefaultOpenAIProfile(), text],
+      scenes: { portrait: { imageProfileId: 'missing-id', textProfileId: text.id, saveDirectoryName: 'F:\\人像' } },
+    })
+    expect(s.scenes.portrait.imageProfileId).toBeNull()
+    expect(s.scenes.portrait.textProfileId).toBe('text-1')
+    expect(s.scenes.portrait.saveDirectoryName).toBe('F:\\人像')
+  })
+
+  it('activeScene 非法值回退 general', () => {
+    expect(normalizeSettings({ activeScene: 'nope' }).activeScene).toBe('general')
+  })
+
+  it('getSceneImageApiProfile：场景显式引用优先，且不套用顶层镜像字段', () => {
+    const a = { ...createDefaultOpenAIProfile(), id: 'a', name: 'A', model: 'model-a' }
+    const b = { ...createDefaultOpenAIProfile(), id: 'b', name: 'B', model: 'model-b' }
+    const s = normalizeSettings({
+      profiles: [a, b], activeProfileId: 'a', activeScene: 'sticker',
+      scenes: { sticker: { imageProfileId: 'b' } },
+    })
+    expect(getSceneImageApiProfile(s).id).toBe('b')
+    expect(getSceneImageApiProfile(s).model).toBe('model-b')
+  })
+
+  it('getSceneImageApiProfile：无场景引用时回落全局激活 profile', () => {
+    const s = normalizeSettings({})
+    expect(getSceneImageApiProfile(s).id).toBe(s.activeProfileId)
+  })
+
+  it('getSceneTextApiProfileResolution：场景文本引用优先，无引用走全局链', () => {
+    const text = { ...createDefaultOpenAIProfile(), id: 'text-1', apiMode: 'responses' as const }
+    const s = normalizeSettings({
+      profiles: [createDefaultOpenAIProfile(), text],
+      scenes: { skill: { textProfileId: 'text-1' } },
+    })
+    expect(getSceneTextApiProfileResolution(s).profile?.id).toBe('text-1')
+    expect(getSceneTextApiProfileResolution({ ...s, activeScene: 'general' }).resolvedBy).not.toBe('explicit')
   })
 })

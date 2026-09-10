@@ -123,6 +123,27 @@ export interface LocalAutoSaveTaskState {
   error?: string
 }
 
+export type SceneId = 'portrait' | 'general' | 'sticker' | 'skill'
+export const SCENE_ID_VALUES = ['portrait', 'general', 'sticker', 'skill'] as const
+
+export interface SceneDefaults {
+  /** COMMON_IMAGE_RATIOS 的比例 key（如 '3:4'、'1:1'）；缺省不覆盖 */
+  ratio?: string
+  /** 与 src/lib/size.ts 的 SizeTier 对齐 */
+  tier?: '1K' | '2K' | '4K'
+  transparentBackground?: boolean
+}
+
+export interface SceneSettings {
+  /** 场景生图配置引用：null = 跟随全局 activeProfileId */
+  imageProfileId: string | null
+  /** 场景文本模型引用：null = 走全局 textApiProfileId 自动链 */
+  textProfileId: string | null
+  /** 场景独立保存目录名（句柄存 IndexedDB sceneDirectory:<id>）；null = 跟随全局目录 */
+  saveDirectoryName?: string | null
+  defaults: SceneDefaults
+}
+
 export interface AppSettings {
   /** 旧版单配置字段：保留用于导入/查询参数兼容，实际请求以 active profile 为准 */
   baseUrl: string
@@ -158,6 +179,8 @@ export interface AppSettings {
   textApiProfileId?: string | null
   profiles: ApiProfile[]
   activeProfileId: string
+  scenes: Record<SceneId, SceneSettings>
+  activeScene: SceneId
 }
 
 // ===== 任务参数 =====
@@ -376,6 +399,8 @@ export interface TaskRecord {
   favoriteCollectionIds?: string[]
   /** 来源模式：画廊 / Agent */
   sourceMode?: AppMode
+  /** 提交时所属场景；旧任务无此字段视为 general */
+  sceneId?: SceneId
   /** Agent 对话 ID */
   agentConversationId?: string
   /** Agent 轮次 ID */
