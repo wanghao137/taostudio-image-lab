@@ -7,6 +7,7 @@ vi.mock('./db', () => {
   let localAutoSaveDirectoryHandle: StoredLocalAutoSaveDirectoryHandle | undefined
   let engineDeliveryDirectoryHandle: StoredLocalAutoSaveDirectoryHandle | undefined
   const deliveryRecords = new Map<string, EngineDeliveryRecord>()
+  const sceneDirectoryHandles = new Map<string, StoredLocalAutoSaveDirectoryHandle>()
   return {
     getLocalAutoSaveDirectoryHandle: async () => localAutoSaveDirectoryHandle,
     putLocalAutoSaveDirectoryHandle: vi.fn(async (handle: FileSystemDirectoryHandle) => {
@@ -24,6 +25,22 @@ vi.mock('./db', () => {
     clearEngineDeliveryDirectoryHandle: async () => {
       engineDeliveryDirectoryHandle = undefined
     },
+    SCENE_DIRECTORY_KEY_PREFIX: 'sceneDirectory:',
+    getSceneDirectoryHandle: vi.fn(async (sceneId: string) => sceneDirectoryHandles.get(sceneId)),
+    putSceneDirectoryHandle: vi.fn(async (sceneId: string, handle: FileSystemDirectoryHandle) => {
+      const record: StoredLocalAutoSaveDirectoryHandle = {
+        id: `sceneDirectory:${sceneId}`,
+        handle,
+        name: handle.name,
+        updatedAt: Date.now(),
+      }
+      sceneDirectoryHandles.set(sceneId, record)
+      return record.id
+    }),
+    clearSceneDirectoryHandle: vi.fn(async (sceneId: string) => {
+      sceneDirectoryHandles.delete(sceneId)
+    }),
+    listSceneDirectoryHandles: vi.fn(async () => [...sceneDirectoryHandles.values()]),
     getEngineDeliveryRecord: async (kind: EngineDeliveryRecord['kind'], entityId: string) =>
       deliveryRecords.get(`${kind}:${entityId}`),
     putEngineDeliveryRecord: async (record: EngineDeliveryRecord) => {
@@ -37,6 +54,7 @@ vi.mock('./db', () => {
       localAutoSaveDirectoryHandle = undefined
       engineDeliveryDirectoryHandle = undefined
       deliveryRecords.clear()
+      sceneDirectoryHandles.clear()
     },
   }
 })

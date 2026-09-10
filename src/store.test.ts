@@ -27,6 +27,12 @@ vi.mock('./lib/db', () => {
     name?: string
     updatedAt: number
   } | undefined
+  const sceneDirectoryHandles = new Map<string, {
+    id: string
+    handle: FileSystemDirectoryHandle
+    name?: string
+    updatedAt: number
+  }>()
   let imageSeq = 0
   let taskGeneration = 0
 
@@ -101,6 +107,22 @@ vi.mock('./lib/db', () => {
     clearEngineDeliveryDirectoryHandle: async () => {
       engineDeliveryDirectoryHandle = undefined
     },
+    SCENE_DIRECTORY_KEY_PREFIX: 'sceneDirectory:',
+    getSceneDirectoryHandle: vi.fn(async (sceneId: string) => sceneDirectoryHandles.get(sceneId)),
+    putSceneDirectoryHandle: vi.fn(async (sceneId: string, handle: FileSystemDirectoryHandle) => {
+      const record = {
+        id: `sceneDirectory:${sceneId}`,
+        handle,
+        name: handle.name,
+        updatedAt: Date.now(),
+      }
+      sceneDirectoryHandles.set(sceneId, record)
+      return record.id
+    }),
+    clearSceneDirectoryHandle: vi.fn(async (sceneId: string) => {
+      sceneDirectoryHandles.delete(sceneId)
+    }),
+    listSceneDirectoryHandles: vi.fn(async () => [...sceneDirectoryHandles.values()]),
     getImage: async (id: string) => images.get(id),
     getStoredImageThumbnail: async (id: string) => thumbnails.get(id),
     getImageThumbnail: async (id: string) => thumbnails.get(id),
