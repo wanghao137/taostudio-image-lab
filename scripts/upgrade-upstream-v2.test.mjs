@@ -174,6 +174,38 @@ describe('transactional upstream upgrade plan', () => {
     expect(read(fixture.local, 'src/components/AgentWorkspace.tsx')).toBe('local\n')
   })
 
+  it('discards upstream changes to deleted agent test files via the repo removedPaths config', () => {
+    const repoConfig = JSON.parse(fs.readFileSync(new URL('../upstream-upgrade.config.json', import.meta.url), 'utf8'))
+    const deletedAgentTestFiles = [
+      'src/lib/agentApi.test.ts',
+      'src/lib/agentAssistantBlocks.test.ts',
+      'src/lib/agentConversationState.test.ts',
+      'src/lib/agentImageReferences.test.ts',
+      'src/lib/agentInputBuilder.test.ts',
+      'src/lib/agentResponseState.test.ts',
+    ]
+    expect(repoConfig.removedPaths).toEqual(expect.arrayContaining(deletedAgentTestFiles))
+
+    const fixture = createFixture()
+    write(fixture.base, 'src/lib/agentApi.test.ts', 'base\n')
+    write(fixture.upstream, 'src/lib/agentApi.test.ts', 'upstream\n')
+
+    const { actions, report } = createPlan(
+      config([], repoConfig.removedPaths),
+      fixture.base,
+      fixture.upstream,
+      fixture.local,
+    )
+
+    expect(report.discardedUpstreamFiles).toEqual(['src/lib/agentApi.test.ts'])
+    // 未配置 removedPaths 时，此场景会落入 local-deleted-upstream-modified 冲突。
+    expect(report.conflicts).toEqual([])
+    expect(requiredAcknowledgements(report)).toContain('src/lib/agentApi.test.ts')
+    expect(actions.some((action) => action.rel === 'src/lib/agentApi.test.ts')).toBe(false)
+    applyPlan(actions, false, fixture.local)
+    expect(fs.existsSync(path.join(fixture.local, 'src/lib/agentApi.test.ts'))).toBe(false)
+  })
+
   it('deletes a file removed upstream only when the local copy still matches the base', () => {
     const fixture = createFixture()
     write(fixture.base, 'src/removed.txt', 'base\n')

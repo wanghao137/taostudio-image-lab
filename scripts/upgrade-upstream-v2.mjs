@@ -674,7 +674,7 @@ function writeReport(filePath, report) {
     renderList('Deleted upstream files', report.deleted),
     renderList('Local-only files left unchanged', report.localOnly),
     renderList('Preserved files changed upstream', report.preservedUpstreamChanges),
-    renderList('Removed paths (removedPaths) discarded from upstream', report.discardedUpstreamFiles.map((item) => `removedPaths 命中：已丢弃上游 ${item}`)),
+    renderList('Removed paths (removedPaths) discarded from upstream', (report.discardedUpstreamFiles ?? []).map((item) => `removedPaths 命中：已丢弃上游 ${item}`)),
     renderList('Conflicts', report.conflicts),
   ].join('\n')
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
@@ -862,7 +862,7 @@ Options:
   --dry-run          Fetch and classify the three-way upgrade without editing project files.
   --write-conflicts  Apply clean changes and write text conflict markers for an explicit migration.
   --finalize         Finalize a resolved pending migration and update the upstream state file.
-  --acknowledge <p>  Explicitly accept one preserved or conflicted path (repeatable).
+  --acknowledge <p>  Explicitly accept one preserved path, removedPaths discard, or conflicted path (repeatable).
   --install          Run npm install after a clean apply or during finalize.
   --verify           Run lint, tests, and build. Required before advancing the baseline.
   --allow-dirty      Allow operation with a dirty worktree. Use only after inspecting local changes.

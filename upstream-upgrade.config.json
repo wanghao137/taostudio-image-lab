@@ -51,11 +51,17 @@
     "src/components/AgentWorkspace.tsx",
     "src/components/HistoryModal.tsx",
     "src/components/settings/AgentSettingsTab.tsx",
+    "src/lib/agentApi.test.ts",
     "src/lib/agentApi.ts",
+    "src/lib/agentAssistantBlocks.test.ts",
     "src/lib/agentAssistantBlocks.ts",
+    "src/lib/agentConversationState.test.ts",
     "src/lib/agentConversationState.ts",
+    "src/lib/agentImageReferences.test.ts",
     "src/lib/agentImageReferences.ts",
+    "src/lib/agentInputBuilder.test.ts",
     "src/lib/agentInputBuilder.ts",
+    "src/lib/agentResponseState.test.ts",
     "src/lib/agentResponseState.ts",
     "src/lib/agentWebSearch.ts"
   ]

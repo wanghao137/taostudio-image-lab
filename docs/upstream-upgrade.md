@@ -143,7 +143,7 @@ npx vitest run server/task-api/service.test.mjs server/task-api/web-agent.e2e.te
 
 ## 决策记录
 
-- 2026-09：智能体（Agent）功能整体移除，手术清单见 `docs/scene-and-skill-upgrade-plan-2026-09-10.md` §7，实施计划见 `docs/agent-removal-p1b-plan-2026-09-10.md`。后续上游对 agent 相关文件的一切演进（修复、重构、新增文件）**有意不跟随**；升级遇到这些路径时按 `removedPaths` 丢弃，本节即该 10 个路径清单的存在依据。上文「TaoStudio 行为契约」中「Agent 批量生成、分支对话、删除事务和图片引用清理」一条随本次移除一并失效。
+- 2026-09：智能体（Agent）功能整体移除，手术清单见 `docs/scene-and-skill-upgrade-plan-2026-09-10.md` §7，实施计划见 `docs/agent-removal-p1b-plan-2026-09-10.md`。后续上游对 agent 相关文件的一切演进（修复、重构、新增文件）**有意不跟随**；升级遇到这些路径时按 `removedPaths` 丢弃，本节即该 16 个路径清单（10 个源文件 + 6 个测试文件）的存在依据。上文「TaoStudio 行为契约」中「Agent 批量生成、分支对话、删除事务和图片引用清理」一条随本次移除一并失效。
 
 ## 参数
 
@@ -151,7 +151,7 @@ npx vitest run server/task-api/service.test.mjs server/task-api/web-agent.e2e.te
 --dry-run          只拉取并分类，不写项目文件
 --write-conflicts  应用安全变更并显式写入文本冲突
 --finalize         完成 pending 迁移并更新基线
---acknowledge <p>  显式确认一个保留文件或无文本标记冲突，可重复
+--acknowledge <p>  显式确认一个保留文件、removedPaths 丢弃或无文本标记冲突，可重复
 --install          执行 npm install
 --verify           执行 lint、test、build；推进基线时必需
 --allow-dirty      允许脏工作树，仅限已审计的迁移分支
