@@ -121,6 +121,10 @@ vi.mock('./lib/db', () => {
       sceneDirectoryHandles.delete(sceneId)
     }),
     listSceneDirectoryHandles: vi.fn(async () => [...sceneDirectoryHandles.values()]),
+    SKILLS_ROOT_DIRECTORY_KEY: 'skillsDirectory',
+    getSkillsRootDirectoryHandle: vi.fn(async () => undefined),
+    putSkillsRootDirectoryHandle: vi.fn(async () => undefined),
+    clearSkillsRootDirectoryHandle: vi.fn(async () => undefined),
     getImage: async (id: string) => images.get(id),
     getStoredImageThumbnail: async (id: string) => thumbnails.get(id),
     getImageThumbnail: async (id: string) => thumbnails.get(id),
