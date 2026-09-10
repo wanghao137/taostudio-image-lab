@@ -969,8 +969,13 @@ export const useStore = create<AppState>()(
       refreshLocalSkills: async () => refreshLocalSkills(),
       clearSkillsRootDirectory: async () => clearSkillsRootDirectory(),
       setActiveSkill: (id) => {
-        // 切换 skill 即重置扩写结果：条目属于上一个 skill 的扩写输出，
+        // 同 skill 重复点击：幂等返回，不中断归属当前 skill 的在飞扩写
+        if (get().activeSkillId === id) return
+        // 切换 skill 即中断在飞扩写并重置结果：条目属于上一个 skill 的扩写输出，
         // 且生成链的 skillMeta 取当前 activeSkillId，保留会造成溯源错配。
+        // 在飞请求随后返回时被「最新 run」守卫（controller 引用已变/为 null）拦截，不回写。
+        skillExpansionAbortController?.abort()
+        skillExpansionAbortController = null
         set({ activeSkillId: id, skillExpansion: { status: 'idle', error: null, entries: [] } })
       },
       setSkillInputDraft: (skillInputDraft) => set({ skillInputDraft }),

@@ -4019,6 +4019,74 @@ describe('Skill 工坊 store 链', () => {
     expect(expansion.entries).toEqual([])
   })
 
+  it('setActiveSkill：切换 skill 时中止在飞扩写，过期结果后到不回写', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: { status: 'idle', error: null, entries: [] },
+      showToast: vi.fn(),
+    })
+
+    let resolveInFlight!: (value: string) => void
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveInFlight = resolve }),
+    )
+    const inFlight = useStore.getState().runSkillExpansion()
+    expect(useStore.getState().skillExpansion.status).toBe('running')
+
+    // 切换到另一个 skill：在飞扩写应被 abort 并重置为空状态
+    useStore.getState().setActiveSkill('skill-b')
+    expect(useStore.getState().activeSkillId).toBe('skill-b')
+    expect(useStore.getState().skillExpansion).toEqual({ status: 'idle', error: null, entries: [] })
+    const captured = vi.mocked(callSkillExpansionApi).mock.calls[0]?.[0]
+    expect(captured?.signal?.aborted).toBe(true)
+
+    // 在飞请求最终 resolve：过期结果不得写回新 skill 的扩写状态
+    resolveInFlight('### 01\n过期扩写条目内容')
+    await inFlight
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.error).toBeNull()
+    expect(expansion.entries).toEqual([])
+  })
+
+  it('setActiveSkill：同 id 重复调用不中断在飞扩写，结果照常回写', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: { status: 'idle', error: null, entries: [] },
+      showToast: vi.fn(),
+    })
+
+    let resolveInFlight!: (value: string) => void
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveInFlight = resolve }),
+    )
+    const inFlight = useStore.getState().runSkillExpansion()
+    expect(useStore.getState().skillExpansion.status).toBe('running')
+
+    // 同 id 重复点击：幂等返回，不 abort 在飞扩写、不重置状态
+    useStore.getState().setActiveSkill('builtin-skill')
+    expect(useStore.getState().skillExpansion.status).toBe('running')
+    const captured = vi.mocked(callSkillExpansionApi).mock.calls[0]?.[0]
+    expect(captured?.signal?.aborted).toBe(false)
+
+    resolveInFlight('### 01\n正常扩写条目内容')
+    await inFlight
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.entries.map((entry) => entry.text)).toEqual(['正常扩写条目内容'])
+    expect(useStore.getState().activeSkillId).toBe('builtin-skill')
+  })
+
   it('setActiveSkill 切换 skill 时重置扩写条目，updateSkillEntry/removeSkillEntry 精确增改', () => {
     useStore.setState({
       activeSkillId: 'skill-a',
