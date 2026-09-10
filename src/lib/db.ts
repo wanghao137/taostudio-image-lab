@@ -428,6 +428,38 @@ export function deleteEngineDeliveryRecord(kind: EngineDeliveryRecord['kind'], e
   return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(engineDeliveryKey(kind, entityId)))
 }
 
+// ===== Scene save directories =====
+// 每场景一把独立句柄（key: sceneDirectory:<sceneId>），与全局 directory、
+// 引擎交付目录三者各自授权、互不覆盖。
+
+export const SCENE_DIRECTORY_KEY_PREFIX = 'sceneDirectory:'
+
+function sceneDirectoryKey(sceneId: string) {
+  return `${SCENE_DIRECTORY_KEY_PREFIX}${sceneId}`
+}
+
+export function getSceneDirectoryHandle(sceneId: string): Promise<StoredLocalAutoSaveDirectoryHandle | undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readonly', (s) => s.get(sceneDirectoryKey(sceneId)))
+}
+
+export function putSceneDirectoryHandle(sceneId: string, handle: FileSystemDirectoryHandle): Promise<IDBValidKey> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.put({
+    id: sceneDirectoryKey(sceneId),
+    handle,
+    name: handle.name,
+    updatedAt: Date.now(),
+  } satisfies StoredLocalAutoSaveDirectoryHandle))
+}
+
+export function clearSceneDirectoryHandle(sceneId: string): Promise<undefined> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readwrite', (s) => s.delete(sceneDirectoryKey(sceneId)))
+}
+
+export function listSceneDirectoryHandles(): Promise<StoredLocalAutoSaveDirectoryHandle[]> {
+  return dbTransaction(STORE_LOCAL_AUTO_SAVE, 'readonly', (s) =>
+    s.getAll(IDBKeyRange.bound(SCENE_DIRECTORY_KEY_PREFIX, `${SCENE_DIRECTORY_KEY_PREFIX}\uffff`)))
+}
+
 // ===== Images =====
 
 /** IndexedDB 内部记录：新格式以 blob 存二进制（省 ~25-33% 空间），旧格式/读取出口为 dataUrl。 */

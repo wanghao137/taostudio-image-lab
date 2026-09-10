@@ -2,10 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const db = vi.hoisted(() => ({
   CURRENT_THUMBNAIL_VERSION: 2,
+  SCENE_DIRECTORY_KEY_PREFIX: 'sceneDirectory:',
   getImage: vi.fn(),
   getImageMetadata: vi.fn(),
   getImageThumbnail: vi.fn(),
   getStoredFreshImageThumbnail: vi.fn(),
+  getSceneDirectoryHandle: vi.fn(),
+  putSceneDirectoryHandle: vi.fn(),
+  clearSceneDirectoryHandle: vi.fn(),
+  listSceneDirectoryHandles: vi.fn(),
 }))
 
 vi.mock('./db', () => db)
@@ -29,6 +34,10 @@ describe('imageCache', () => {
     db.getImageMetadata.mockResolvedValue(undefined)
     db.getImageThumbnail.mockResolvedValue(undefined)
     db.getStoredFreshImageThumbnail.mockResolvedValue(undefined)
+    db.getSceneDirectoryHandle.mockResolvedValue(undefined)
+    db.putSceneDirectoryHandle.mockResolvedValue(undefined)
+    db.clearSceneDirectoryHandle.mockResolvedValue(undefined)
+    db.listSceneDirectoryHandles.mockResolvedValue([])
   })
 
   afterEach(() => {

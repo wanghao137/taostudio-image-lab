@@ -342,6 +342,15 @@ input[type="number"] {
   animation: slide-down-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
+/* 场景设置抽屉：从右侧滑入 */
+@keyframes drawer-right-in {
+  from { opacity: 0; transform: translateX(24px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.animate-drawer-right-in {
+  animation: drawer-right-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 /* Lightbox：淡入 */
 @keyframes fade-in {
   from { opacity: 0; }

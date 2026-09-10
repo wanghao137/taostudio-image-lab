@@ -1,13 +1,14 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { Settings2 } from 'lucide-react'
 import { initStore, restoreExplicitPresetConfig, useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './lib/urlSettings'
-import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
+import { createDefaultOpenAIProfile, hasDefaultPresetConfig, normalizeSettings } from './lib/apiProfiles'
 import { getCustomProviderConfigUrl, hasEmbeddedDefaultConfig, loadCustomProviderSettingsFromUrl, loadEmbeddedDefaultConfig } from './lib/customProviderConfigUrl'
 import { getDefaultPresetProfileId, getPresetProfileIds, isPresetConfigOnlyEnabled, setPresetConfig } from './lib/presetConfig'
-import type { AppSettings } from './types'
+import type { AppSettings, SceneId } from './types'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
 import { useIsMobile } from './hooks/useIsMobile'
-import Header from './components/Header'
+import Header, { SCENE_TABS } from './components/Header'
 import SearchBar from './components/SearchBar'
 import InputBar from './components/InputBar'
 import Toast from './components/Toast'
@@ -20,7 +21,6 @@ import ErrorBoundary from './components/ErrorBoundary'
 const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
 
 let defaultConfigImportStarted = false
-const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
 const EngineWorkspace = lazy(() => import('./components/EngineWorkspace'))
 const TaskGrid = lazy(() => import('./components/TaskGrid'))
 const DetailModal = lazy(() => import('./components/DetailModal'))
@@ -41,13 +41,26 @@ const ManageCollectionsModal = lazy(() =>
   import('./components/FavoriteCollections').then((module) => ({ default: module.ManageCollectionsModal })),
 )
 const MobileComposeSheet = lazy(() => import('./components/MobileComposeSheet'))
+const SceneSettingsDrawer = lazy(() =>
+  import('./components/SceneSettingsDrawer').then((module) => ({ default: module.SceneSettingsDrawer })),
+)
 
-function GalleryWorkspaceHeader() {
+// P2 上线 Skill 工坊前 SCENE_TABS 不含 skill；预留中文名避免 SceneId 缺口（与 SceneSettingsDrawer 一致）。
+const SKILL_SCENE_LABEL = 'Skill 工坊'
+
+function getSceneLabel(scene: SceneId): string {
+  return SCENE_TABS.find((tab) => tab.id === scene)?.label ?? SKILL_SCENE_LABEL
+}
+
+export function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
   const tasks = useStore((s) => s.tasks)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const activeScene = useStore((s) => s.settings.activeScene)
+  const gallerySceneFilter = useStore((s) => s.gallerySceneFilter)
+  const setGallerySceneFilter = useStore((s) => s.setGallerySceneFilter)
   const isMobile = useIsMobile()
 
   const stats = useMemo(() => {
@@ -102,9 +115,28 @@ function GalleryWorkspaceHeader() {
               <span className="rounded-md border border-[#356c82]/20 bg-[#356c82]/10 px-2 py-0.5 text-[11px] font-medium text-[#356c82] dark:border-[#8ec5d7]/20 dark:bg-[#8ec5d7]/10 dark:text-[#8ec5d7]">
                 {scopeLabel}
               </span>
+              {/* 一键全部开关：当前场景过滤 ↔ 全部场景，文案随状态翻转（桌面与移动共用头部） */}
+              <button
+                type="button"
+                onClick={() => setGallerySceneFilter(gallerySceneFilter === 'all' ? activeScene : 'all')}
+                title={gallerySceneFilter === 'all' ? `只看「${getSceneLabel(activeScene)}」场景的任务` : '查看全部场景的任务'}
+                className="shrink-0 rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 transition-colors hover:border-stone-300 hover:bg-stone-100 hover:text-stone-700 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300 dark:hover:bg-white/[0.1] dark:hover:text-stone-100"
+              >
+                {gallerySceneFilter === 'all' ? `仅${getSceneLabel(activeScene)}` : '全部'}
+              </button>
               <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300">
                 {statusLabel}
               </span>
+              {/* 场景设置抽屉入口：仅画廊工作台头部渲染（桌面与移动共用），绑定当前 activeScene */}
+              <button
+                type="button"
+                onClick={onOpenSceneSettings}
+                aria-label="场景设置"
+                title="场景设置"
+                className="ml-auto shrink-0 rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100"
+              >
+                <Settings2 className="h-4 w-4" aria-hidden />
+              </button>
             </div>
             {searchQuery.trim() ? (
               <p className="mt-1 truncate text-xs text-stone-500 dark:text-stone-400">
@@ -143,9 +175,12 @@ export default function App() {
   const promptReverseSource = useStore((s) => s.promptReverseSource)
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
+  const activeScene = useStore((s) => s.settings.activeScene)
   const isMobile = useIsMobile()
   // composeOpen 由 Task 5 的 MobileComposeSheet 消费；setComposeOpen 由 FAB 触发。
   const [composeOpen, setComposeOpen] = useState(false)
+  // 场景设置抽屉：从画廊工作台头部齿轮打开，始终绑定当前 activeScene。
+  const [sceneSettingsOpen, setSceneSettingsOpen] = useState(false)
   useDockerApiUrlMigrationNotice()
   useGlobalClickSuppression()
 
@@ -217,12 +252,6 @@ export default function App() {
               activeProfileId: presetIds.has(current.settings.activeProfileId)
                 ? current.settings.activeProfileId
                 : defaultPresetId ?? [...presetIds][0],
-              agentTextProfileId: current.settings.agentTextProfileId && presetIds.has(current.settings.agentTextProfileId)
-                ? current.settings.agentTextProfileId
-                : current.settings.profiles.find((profile) => presetIds.has(profile.id) && isAgentTextApiProfile(profile))?.id ?? null,
-              agentImageProfileId: current.settings.agentImageProfileId && presetIds.has(current.settings.agentImageProfileId)
-                ? current.settings.agentImageProfileId
-                : defaultPresetId ?? [...presetIds][0],
             })
           : current.settings
         current.setSettings(await applyUrlSettings(settings))
@@ -266,18 +295,9 @@ export default function App() {
                   <EngineWorkspace />
                 </Suspense>
               </>
-            ) : appMode === 'agent' ? (
-              <div className="safe-area-x">
-                <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-                  智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
-                </div>
-                <Suspense fallback={null}>
-                  <AgentWorkspace />
-                </Suspense>
-              </div>
             ) : (
               <div className="safe-area-x max-w-7xl mx-auto">
-                <GalleryWorkspaceHeader />
+                <GalleryWorkspaceHeader onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
                 <SearchBar />
                 {filterFavorite && !activeFavoriteCollectionId ? (
                   <Suspense fallback={null}>
@@ -295,19 +315,15 @@ export default function App() {
       ) : (
         <>
           <Header />
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : appMode === 'agent' ? '智能体工作台' : '画廊'}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : '画廊'}>
             {appMode === 'engine' ? (
               <Suspense fallback={<div className="min-h-[320px]" />}>
                 <EngineWorkspace />
               </Suspense>
-            ) : appMode === 'agent' ? (
-              <Suspense fallback={null}>
-                <AgentWorkspace />
-              </Suspense>
             ) : (
               <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">
                 <div className="safe-area-x max-w-7xl mx-auto">
-                  <GalleryWorkspaceHeader />
+                  <GalleryWorkspaceHeader onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
                   <SearchBar />
                   {filterFavorite && !activeFavoriteCollectionId ? (
                     <Suspense fallback={null}>
@@ -336,7 +352,7 @@ export default function App() {
       {/* 模态层：移动/桌面两端共用，保持在 Suspense 里；崩溃只炸单个模态不炸整页。
           key 随活动模态变化：切换查看对象时重置错误态，不让上一个崩溃污染下一个。 */}
       <ErrorBoundary
-        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (promptReverseSource ? 'prompt-reverse' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : 'none')}
+        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (promptReverseSource ? 'prompt-reverse' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : null) ?? (sceneSettingsOpen ? 'scene-settings' : null) ?? 'none'}
         sectionLabel="弹窗"
       >
         <Suspense fallback={null}>
@@ -350,6 +366,7 @@ export default function App() {
           {promptReverseSource ? <PromptReverseModal /> : null}
           {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}
           {isManageCollectionsModalOpen ? <ManageCollectionsModal /> : null}
+          {sceneSettingsOpen ? <SceneSettingsDrawer scene={activeScene} onClose={() => setSceneSettingsOpen(false)} /> : null}
         </Suspense>
       </ErrorBoundary>
       <Toast />

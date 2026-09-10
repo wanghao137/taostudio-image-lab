@@ -18,6 +18,7 @@ const defaultConfig = {
   stateFile: 'docs/upstream-upgrade-state.json',
   reportFile: 'docs/upstream-upgrade-report.md',
   preservePaths: [],
+  removedPaths: [],
 }
 
 const args = process.argv.slice(2)
@@ -103,6 +104,7 @@ function config() {
       ref: readOption('--ref', userConfig.upstream?.ref ?? defaultConfig.upstream.ref),
     },
     preservePaths: userConfig.preservePaths ?? defaultConfig.preservePaths,
+    removedPaths: userConfig.removedPaths ?? defaultConfig.removedPaths,
   }
 }
 
@@ -384,6 +386,7 @@ function mergeTextFiles(localPath, basePath, upstreamPath, cwd = projectRoot) {
 
 function createPlan(cfg, baseDir, upstreamDir, localRoot = projectRoot) {
   const isPreserved = createPreserveMatcher(cfg.preservePaths)
+  const isRemoved = createPreserveMatcher(cfg.removedPaths ?? [])
   const baseFiles = new Set(listFiles(baseDir))
   const upstreamFiles = new Set(listFiles(upstreamDir))
   const allFiles = [...new Set([...baseFiles, ...upstreamFiles])].sort()
@@ -396,6 +399,7 @@ function createPlan(cfg, baseDir, upstreamDir, localRoot = projectRoot) {
     localOnly: [],
     skipped: [],
     preservedUpstreamChanges: [],
+    discardedUpstreamFiles: [],
     conflicts: [],
     dependencyMetadataChanged: false,
   }
@@ -470,6 +474,12 @@ function createPlan(cfg, baseDir, upstreamDir, localRoot = projectRoot) {
     const upstream = readBuffer(upstreamPath)
     const local = readBuffer(localPath)
     const upstreamChanged = !sameBuffer(base, upstream)
+
+    if (isRemoved(rel)) {
+      // removedPaths 命中：丢弃上游版本，不写入本仓；仅在上游相对基线有变化时记录待 ack。
+      if (upstreamChanged) report.discardedUpstreamFiles.push(rel)
+      continue
+    }
 
     if (isPreserved(rel)) {
       report.skipped.push(rel)
@@ -664,6 +674,7 @@ function writeReport(filePath, report) {
     renderList('Deleted upstream files', report.deleted),
     renderList('Local-only files left unchanged', report.localOnly),
     renderList('Preserved files changed upstream', report.preservedUpstreamChanges),
+    renderList('Removed paths (removedPaths) discarded from upstream', (report.discardedUpstreamFiles ?? []).map((item) => `removedPaths 命中：已丢弃上游 ${item}`)),
     renderList('Conflicts', report.conflicts),
   ].join('\n')
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
@@ -681,6 +692,7 @@ function printSummary(report) {
   console.log(`- deleted: ${report.deleted.length}`)
   console.log(`- local-only: ${report.localOnly.length}`)
   console.log(`- preserved but changed upstream: ${report.preservedUpstreamChanges.length}`)
+  console.log(`- discarded by removedPaths: ${report.discardedUpstreamFiles.length}`)
   console.log(`- conflicts: ${report.conflicts.length}`)
   console.log(`- dry run: ${report.dryRun ? 'yes' : 'no'}`)
   if (report.dryRun) {
@@ -698,6 +710,10 @@ function printSummary(report) {
   if (report.preservedUpstreamChanges.length) {
     console.log('- preserved files changed upstream:')
     for (const file of report.preservedUpstreamChanges) console.log(`  - ${file}`)
+  }
+  if (report.discardedUpstreamFiles.length) {
+    console.log('- removedPaths 命中（上游版本已丢弃）:')
+    for (const file of report.discardedUpstreamFiles) console.log(`  - removedPaths 命中：已丢弃上游 ${file}`)
   }
   if (report.conflicts.length) {
     console.log('- conflicts:')
@@ -720,6 +736,7 @@ function currentGitContext() {
 function requiredAcknowledgements(report) {
   return [...new Set([
     ...report.preservedUpstreamChanges,
+    ...(report.discardedUpstreamFiles ?? []),
     ...report.conflicts.map((conflict) => conflict.path),
   ])].sort()
 }
@@ -845,7 +862,7 @@ Options:
   --dry-run          Fetch and classify the three-way upgrade without editing project files.
   --write-conflicts  Apply clean changes and write text conflict markers for an explicit migration.
   --finalize         Finalize a resolved pending migration and update the upstream state file.
-  --acknowledge <p>  Explicitly accept one preserved or conflicted path (repeatable).
+  --acknowledge <p>  Explicitly accept one preserved path, removedPaths discard, or conflicted path (repeatable).
   --install          Run npm install after a clean apply or during finalize.
   --verify           Run lint, tests, and build. Required before advancing the baseline.
   --allow-dirty      Allow operation with a dirty worktree. Use only after inspecting local changes.
@@ -901,7 +918,7 @@ async function main() {
   printSummary(report)
 
   if (hasFlag('--dry-run')) {
-    if (report.conflicts.length || report.preservedUpstreamChanges.length) process.exitCode = 2
+    if (report.conflicts.length || report.preservedUpstreamChanges.length || report.discardedUpstreamFiles.length) process.exitCode = 2
     return
   }
 
@@ -911,7 +928,9 @@ async function main() {
   }
 
   const writeConflicts = hasFlag('--write-conflicts')
-  const requiresAttention = report.conflicts.length > 0 || report.preservedUpstreamChanges.length > 0
+  const requiresAttention = report.conflicts.length > 0
+    || report.preservedUpstreamChanges.length > 0
+    || report.discardedUpstreamFiles.length > 0
   writeReport(path.join(projectRoot, cfg.reportFile), report)
   if (requiresAttention && !writeConflicts) {
     throw new Error('Upgrade requires manual conflict/preserved-file review. No project files were changed. Re-run with --write-conflicts only on an isolated migration branch.')
@@ -948,7 +967,7 @@ async function main() {
   writeJson(pendingPath, appliedPending)
 
   if (requiresAttention) {
-    throw new Error(`Applied clean changes; ${report.conflicts.length} conflict(s) and ${report.preservedUpstreamChanges.length} preserved-file audit item(s) remain. Resolve and acknowledge them, then run --finalize --install --verify.`)
+    throw new Error(`Applied clean changes; ${report.conflicts.length} conflict(s), ${report.preservedUpstreamChanges.length} preserved-file audit item(s), and ${report.discardedUpstreamFiles.length} removedPaths discard(s) remain. Resolve and acknowledge them, then run --finalize --install --verify.`)
   }
 
   const verification = runVerification()

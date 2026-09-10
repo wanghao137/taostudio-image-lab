@@ -14,6 +14,8 @@ import {
   getActiveApiProfile,
   getDefaultOpenAIModel,
   getPromptReverseApiProfile,
+  getSceneImageApiProfile,
+  getSceneTextApiProfileResolution,
   getTextApiProfileResolution,
   isManagedDefaultOpenAIModel,
   getCustomProviderDefinition,
@@ -1828,18 +1830,6 @@ describe('custom providers', () => {
     expect(profile.baseUrl).toBe('')
   })
 
-  it('enables Agent submit auto scroll by default', () => {
-    expect(DEFAULT_SETTINGS.agentScrollToBottomAfterSubmit).toBe(true)
-    expect(normalizeSettings({}).agentScrollToBottomAfterSubmit).toBe(true)
-    expect(normalizeSettings({ agentScrollToBottomAfterSubmit: false }).agentScrollToBottomAfterSubmit).toBe(false)
-  })
-
-  it('enables Agent math formatting prompt by default', () => {
-    expect(DEFAULT_SETTINGS.agentMathFormattingPrompt).toBe(true)
-    expect(normalizeSettings({}).agentMathFormattingPrompt).toBe(true)
-    expect(normalizeSettings({ agentMathFormattingPrompt: false }).agentMathFormattingPrompt).toBe(false)
-  })
-
   it('disables prompt rewrite allowance by default', () => {
     expect(DEFAULT_SETTINGS.allowPromptRewrite).toBe(false)
     expect(normalizeSettings({}).allowPromptRewrite).toBe(false)
@@ -1906,51 +1896,27 @@ describe('getPromptReverseApiProfile', () => {
   const responsesProfile = createDefaultOpenAIProfile({ id: 'resp-profile', apiMode: 'responses' })
   const imagesProfile = createDefaultOpenAIProfile({ id: 'img-profile', apiMode: 'images' })
 
-  it('agent 模式开启时优先返回 Agent 文本配置', () => {
+  it('跟随全局 textApiProfileId 的显式选择', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'img-profile',
-      agentApiConfigMode: 'native',
-      agentTextProfileId: 'resp-profile',
-    })
-    expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
-  })
-
-  it('agent 文本配置优先于全局 textApiProfileId 显式选择', () => {
-    const settings = normalizeSettings({
-      profiles: [imagesProfile, responsesProfile],
-      activeProfileId: 'img-profile',
-      agentApiConfigMode: 'native',
-      agentTextProfileId: 'resp-profile',
       textApiProfileId: 'resp-profile',
     })
-    // 两者一致时无法区分，此处用不同 profile 锁定优先级语义
-    const another = createDefaultOpenAIProfile({ id: 'resp-profile-2', apiMode: 'responses' })
-    const settingsAmbiguous = normalizeSettings({
-      profiles: [imagesProfile, responsesProfile, another],
-      activeProfileId: 'img-profile',
-      agentApiConfigMode: 'native',
-      agentTextProfileId: 'resp-profile',
-      textApiProfileId: 'resp-profile-2',
-    })
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
-    expect(getPromptReverseApiProfile(settingsAmbiguous)?.id).toBe('resp-profile')
   })
 
-  it('agent 关闭时回退激活 profile（若为 responses 类型）', () => {
+  it('回退激活 profile（若为 responses 类型）', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'resp-profile',
-      agentApiConfigMode: 'off',
     })
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
   })
 
-  it('agent 关闭且激活 profile 是 images 类型时，自动采用唯一可用文本配置', () => {
+  it('激活 profile 是 images 类型时，自动采用唯一可用文本配置', () => {
     const settings = normalizeSettings({
       profiles: [imagesProfile, responsesProfile],
       activeProfileId: 'img-profile',
-      agentApiConfigMode: 'off',
     })
     expect(getPromptReverseApiProfile(settings)?.id).toBe('resp-profile')
   })
@@ -2025,5 +1991,98 @@ describe('getTextApiProfileResolution（全局文本能力路由）', () => {
     expect(settings.textApiProfileId).toBeNull()
     // 清回 auto 后按唯一文本配置解析
     expect(getTextApiProfileResolution(settings).profile?.id).toBe('resp-profile')
+  })
+})
+
+describe('场景配置归一化与解析', () => {
+  it('旧 settings 无 scenes 时补全四个场景默认值，activeScene 默认 general', () => {
+    const s = normalizeSettings({ profiles: [createDefaultOpenAIProfile()] })
+    expect(Object.keys(s.scenes).sort()).toEqual(['general', 'portrait', 'skill', 'sticker'])
+    expect(s.scenes.general).toEqual({ imageProfileId: null, textProfileId: null, saveDirectoryName: null, defaults: {} })
+    expect(s.activeScene).toBe('general')
+  })
+
+  it('非法 profile 引用回退 null，合法引用保留（文本引用须为 Responses 型）', () => {
+    const text = { ...createDefaultOpenAIProfile(), id: 'text-1', apiMode: 'responses' as const }
+    const s = normalizeSettings({
+      profiles: [createDefaultOpenAIProfile(), text],
+      scenes: { portrait: { imageProfileId: 'missing-id', textProfileId: text.id, saveDirectoryName: 'F:\\人像' } },
+    })
+    expect(s.scenes.portrait.imageProfileId).toBeNull()
+    expect(s.scenes.portrait.textProfileId).toBe('text-1')
+    expect(s.scenes.portrait.saveDirectoryName).toBe('F:\\人像')
+  })
+
+  it('activeScene 非法值回退 general', () => {
+    expect(normalizeSettings({ activeScene: 'nope' }).activeScene).toBe('general')
+  })
+
+  it('场景 defaults.transparentBackground 归一化保留显式 false（true/缺省/非法值语义不变）', () => {
+    const s = normalizeSettings({
+      scenes: {
+        sticker: { defaults: { transparentBackground: false } },
+        portrait: { defaults: { transparentBackground: true } },
+        skill: { defaults: {} },
+        general: { defaults: { transparentBackground: 'yes' } },
+      },
+    })
+    // 显式 false 必须存活归一化：applySceneDefaults 依赖 === false 关闭 transparent_output
+    expect(s.scenes.sticker.defaults.transparentBackground).toBe(false)
+    expect(s.scenes.portrait.defaults.transparentBackground).toBe(true)
+    expect(s.scenes.skill.defaults.transparentBackground).toBeUndefined()
+    // 非法值仍回 undefined
+    expect(s.scenes.general.defaults.transparentBackground).toBeUndefined()
+  })
+
+  it('getSceneImageApiProfile：场景显式引用优先，且不套用顶层镜像字段', () => {
+    const a = { ...createDefaultOpenAIProfile(), id: 'a', name: 'A', model: 'model-a' }
+    const b = { ...createDefaultOpenAIProfile(), id: 'b', name: 'B', model: 'model-b' }
+    const s = normalizeSettings({
+      profiles: [a, b], activeProfileId: 'a', activeScene: 'sticker',
+      scenes: { sticker: { imageProfileId: 'b' } },
+    })
+    expect(getSceneImageApiProfile(s).id).toBe('b')
+    expect(getSceneImageApiProfile(s).model).toBe('model-b')
+  })
+
+  it('getSceneImageApiProfile：无场景引用时回落全局激活 profile', () => {
+    const s = normalizeSettings({})
+    expect(getSceneImageApiProfile(s).id).toBe(s.activeProfileId)
+  })
+
+  it('getSceneImageApiProfile：回落全局链时保留旧版顶层镜像覆盖（语义不变）', () => {
+    const s = normalizeSettings({})
+    const raw = { ...s, baseUrl: 'https://legacy.example.com/v1', apiKey: 'legacy-key' }
+    const resolved = getSceneImageApiProfile(raw)
+    expect(resolved.baseUrl).toBe('https://legacy.example.com/v1')
+    expect(resolved.apiKey).toBe('legacy-key')
+  })
+
+  it('getSceneTextApiProfileResolution：场景文本引用优先，无引用走全局链', () => {
+    const text = { ...createDefaultOpenAIProfile(), id: 'text-1', apiMode: 'responses' as const }
+    const s = normalizeSettings({
+      profiles: [createDefaultOpenAIProfile(), text],
+      scenes: { skill: { textProfileId: 'text-1' } },
+    })
+    expect(getSceneTextApiProfileResolution(s).profile?.id).toBe('text-1')
+    expect(getSceneTextApiProfileResolution({ ...s, activeScene: 'general' }).resolvedBy).not.toBe('explicit')
+  })
+
+  it('getSceneTextApiProfileResolution：回落全局链时保留旧版顶层镜像覆盖（语义不变）', () => {
+    const text = {
+      ...createDefaultOpenAIProfile(),
+      id: 'text-1', apiMode: 'responses' as const,
+      baseUrl: 'https://profile.example.com/v1', apiKey: 'profile-key', model: 'profile-model',
+    }
+    const s = normalizeSettings({ profiles: [text], activeProfileId: 'text-1' })
+    const raw = {
+      ...s,
+      baseUrl: 'https://legacy.example.com/v1', apiKey: 'legacy-key', model: 'legacy-model', apiMode: 'responses' as const,
+    }
+    const resolved = getSceneTextApiProfileResolution(raw)
+    expect(resolved.resolvedBy).toBe('active')
+    expect(resolved.profile?.baseUrl).toBe('https://legacy.example.com/v1')
+    expect(resolved.profile?.apiKey).toBe('legacy-key')
+    expect(resolved.profile?.model).toBe('legacy-model')
   })
 })

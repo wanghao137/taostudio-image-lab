@@ -21,10 +21,7 @@ function formatTime(value: number) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit' }).format(date).replace(/\//g, '-')
 }
 
-/**
- * 画廊提示词历史下拉：最近 20 条提交记录，点击回填提示词与参数。
- * 之所以不复用 HistoryModal：那个组件与 Agent 会话（重命名/删除/跳转）深度耦合。
- */
+/** 画廊提示词历史下拉：最近 20 条提交记录，点击回填提示词与参数。 */
 export default function PromptHistoryPopover({ onPick, onClose, anchorRef }: PromptHistoryPopoverProps) {
   const promptHistory = useStore((s) => s.promptHistory)
   const clearPromptHistory = useStore((s) => s.clearPromptHistory)

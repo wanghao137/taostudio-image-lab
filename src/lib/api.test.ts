@@ -165,13 +165,12 @@ describe('callImageApi', () => {
       settings: DEFAULT_SETTINGS,
       params: DEFAULT_PARAMS,
       dismissedCodexCliPrompts: [],
-      agentConversations: [],
       favoriteCollections: [],
       defaultFavoriteCollectionId: null,
     })!
 
     await callImageApi({
-      settings: restored.state.settings,
+      settings: restored.settings,
       prompt: 'prompt',
       params: DEFAULT_PARAMS,
       inputImageDataUrls: [],
@@ -212,6 +211,45 @@ describe('callImageApi', () => {
       quality: 'xhigh',
     })
     expect(result.actualParams).toMatchObject({ quality: 'xhigh' })
+  })
+
+  it('routes the request through the scene-referenced profile when the active scene has one', async () => {
+    const sceneProfile = createDefaultOpenAIProfile({
+      id: 'scene-profile',
+      apiKey: 'scene-key',
+      baseUrl: 'https://scene.example.com/v1',
+    })
+    const fallbackProfile = createDefaultOpenAIProfile({
+      id: 'fallback-profile',
+      apiKey: 'fallback-key',
+      baseUrl: 'https://fallback.example.com/v1',
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    await callImageApi({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        profiles: [fallbackProfile, sceneProfile],
+        activeProfileId: fallbackProfile.id,
+        scenes: {
+          ...DEFAULT_SETTINGS.scenes,
+          sticker: { ...DEFAULT_SETTINGS.scenes.sticker, imageProfileId: sceneProfile.id },
+        },
+        activeScene: 'sticker',
+      },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })
+
+    const url = String(fetchMock.mock.calls[0][0])
+    expect(url).toContain('https://scene.example.com/v1')
+    expect(url).not.toContain('fallback.example.com')
   })
 
   it('does not add the prompt rewrite guard on Codex CLI Images API when prompt rewrite is allowed', async () => {

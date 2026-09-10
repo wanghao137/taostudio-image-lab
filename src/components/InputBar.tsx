@@ -1,9 +1,8 @@
-import { lazy, Suspense, useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, type ReactNode } from 'react'
+import { lazy, Suspense, useRef, useEffect, useCallback, useState, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ImageUp, Maximize2, SlidersHorizontal } from 'lucide-react'
 import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks } from '../store'
 import { type TaskRecord } from '../types'
-import { getActiveAgentRounds } from '../lib/agentConversationState'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState } from '../lib/favoriteState'
 import { filterAndSortTasks } from '../lib/taskFilters'
 import {
@@ -17,10 +16,10 @@ import {
   escapeHtml,
   getMentionTagHtml,
 } from '../lib/contentEditableTools'
-import { ensureImageCached, getCachedImage } from '../lib/imageCache'
+import { ensureImageCached } from '../lib/imageCache'
 import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
-import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
+import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
 import {
   ASSET_4K_RATIO_PRESETS,
   getAsset4KRatioSize,
@@ -28,7 +27,6 @@ import {
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { getSafeBoundingClientRect } from '../lib/domRect'
-import { collectAgentRoundOutputImageSlots } from '../lib/agentImageReferences'
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { useTooltip } from '../hooks/useTooltip'
 import { useIsMobile } from '../hooks/useIsMobile'
@@ -102,39 +100,12 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
-type AtImageOption =
-  | { type: 'input'; key: string; label: string; imageId: string; dataUrl: string; imageIndex: number }
-  | { type: 'agent-output'; key: string; label: string; imageId: string; insertText: string }
-
-function agentImageMentionMatches(query: string, label: string) {
-  const normalized = query.trim().toLowerCase()
-  if (!normalized) return true
-  const normalizedLabel = label.toLowerCase()
-  return normalizedLabel.includes(normalized) || normalizedLabel.replace(/^@/, '').includes(normalized)
-}
+type AtImageOption = { type: 'input'; key: string; label: string; imageId: string; dataUrl: string; imageIndex: number }
 
 function AtImageOptionThumb({ option }: { option: AtImageOption }) {
-  const [src, setSrc] = useState(option.type === 'input' ? option.dataUrl : getCachedImage(option.imageId) || '')
-
-  useEffect(() => {
-    if (option.type === 'input') {
-      setSrc(option.dataUrl)
-      return
-    }
-
-    let cancelled = false
-    setSrc(getCachedImage(option.imageId) || '')
-    ensureImageCached(option.imageId).then((url) => {
-      if (!cancelled && url) setSrc(url)
-    })
-    return () => {
-      cancelled = true
-    }
-  }, [option])
-
   return (
     <span className="h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-gray-200/70 bg-gray-100 dark:border-white/[0.08] dark:bg-white/[0.04]">
-      {src && <img src={src} className="h-full w-full object-cover" alt="" />}
+      {option.dataUrl && <img src={option.dataUrl} className="h-full w-full object-cover" alt="" />}
     </span>
   )
 }
@@ -205,18 +176,14 @@ export default function InputBar() {
     setOutputCompressionInput,
     nInput,
     setNInputFocused,
-    activeAgentConversation,
-    activeAgentIsRunning,
     hasSubmitApiConfig,
     canSubmit,
     submitButtonAriaLabel,
     submitTooltipText,
     promptPlaceholder,
     submitCurrentMode,
-    stopActiveAgentResponse,
     activeProfile,
     isFalProvider,
-    agentAutoImageCount,
     moderationDisabled,
     transparentOutputAvailable,
     showTransparentOutputControl,
@@ -250,9 +217,7 @@ export default function InputBar() {
     applyAsset4KRatioPreset,
     nLimitHint,
     hideNLimitHint,
-    clearAgentNHintTouchTimer,
-    showAgentNHint,
-    startAgentNHintTouch,
+    clearNHintTouchTimer,
     handleNInputChange,
     handleNLimitIncreaseAttempt,
     handleFiles,
@@ -592,34 +557,7 @@ export default function InputBar() {
   const qualityHint = useHintTooltip({ enabled: () => settings.codexCli || isFalProvider })
   const cursorPosition = cursorPos
   const visiblePrompt = stripImageMentionMarkers(prompt)
-  // 窄订阅键：轮次产出图只在「任务 outputImages 变化」时才变。
-  // getTasks() 是稳定引用（无效依赖），没有这个键的话图像任务完成
-  // （tasks-only 写入）不会触发 memo 重算，@第N轮图M 提及选项会过期。
-  const agentRoundImageKey = useStore((s) => {
-    const conv = s.agentConversations.find((c) => c.id === s.activeAgentConversationId)
-    if (!conv) return ''
-    return getActiveAgentRounds(conv)
-      .map((r) => r.outputTaskIds.map((id) =>
-        `${id}:${s.tasks.find((t) => t.id === id)?.outputImages?.join(',') ?? ''}`).join('|'))
-      .join('||')
-  })
-  const agentOutputImageOptions = useMemo<AtImageOption[]>(() => {
-    if (!activeAgentConversation) return []
-    return getActiveAgentRounds(activeAgentConversation).flatMap((round) =>
-      collectAgentRoundOutputImageSlots(round, getTasks()).flatMap((imageId, imageIndex) => {
-        if (!imageId) return []
-        const label = `@第${round.index}轮图${imageIndex + 1}`
-        return {
-          type: 'agent-output' as const,
-          key: `agent-output:${round.id}:${imageIndex}:${imageId}`,
-          label,
-          imageId,
-          insertText: label,
-        }
-      }),
-    )
-  }, [activeAgentConversation, agentRoundImageKey])
-  const atImageSourceCount = inputImages.length + agentOutputImageOptions.length
+  const atImageSourceCount = inputImages.length
   const atImageQuery = isCursorInSelectedImageMention(prompt, cursorPosition)
     ? null
     : getAtImageQuery(visiblePrompt, cursorPosition, { length: atImageSourceCount })
@@ -635,7 +573,6 @@ export default function InputBar() {
             imageIndex: index,
           } satisfies AtImageOption))
           .filter((option) => imageMentionMatches(atImageQuery.query, option.imageIndex)),
-        ...agentOutputImageOptions.filter((option) => agentImageMentionMatches(atImageQuery.query, option.label)),
       ]
     : []
   const showAtImageMenu = !atImageMenuDismissed && atImageOptions.length > 0
@@ -652,7 +589,7 @@ export default function InputBar() {
     setAtImageMenuIndex(0)
     if (!query) return
 
-    const mentionText = option.type === 'input' ? getImageMentionLabel(option.imageIndex) : option.insertText
+    const mentionText = getImageMentionLabel(option.imageIndex)
     const nextCursor = query.start + mentionText.length
     if (el) {
       el.focus()
@@ -664,9 +601,7 @@ export default function InputBar() {
       }
     }
 
-    const next = option.type === 'input'
-      ? insertImageMentionAtVisibleRange(prompt, query.start, cursor, option.imageIndex)
-      : insertTextMentionAtVisibleRange(prompt, query.start, cursor, option.insertText)
+    const next = insertImageMentionAtVisibleRange(prompt, query.start, cursor, option.imageIndex)
     isUserInputRef.current = false
     setPrompt(next.prompt)
     window.setTimeout(() => {
@@ -1028,11 +963,12 @@ export default function InputBar() {
       }
 
       const transferredText = e.dataTransfer?.getData('text/plain')
-      
-      const imageIds = transferredText?.startsWith('agent-images:') 
-        ? transferredText.slice('agent-images:'.length).split(',') 
-        : transferredText?.startsWith('agent-image:')
-        ? [transferredText.slice('agent-image:'.length)]
+
+      // 任务卡拖拽载荷（画廊任务 → 参考图）
+      const imageIds = transferredText?.startsWith('task-images:')
+        ? transferredText.slice('task-images:'.length).split(',')
+        : transferredText?.startsWith('task-image:')
+        ? [transferredText.slice('task-image:'.length)]
         : []
 
       if (imageIds.length > 0) {
@@ -1762,15 +1698,12 @@ export default function InputBar() {
       </label>
       <label
         className="relative flex flex-col gap-0.5"
-        onMouseEnter={showAgentNHint}
         onMouseLeave={hideNLimitHint}
-        onTouchStart={startAgentNHintTouch}
-        onTouchEnd={clearAgentNHintTouchTimer}
+        onTouchEnd={clearNHintTouchTimer}
         onTouchCancel={() => {
-          clearAgentNHintTouchTimer()
+          clearNHintTouchTimer()
           hideNLimitHint()
         }}
-        onClick={showAgentNHint}
       >
         <span className="text-gray-400 dark:text-gray-500 ml-1">数量</span>
         <input
@@ -1791,15 +1724,10 @@ export default function InputBar() {
               handleNLimitIncreaseAttempt(() => e.preventDefault())
             }
           }}
-          disabled={agentAutoImageCount}
-          type={agentAutoImageCount ? 'text' : 'number'}
-          min={agentAutoImageCount ? undefined : 1}
-          max={agentAutoImageCount ? undefined : outputImageLimit}
-          className={`px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] focus:outline-none text-xs transition-all duration-200 shadow-sm ${
-            agentAutoImageCount
-              ? 'bg-gray-100/50 dark:bg-white/[0.05] opacity-50 cursor-not-allowed'
-              : 'bg-white/50 dark:bg-white/[0.03]'
-          }`}
+          type="number"
+          min={1}
+          max={outputImageLimit}
+          className={`px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] focus:outline-none text-xs transition-all duration-200 shadow-sm bg-white/50 dark:bg-white/[0.03]`}
         />
         <ButtonTooltip visible={nLimitHint.visible} text={nLimitHintText} />
         <ButtonTooltip visible={streamConcurrentByN && !nLimitHint.visible} text="数量大于 1 时会将多图生成拆分为并发单图" />
@@ -2192,7 +2120,6 @@ export default function InputBar() {
                     >
                       <AtImageOptionThumb option={option} />
                       <span className="min-w-0 flex-1 truncate font-medium">{option.label}</span>
-                      {option.type === 'agent-output' && <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-white/[0.06] dark:text-gray-400">历史</span>}
                     </button>
                   ))}
                 </div>
@@ -2390,28 +2317,20 @@ export default function InputBar() {
                 onMouseEnter={() => setSubmitHover(true)}
                 onMouseLeave={() => setSubmitHover(false)}
               >
-                <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig) && submitHover} text={submitTooltipText} />
+                <ButtonTooltip visible={!hasSubmitApiConfig && submitHover} text={submitTooltipText} />
                 <button
-                  onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
-                  disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
+                  onClick={() => hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
+                  disabled={hasSubmitApiConfig ? !canSubmit : false}
                   className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
-                    activeAgentIsRunning
-                      ? 'bg-red-500 text-white hover:bg-red-600'
-                      : !hasSubmitApiConfig
+                    !hasSubmitApiConfig
                       ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
                       : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                   }`}
                   aria-label={submitButtonAriaLabel}
                 >
-                  {activeAgentIsRunning ? (
-                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                      <rect x="7" y="7" width="10" height="10" rx="1.5" />
-                    </svg>
-                  ) : (
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                  )}
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
                 </button>
               </div>
             </div>
@@ -2498,29 +2417,21 @@ export default function InputBar() {
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >
-                  <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig) && submitHover} text={submitTooltipText} />
+                  <ButtonTooltip visible={!hasSubmitApiConfig && submitHover} text={submitTooltipText} />
                   <button
-                    onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
-                    disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
+                    onClick={() => hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
+                    disabled={hasSubmitApiConfig ? !canSubmit : false}
                     aria-label={submitButtonAriaLabel}
                     className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm ${
-                      activeAgentIsRunning
-                        ? 'bg-red-500 text-white hover:bg-red-600'
-                        : !hasSubmitApiConfig
+                      !hasSubmitApiConfig
                         ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
                         : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
                   >
-                    {activeAgentIsRunning ? (
-                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                        <rect x="7" y="7" width="10" height="10" rx="1.5" />
-                      </svg>
-                    ) : (
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                      </svg>
-                    )}
-                    {activeAgentIsRunning ? '停止生成' : maskDraft ? '遮罩编辑' : '生成图像'}
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                    </svg>
+                    {maskDraft ? '遮罩编辑' : '生成图像'}
                   </button>
                 </div>
               </div>

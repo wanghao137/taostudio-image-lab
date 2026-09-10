@@ -1,5 +1,4 @@
 import type {
-  AgentApiConfigMode,
   ApiMode,
   ApiProfile,
   ApiProvider,
@@ -14,8 +13,10 @@ import type {
   CustomProviderTemplate,
   LocalAutoSaveSettings,
   ReferenceImageEditAction,
+  SceneId,
+  SceneSettings,
 } from '../types'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
+import { DEFAULT_STREAM_PARTIAL_IMAGES, DEFAULT_ZIP_DOWNLOAD_ROUTES, SCENE_ID_VALUES, ZIP_DOWNLOAD_ROUTE_VALUES } from '../types'
 import { customProviderSupportsNativeTransparentBackground } from './customProviderCapabilities'
 import { shouldUseApiProxy } from './devProxy'
 import { DEFAULT_IMAGES_MODEL } from './imageModels'
@@ -176,13 +177,6 @@ function getDefaultStreamImages(provider: ApiProvider, apiMode: ApiMode): boolea
 
 export { normalizeReasoningEffort, normalizeStreamPartialImages } from './defaultApiUrl'
 
-export function normalizeAgentMaxToolRounds(value: unknown, fallback: number | undefined = DEFAULT_AGENT_MAX_TOOL_ROUNDS): number {
-  const fallbackValue = fallback ?? DEFAULT_AGENT_MAX_TOOL_ROUNDS
-  const numeric = typeof value === 'number' ? value : Number(value)
-  if (!Number.isFinite(numeric)) return fallbackValue
-  return Math.min(50, Math.max(1, Math.trunc(numeric)))
-}
-
 export function normalizeLocalAutoSaveSettings(value: unknown): LocalAutoSaveSettings {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
@@ -237,11 +231,7 @@ function normalizeProviderOrder(value: unknown, customProviders: CustomProviderD
   return [...ordered, ...providerIds.filter((id) => !ordered.includes(id))]
 }
 
-function normalizeAgentApiConfigMode(value: unknown): AgentApiConfigMode {
-  return value === 'native' || value === 'hybrid' ? value : 'off'
-}
-
-export function isAgentTextApiProfile(profile: ApiProfile): boolean {
+export function isTextCapableApiProfile(profile: ApiProfile): boolean {
   return profile.provider === 'openai' && profile.apiMode === 'responses'
 }
 
@@ -803,19 +793,38 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     ? record.activeProfileId
     : profiles[0].id
   const active = profiles.find((p) => p.id === activeProfileId) ?? profiles[0]
-  const agentApiConfigMode = normalizeAgentApiConfigMode(record.agentApiConfigMode)
-  const firstAgentTextProfile = profiles.find(isAgentTextApiProfile)
-  const agentTextProfileId = typeof record.agentTextProfileId === 'string' && profiles.some((p) => p.id === record.agentTextProfileId && isAgentTextApiProfile(p))
-    ? record.agentTextProfileId
-    : (isAgentTextApiProfile(active) ? active.id : firstAgentTextProfile?.id ?? null)
-  const agentImageProfileId = typeof record.agentImageProfileId === 'string' && profiles.some((p) => p.id === record.agentImageProfileId)
-    ? record.agentImageProfileId
-    : active.id
   // 文本路由只校验显式值有效性（须指向 Responses 类型 profile），缺省/无效一律回到 auto；
   // 不在这里固化任何推导结果，否则「跟随激活配置」的语义会被旧推导值覆盖失效。
-  const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isAgentTextApiProfile(p))
+  const textApiProfileId = typeof record.textApiProfileId === 'string' && profiles.some((p) => p.id === record.textApiProfileId && isTextCapableApiProfile(p))
     ? record.textApiProfileId
     : null
+  // 场景配置：只校验显式引用有效性（生图任意 profile / 文本须 Responses 型），
+  // 缺失或非法一律回默认；不固化推导值，不迁移用户数据。
+  const sceneProfileIds = new Set(profiles.map((p) => p.id))
+  const textCapableIds = new Set(profiles.filter(isTextCapableApiProfile).map((p) => p.id))
+  const normalizeSceneSettings = (raw: unknown): SceneSettings => {
+    const rec = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+    const defaults = rec.defaults && typeof rec.defaults === 'object' ? rec.defaults as Record<string, unknown> : {}
+    return {
+      imageProfileId: typeof rec.imageProfileId === 'string' && sceneProfileIds.has(rec.imageProfileId) ? rec.imageProfileId : null,
+      textProfileId: typeof rec.textProfileId === 'string' && textCapableIds.has(rec.textProfileId) ? rec.textProfileId : null,
+      saveDirectoryName: typeof rec.saveDirectoryName === 'string' && rec.saveDirectoryName ? rec.saveDirectoryName : null,
+      defaults: {
+        ratio: typeof defaults.ratio === 'string' ? defaults.ratio : undefined,
+        tier: defaults.tier === '1K' || defaults.tier === '2K' || defaults.tier === '4K' ? defaults.tier : undefined,
+        // 显式 false 必须原样保留：applySceneDefaults 依赖 === false 关闭 transparent_output，
+        // 折叠成 undefined 会让持久化后的显式 false 默认值失效。非法值仍回 undefined。
+        transparentBackground: typeof defaults.transparentBackground === 'boolean' ? defaults.transparentBackground : undefined,
+      },
+    }
+  }
+  const rawScenes = record.scenes && typeof record.scenes === 'object' ? record.scenes as Record<string, unknown> : {}
+  const scenes = Object.fromEntries(
+    SCENE_ID_VALUES.map((id) => [id, normalizeSceneSettings(rawScenes[id])]),
+  ) as Record<SceneId, SceneSettings>
+  const activeScene = (SCENE_ID_VALUES as readonly string[]).includes(record.activeScene as string)
+    ? record.activeScene as SceneId
+    : 'general'
 
   return {
     baseUrl: active.baseUrl,
@@ -839,32 +848,21 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     referenceImageEditAction: normalizeReferenceImageEditAction(record.referenceImageEditAction),
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
     localAutoSave: normalizeLocalAutoSaveSettings(record.localAutoSave),
-    agentScrollToBottomAfterSubmit: typeof record.agentScrollToBottomAfterSubmit === 'boolean' ? record.agentScrollToBottomAfterSubmit : true,
-    agentMaxToolRounds: normalizeAgentMaxToolRounds(record.agentMaxToolRounds),
-    agentWebSearch: typeof record.agentWebSearch === 'boolean' ? record.agentWebSearch : false,
-    agentMathFormattingPrompt: typeof record.agentMathFormattingPrompt === 'boolean' ? record.agentMathFormattingPrompt : true,
-    agentApiConfigMode,
-    agentTextProfileId,
-    agentImageProfileId,
     textApiProfileId,
     profiles,
     activeProfileId,
+    scenes,
+    activeScene,
   }
 }
 
-export function getAgentTextApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
-  const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode === 'off') return getActiveApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId) ?? null
-}
-
+/**
+ * 旧版全局链文本解析（等价 getTextApiProfile）。反推 UI 已改走
+ * getSceneTextApiProfileResolution（场景覆盖 > 全局链）；保留导出供既有测试，
+ * 新调用方请使用 getSceneTextApiProfileResolution。
+ */
 export function getPromptReverseApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
-  const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode !== 'off') {
-    const textProfile = normalized.profiles.find((profile) => profile.id === normalized.agentTextProfileId)
-    if (textProfile && isAgentTextApiProfile(textProfile)) return textProfile
-  }
-  return getTextApiProfile(normalized)
+  return getTextApiProfile(settings)
 }
 
 export interface TextApiResolution {
@@ -886,9 +884,12 @@ export function getTextApiProfileResolution(settings: Partial<AppSettings> | unk
     const explicit = normalized.profiles.find((profile) => profile.id === normalized.textApiProfileId)
     if (explicit) return { profile: explicit, resolvedBy: 'explicit', reason: null }
   }
-  const active = getActiveApiProfile(normalized)
-  if (isAgentTextApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
-  const textProfiles = normalized.profiles.filter(isAgentTextApiProfile)
+  // active 分支传原始 settings 给 getActiveApiProfile：normalize 会把顶层镜像字段折叠成激活
+  // profile 值，先 normalize 再取激活配置会丢旧版 URL 参数覆盖语义（getActiveApiProfile 内部
+  // 自会 normalize）。对已归一化输入（全部既有调用方）两者结果完全一致。
+  const active = getActiveApiProfile(settings)
+  if (isTextCapableApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
+  const textProfiles = normalized.profiles.filter(isTextCapableApiProfile)
   if (textProfiles.length === 1) return { profile: textProfiles[0], resolvedBy: 'sole', reason: null }
   return { profile: null, resolvedBy: null, reason: textProfiles.length === 0 ? 'none' : 'ambiguous' }
 }
@@ -897,10 +898,35 @@ export function getTextApiProfile(settings: Partial<AppSettings> | unknown): Api
   return getTextApiProfileResolution(settings).profile
 }
 
-export function getAgentImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
+/**
+ * 场景生图解析：场景显式引用优先，干净返回该 profile 本体（不套 getActiveApiProfile
+ * 的旧版顶层镜像字段覆盖——顶层 baseUrl/apiKey/model 只描述全局激活配置，对场景引用
+ * 无意义）；无引用或引用失效时回落全局激活链（传入原始 settings，保留旧版顶层镜像
+ * 覆盖，语义与直接调用 getActiveApiProfile 完全一致）。
+ */
+export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
   const normalized = normalizeSettings(settings)
-  if (normalized.agentApiConfigMode !== 'hybrid') return getAgentTextApiProfile(normalized)
-  return normalized.profiles.find((profile) => profile.id === normalized.agentImageProfileId) ?? null
+  const sceneProfileId = normalized.scenes[normalized.activeScene].imageProfileId
+  if (sceneProfileId) {
+    const profile = normalized.profiles.find((p) => p.id === sceneProfileId)
+    if (profile) return profile
+  }
+  return getActiveApiProfile(settings)
+}
+
+/**
+ * 场景文本解析：场景显式引用优先，否则走全局 textApiProfileId 自动链（语义不变）。
+ * 回落分支传原始 settings 而非 normalized：normalize 会用激活 profile 值覆盖顶层
+ * 镜像字段（baseUrl/apiKey/model），丢掉旧版 URL 参数覆盖语义（与 getSceneImageApiProfile 一致）。
+ */
+export function getSceneTextApiProfileResolution(settings: Partial<AppSettings> | unknown): TextApiResolution {
+  const normalized = normalizeSettings(settings)
+  const sceneTextProfileId = normalized.scenes[normalized.activeScene].textProfileId
+  if (sceneTextProfileId) {
+    const profile = normalized.profiles.find((p) => p.id === sceneTextProfileId)
+    if (profile) return { profile, resolvedBy: 'explicit', reason: null }
+  }
+  return getTextApiProfileResolution(settings)
 }
 
 export function getCustomProviderDefinition(settings: Partial<AppSettings> | unknown, provider: ApiProvider): CustomProviderDefinition | null {
@@ -1412,11 +1438,4 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
   localAutoSave: DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
-  agentScrollToBottomAfterSubmit: true,
-  agentMaxToolRounds: DEFAULT_AGENT_MAX_TOOL_ROUNDS,
-  agentWebSearch: false,
-  agentMathFormattingPrompt: true,
-  agentApiConfigMode: 'off',
-  agentTextProfileId: null,
-  agentImageProfileId: null,
 })

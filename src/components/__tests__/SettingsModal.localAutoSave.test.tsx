@@ -22,7 +22,7 @@ function setDesktopDirectoryPickerSupport() {
 
 describe('SettingsModal local auto-save settings', () => {
   const originalSelectLocalAutoSaveDirectory = useStore.getState().selectLocalAutoSaveDirectory
-  const originalAuthorizeLocalAutoSaveDirectory = useStore.getState().authorizeLocalAutoSaveDirectory
+  const originalAuthorizeAllLocalAutoSaveDirectories = useStore.getState().authorizeAllLocalAutoSaveDirectories
   const originalRetryPendingLocalAutoSaves = useStore.getState().retryPendingLocalAutoSaves
 
   beforeEach(() => {
@@ -42,7 +42,7 @@ describe('SettingsModal local auto-save settings', () => {
       tasks: [],
       showToast: vi.fn(),
       selectLocalAutoSaveDirectory: originalSelectLocalAutoSaveDirectory,
-      authorizeLocalAutoSaveDirectory: originalAuthorizeLocalAutoSaveDirectory,
+      authorizeAllLocalAutoSaveDirectories: originalAuthorizeAllLocalAutoSaveDirectories,
       retryPendingLocalAutoSaves: originalRetryPendingLocalAutoSaves,
     })
   })
@@ -140,12 +140,12 @@ describe('SettingsModal local auto-save settings', () => {
     })
   }, 15_000)
 
-  it('reauthorizes the saved directory before retrying without selecting it again', async () => {
-    const authorizeLocalAutoSaveDirectory = vi.fn(async () => true)
+  it('reauthorizes all saved directories (global + scene) before retrying without selecting again', async () => {
+    const authorizeAllLocalAutoSaveDirectories = vi.fn(async () => true)
     const retryPendingLocalAutoSaves = vi.fn(async () => undefined)
     const selectLocalAutoSaveDirectory = vi.fn(async () => undefined)
     useStore.setState({
-      authorizeLocalAutoSaveDirectory,
+      authorizeAllLocalAutoSaveDirectories,
       retryPendingLocalAutoSaves,
       selectLocalAutoSaveDirectory,
       settings: normalizeSettings({
@@ -172,7 +172,7 @@ describe('SettingsModal local auto-save settings', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新授权并补保存（1）' }))
 
     await waitFor(() => {
-      expect(authorizeLocalAutoSaveDirectory).toHaveBeenCalledTimes(1)
+      expect(authorizeAllLocalAutoSaveDirectories).toHaveBeenCalledTimes(1)
       expect(retryPendingLocalAutoSaves).toHaveBeenCalledTimes(1)
       expect(selectLocalAutoSaveDirectory).not.toHaveBeenCalled()
     })

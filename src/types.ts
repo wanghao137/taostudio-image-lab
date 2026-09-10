@@ -3,8 +3,7 @@
 export type ApiMode = 'images' | 'responses'
 export const REASONING_EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ReasoningEffort = typeof REASONING_EFFORT_VALUES[number]
-export type AppMode = 'gallery' | 'agent' | 'engine'
-export type AgentApiConfigMode = 'off' | 'native' | 'hybrid'
+export type AppMode = 'gallery' | 'engine'
 export type ReferenceImageEditAction = 'ask' | 'replace-reference' | 'add-mask'
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
@@ -12,7 +11,6 @@ export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'image-context-menu-all',
   'task-detail-all',
   'task-detail-partial',
-  'agent-round-all',
 ] as const
 export type ZipDownloadRoute = typeof ZIP_DOWNLOAD_ROUTE_VALUES[number]
 export const DEFAULT_ZIP_DOWNLOAD_ROUTES: ZipDownloadRoute[] = ['task-selection', 'favorite-collection-selection']
@@ -20,7 +18,6 @@ export type BuiltInApiProvider = 'openai' | 'sb2api-async' | 'fal'
 export type ApiProvider = BuiltInApiProvider | string
 export type CustomProviderTemplate = 'http-image'
 export const DEFAULT_STREAM_PARTIAL_IMAGES = 1
-export const DEFAULT_AGENT_MAX_TOOL_ROUNDS = 15
 
 export type CustomProviderRequestMethod = 'GET' | 'POST'
 export type CustomProviderContentType = 'json' | 'multipart'
@@ -123,6 +120,27 @@ export interface LocalAutoSaveTaskState {
   error?: string
 }
 
+export type SceneId = 'portrait' | 'general' | 'sticker' | 'skill'
+export const SCENE_ID_VALUES = ['portrait', 'general', 'sticker', 'skill'] as const
+
+export interface SceneDefaults {
+  /** COMMON_IMAGE_RATIOS 的比例 key（如 '3:4'、'1:1'）；缺省不覆盖 */
+  ratio?: string
+  /** 与 src/lib/size.ts 的 SizeTier 对齐 */
+  tier?: '1K' | '2K' | '4K'
+  transparentBackground?: boolean
+}
+
+export interface SceneSettings {
+  /** 场景生图配置引用：null = 跟随全局 activeProfileId */
+  imageProfileId: string | null
+  /** 场景文本模型引用：null = 走全局 textApiProfileId 自动链 */
+  textProfileId: string | null
+  /** 场景独立保存目录名（句柄存 IndexedDB sceneDirectory:<id>）；null = 跟随全局目录 */
+  saveDirectoryName?: string | null
+  defaults: SceneDefaults
+}
+
 export interface AppSettings {
   /** 旧版单配置字段：保留用于导入/查询参数兼容，实际请求以 active profile 为准 */
   baseUrl: string
@@ -146,18 +164,13 @@ export interface AppSettings {
   referenceImageEditAction: ReferenceImageEditAction
   zipDownloadRoutes: ZipDownloadRoute[]
   localAutoSave: LocalAutoSaveSettings
-  agentScrollToBottomAfterSubmit: boolean
-  agentMaxToolRounds: number
-  agentWebSearch: boolean
-  agentMathFormattingPrompt: boolean
-  agentApiConfigMode: AgentApiConfigMode
-  agentTextProfileId?: string | null
-  agentImageProfileId?: string | null
   /** 全局文本能力路由（反推/标题等文本类功能）：null=自动（跟随生图配置或唯一可用文本配置），
    *  指向 Responses 类型 profile 则显式使用它。归一化只校验有效性，不固化推导值。 */
   textApiProfileId?: string | null
   profiles: ApiProfile[]
   activeProfileId: string
+  scenes: Record<SceneId, SceneSettings>
+  activeScene: SceneId
 }
 
 // ===== 任务参数 =====
@@ -374,8 +387,10 @@ export interface TaskRecord {
   isFavorite?: boolean
   /** 所属收藏夹 ID 列表 */
   favoriteCollectionIds?: string[]
-  /** 来源模式：画廊 / Agent */
-  sourceMode?: AppMode
+  /** 来源模式：画廊 / 引擎；旧数据可能为 'agent'（智能体 UI 已移除，仅作存量容错） */
+  sourceMode?: AppMode | 'agent'
+  /** 提交时所属场景；旧任务无此字段视为 general */
+  sceneId?: SceneId
   /** Agent 对话 ID */
   agentConversationId?: string
   /** Agent 轮次 ID */

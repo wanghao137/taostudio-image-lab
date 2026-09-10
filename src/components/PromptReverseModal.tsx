@@ -3,7 +3,7 @@ import { createInputImageFromFile, deleteImageIfUnreferenced, useStore } from '.
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { ensureImageCached } from '../lib/imageCache'
 import { resizeImageHighQuality } from '../lib/imageResizer'
-import { getPromptReverseApiProfile, getTextApiProfileResolution } from '../lib/apiProfiles'
+import { getSceneTextApiProfileResolution } from '../lib/apiProfiles'
 import {
   callPromptReverseApi,
   parsePromptReverseResult,
@@ -38,7 +38,8 @@ export default function PromptReverseModal() {
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   const showToast = useStore((s) => s.showToast)
   const settings = useStore((s) => s.settings)
-  const textApiResolution = getTextApiProfileResolution(settings)
+  // 反推文本模型按场景解析（场景覆盖 > 全局链），与抽屉「文本模型」配置语义一致
+  const textApiResolution = getSceneTextApiProfileResolution(settings)
   const imageId = source?.imageId ?? null
   const dropZoneFileInputRef = useRef<HTMLInputElement>(null)
 
@@ -117,7 +118,7 @@ export default function PromptReverseModal() {
         const size = await readImageSize(originalDataUrl)
         if (cancelled) return
         setImageSize(size)
-        const profile = getPromptReverseApiProfile(settings)
+        const profile = getSceneTextApiProfileResolution(settings).profile
         if (!profile) {
           window.clearInterval(timer)
           setPhase('noProfile')

@@ -1,5 +1,6 @@
-import type { AppSettings, RefusalRecoveryRecord, ResponsesOutputItem, TaskParams } from '../types'
+import type { ApiProfile, AppSettings, RefusalRecoveryRecord, ResponsesApiResponse, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
+import { normalizeResponsesOutputItems } from './responsesOutputState'
 
 export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -419,4 +420,81 @@ export function pickActualParams(source: unknown): Partial<TaskParams> {
 export function mergeActualParams(...sources: Array<Partial<TaskParams> | undefined>): Partial<TaskParams> | undefined {
   const merged = Object.assign({}, ...sources.filter((source) => source && Object.keys(source).length))
   return Object.keys(merged).length ? merged : undefined
+}
+
+// ===== Responses API 共享请求/解析函数（供生图/文本类 API 共用） =====
+
+export function createHeaders(profile: ApiProfile): Record<string, string> {
+  return {
+    Authorization: `Bearer ${profile.apiKey}`,
+    'Content-Type': 'application/json',
+  }
+}
+
+export function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function escapeMarkdownLinkLabel(text: string) {
+  return text.replace(/\\/g, '\\\\').replace(/\]/g, '\\]')
+}
+
+type ResponseTextAnnotation = NonNullable<NonNullable<ResponsesOutputItem['content']>[number]['annotations']>[number]
+
+function applyUrlCitations(text: string, annotations: ResponseTextAnnotation[] | undefined) {
+  const citations = (annotations ?? [])
+    .filter((annotation) =>
+      annotation.type === 'url_citation' &&
+      typeof annotation.url === 'string' &&
+      annotation.url.trim() &&
+      typeof annotation.start_index === 'number' &&
+      typeof annotation.end_index === 'number' &&
+      annotation.start_index >= 0 &&
+      annotation.end_index > annotation.start_index &&
+      annotation.end_index <= text.length,
+    )
+    .sort((a, b) => (a.start_index ?? 0) - (b.start_index ?? 0))
+
+  if (citations.length === 0) return text
+
+  let cursor = 0
+  let output = ''
+  for (const citation of citations) {
+    const start = citation.start_index ?? 0
+    const end = citation.end_index ?? start
+    if (start < cursor) continue
+
+    output += text.slice(cursor, start)
+    const label = text.slice(start, end) || citation.title || citation.url || 'source'
+    output += `[${escapeMarkdownLinkLabel(label)}](${citation.url})`
+    cursor = end
+  }
+  output += text.slice(cursor)
+  return output
+}
+
+export function extractText(payload: ResponsesApiResponse) {
+  const chunks: string[] = []
+
+  for (const item of payload.output ?? []) {
+    if (item.type !== 'message') continue
+    for (const part of item.content ?? []) {
+      if ((part.type === 'output_text' || part.type === 'text') && typeof part.text === 'string') {
+        chunks.push(applyUrlCitations(part.text, part.annotations))
+      } else if (part.type === 'refusal' && typeof part.refusal === 'string') {
+        chunks.push(part.refusal)
+      }
+    }
+  }
+
+  return chunks.join('\n').trim()
+}
+
+export function normalizeResponsePayload(value: unknown): ResponsesApiResponse | null {
+  if (!isRecordValue(value)) return null
+  return {
+    ...value,
+    ...(typeof value.id === 'string' ? { id: value.id } : { id: undefined }),
+    output: normalizeResponsesOutputItems(value.output),
+  }
 }

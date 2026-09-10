@@ -18,6 +18,7 @@
     "start:local": "vite --host 127.0.0.1 --port 9527",
     "test:upgrade": "vitest run scripts/upgrade-upstream-v2.test.mjs",
     "verify:ui": "node scripts/verify-ui.mjs",
+    "verify:scenes": "node scripts/verify-scenes.mjs",
     "verify:image-api": "node scripts/verify-image-api.mjs",
     "batch:manifest": "node scripts/run-image-manifest-batch.mjs",
     "test:batch-planning": "vitest run scripts/lib/full-batch-planning.test.mjs scripts/lib/image-manifest-batch-config.test.mjs",

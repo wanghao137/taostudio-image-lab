@@ -16,7 +16,7 @@
 - `npm run upgrade:upstream`：命令行入口。
 - `scripts/upgrade-upstream-v2.mjs`：带 pending/CAS 保护和单次 apply 回滚的三方升级器。
 - `scripts/upgrade-upstream-v2.test.mjs`：升级器行为测试。
-- `upstream-upgrade.config.json`：上游地址、默认 ref 和保留路径。
+- `upstream-upgrade.config.json`：上游地址、默认 ref、保留路径（`preservePaths`）与移除路径（`removedPaths`）。
 - `docs/upstream-upgrade-state.json`：已确认完成的上游基线。
 - `.upstream/upstream-upgrade-pending.json`：冲突迁移期间的临时状态，不提交。
 - `docs/upstream-upgrade-report.md`：真实升级生成的报告，不提交。
@@ -74,6 +74,7 @@ npm run upgrade:upstream -- --ref v0.7.1 --dry-run
 - `deleted`：上游删除且本地未修改。
 - `localOnly`：只有 TaoStudio 修改，上游相对基线未变。
 - `preservedUpstreamChanges`：保留文件在上游发生变化，必须人工审计。
+- `discardedUpstreamFiles`：`removedPaths` 命中且上游相对基线有变化，上游版本被有意丢弃并记录「removedPaths 命中：已丢弃上游 <路径>」，finalize 时需逐项 `--acknowledge`。
 - `conflicts`：双方修改同一区域、双方新增同一路径，或删除/修改冲突。
 
 `package.json` 使用结构化合并：
@@ -131,13 +132,26 @@ npx vitest run server/task-api/service.test.mjs server/task-api/web-agent.e2e.te
 
 升级器只处理普通 Git 文件。symlink、submodule、特殊 index mode、可执行位变化、case-only 重命名/碰撞、命中 TaoStudio `.gitignore` 的上游新增文件，以及 file/directory 形态切换都会在写项目文件前硬失败，必须单独审计迁移。
 
+## 移除路径
+
+`upstream-upgrade.config.json` 的 `removedPaths` 声明已从本仓**有意删除**、绝不允许被上游同步复活的路径：
+
+- 命中的路径在同步时**丢弃上游版本、不写入本仓**：不 copy、不 update、不 merge，也不跟随上游删除动作。
+- 上游相对基线确有变化时，报告与 ack 输出记录「removedPaths 命中：已丢弃上游 <路径>」，并进入 `requiredAcknowledgements`，finalize 时必须逐项 `--acknowledge`；上游无变化时不产生任何记录，升级保持零摩擦。
+- 同一路径同时命中 `preservePaths` 与 `removedPaths` 时，**removedPaths 优先**，按丢弃语义处理。
+- 匹配规则与 `preservePaths` 相同：大小写不敏感的精确路径或目录前缀。
+
+## 决策记录
+
+- 2026-09：智能体（Agent）功能整体移除，手术清单见 `docs/scene-and-skill-upgrade-plan-2026-09-10.md` §7，实施计划见 `docs/agent-removal-p1b-plan-2026-09-10.md`。后续上游对 agent 相关文件的一切演进（修复、重构、新增文件）**有意不跟随**；升级遇到这些路径时按 `removedPaths` 丢弃，本节即该 16 个路径清单（10 个源文件 + 6 个测试文件）的存在依据。上文「TaoStudio 行为契约」中「Agent 批量生成、分支对话、删除事务和图片引用清理」一条随本次移除一并失效。
+
 ## 参数
 
 ```text
 --dry-run          只拉取并分类，不写项目文件
 --write-conflicts  应用安全变更并显式写入文本冲突
 --finalize         完成 pending 迁移并更新基线
---acknowledge <p>  显式确认一个保留文件或无文本标记冲突，可重复
+--acknowledge <p>  显式确认一个保留文件、removedPaths 丢弃或无文本标记冲突，可重复
 --install          执行 npm install
 --verify           执行 lint、test、build；推进基线时必需
 --allow-dirty      允许脏工作树，仅限已审计的迁移分支

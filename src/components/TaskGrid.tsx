@@ -5,7 +5,20 @@ import TaskCard from './TaskCard'
 import type { TaskRecord } from '../types'
 
 export default function TaskGrid() {
-  const tasks = useStore((s) => s.tasks)
+  // 画廊按场景过滤：'all' 看全部；旧任务无 sceneId 视为 general。
+  // 过滤发生在搜索/收藏筛选之前的数据源上，SearchBar 逻辑作用于过滤后的列表。
+  // 注意：useStore 选择器即 getSnapshot，必须返回稳定引用——filter 分支若写在
+  // 选择器内，每次调用都返回新数组，React 19 会判定 getSnapshot 未缓存而无限
+  // 重渲染（Maximum update depth exceeded）。因此这里只订阅稳定切片，
+  // 派生过滤放到 useMemo 里做。
+  const gallerySceneFilter = useStore((s) => s.gallerySceneFilter)
+  const allTasks = useStore((s) => s.tasks)
+  const tasks = useMemo(
+    () => gallerySceneFilter === 'all'
+      ? allTasks
+      : allTasks.filter((t) => (t.sceneId ?? 'general') === gallerySceneFilter),
+    [gallerySceneFilter, allTasks],
+  )
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
