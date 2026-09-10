@@ -23,7 +23,6 @@ import {
   isAgentTextApiProfile,
   isOpenAICompatibleProvider,
   mergeImportedSettings,
-  normalizeAgentMaxToolRounds,
   normalizeCustomProviderDefinition,
   normalizeSettings,
   normalizeStreamPartialImages,
@@ -35,7 +34,7 @@ import { customProviderSupportsNativeTransparentBackground } from '../lib/custom
 import { getPresetProfileDescription, isPresetProfileLocked } from '../lib/presetConfig'
 import { copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import { requestBrowserNotificationPermission, type BrowserNotificationPermissionResult } from '../lib/browserNotification'
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, REASONING_EFFORT_VALUES, type AgentApiConfigMode, type ApiProfile, type AppSettings, type CustomProviderDefinition, type ReasoningEffort, type ZipDownloadRoute } from '../types'
+import { DEFAULT_STREAM_PARTIAL_IMAGES, REASONING_EFFORT_VALUES, type ApiProfile, type AppSettings, type CustomProviderDefinition, type ReasoningEffort, type ZipDownloadRoute } from '../types'
 import {
   CUSTOM_PROVIDER_LLM_PROMPT,
   DEFAULT_CUSTOM_PROVIDER_JSON,
@@ -49,7 +48,6 @@ import ViewportTooltip from './ViewportTooltip'
 import MarkdownRenderer from './MarkdownRenderer'
 import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon } from './icons'
 import GeneralSettingsTab from './settings/GeneralSettingsTab'
-import AgentSettingsTab from './settings/AgentSettingsTab'
 import CustomProviderModal from './settings/CustomProviderModal'
 import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/ProfileImportUrlModal'
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
@@ -175,7 +173,6 @@ export default function SettingsModal() {
   
   const [draft, setDraft] = useState<AppSettings>(normalizeSettings(settings))
   const [timeoutInput, setTimeoutInput] = useState(String(getActiveApiProfile(settings).timeout))
-  const [agentMaxToolRoundsInput, setAgentMaxToolRoundsInput] = useState(String(settings.agentMaxToolRounds))
   const [showApiKey, setShowApiKey] = useState(false)
   const [showProfileMenu, setShowProfileMenu] = useState(false)
   const [profileMenuMaxHeight, setProfileMenuMaxHeight] = useState(DEFAULT_DROPDOWN_MAX_HEIGHT)
@@ -277,16 +274,6 @@ export default function SettingsModal() {
   const selectedAgentTextProfile = agentTextProfiles.find((profile) => profile.id === draft.agentTextProfileId)
     ?? (isAgentTextApiProfile(activeProfile) ? activeProfile : agentTextProfiles[0])
     ?? null
-  const selectedAgentImageProfile = draft.profiles.find((profile) => profile.id === draft.agentImageProfileId)
-    ?? activeProfile
-  const agentTextProfileOptions = agentTextProfiles.map((profile) => ({
-    label: `${profile.name} · ${profile.model || DEFAULT_RESPONSES_MODEL}`,
-    value: profile.id,
-  }))
-  const agentImageProfileOptions = draft.profiles.map((profile) => ({
-    label: `${profile.name} · ${getApiProviderLabel(draft, profile.provider)} · ${profile.model}`,
-    value: profile.id,
-  }))
   const textApiResolution = getTextApiProfileResolution(draft)
   const textApiProfileOptions = [
     { label: '自动（跟随生图配置，或唯一的文本配置）', value: '' },
@@ -321,7 +308,6 @@ export default function SettingsModal() {
     })
     setDraft(nextDraft)
     setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
-    setAgentMaxToolRoundsInput(String(nextDraft.agentMaxToolRounds))
   }, [apiProxyAvailable, apiProxyLocked, showSettings, settings, reusedTaskApiProfileId])
 
   useEffect(() => {
@@ -593,19 +579,14 @@ export default function SettingsModal() {
       timeoutInput.trim() === '' || Number.isNaN(nextTimeout)
         ? DEFAULT_SETTINGS.timeout
         : nextTimeout
-    const normalizedAgentMaxToolRounds = agentMaxToolRoundsInput.trim() === ''
-      ? DEFAULT_AGENT_MAX_TOOL_ROUNDS
-      : normalizeAgentMaxToolRounds(agentMaxToolRoundsInput, draft.agentMaxToolRounds)
     const nextDraft = {
       ...draft,
-      agentMaxToolRounds: normalizedAgentMaxToolRounds,
       profiles: activeProviderIsOpenAICompatible
         ? draft.profiles.map((profile) =>
             profile.id === activeProfile.id ? { ...profile, timeout: normalizedTimeout } : profile,
           )
         : draft.profiles,
     }
-    setAgentMaxToolRoundsInput(String(normalizedAgentMaxToolRounds))
     commitSettings(nextDraft)
     setShowSettings(false)
   }
@@ -618,14 +599,6 @@ export default function SettingsModal() {
     setTimeoutInput(String(normalizedTimeout))
     updateActiveProfile({ timeout: normalizedTimeout }, true)
   }, [draft, activeProfile.id, activeProfile.provider, activeProfile.timeout, timeoutInput])
-
-  const commitAgentMaxToolRounds = useCallback(() => {
-    const value = agentMaxToolRoundsInput.trim() === ''
-      ? DEFAULT_AGENT_MAX_TOOL_ROUNDS
-      : normalizeAgentMaxToolRounds(agentMaxToolRoundsInput, draft.agentMaxToolRounds)
-    setAgentMaxToolRoundsInput(String(value))
-    if (value !== draft.agentMaxToolRounds) commitSettings({ ...draft, agentMaxToolRounds: value })
-  }, [agentMaxToolRoundsInput, draft])
 
   const showNotificationPermissionMessage = (result: Exclude<BrowserNotificationPermissionResult, { ok: true }>) => {
     if (result.reason === 'unsupported') {
@@ -749,15 +722,6 @@ export default function SettingsModal() {
     })
     commitSettings(nextDraft)
     setShowProfileMenu(false)
-  }
-
-  const updateAgentApiConfigMode = (mode: AgentApiConfigMode) => {
-    commitSettings({
-      ...draft,
-      agentApiConfigMode: mode,
-      agentTextProfileId: mode !== 'off' ? selectedAgentTextProfile?.id ?? draft.agentTextProfileId : draft.agentTextProfileId,
-      agentImageProfileId: mode === 'hybrid' ? selectedAgentImageProfile?.id ?? draft.agentImageProfileId : draft.agentImageProfileId,
-    })
   }
 
   const duplicateActiveProfile = () => {
@@ -1185,17 +1149,6 @@ export default function SettingsModal() {
                 习惯配置
               </button>
               <button
-                onClick={() => setActiveTab('agent')}
-                className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'agent' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8V4H8" />
-                  <rect width="16" height="12" x="4" y="8" rx="2" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 14h2M20 14h2M15 13v2M9 13v2" />
-                </svg>
-                Agent 配置
-              </button>
-              <button
                 onClick={() => setActiveTab('data')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'data' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1229,21 +1182,6 @@ export default function SettingsModal() {
               />
             )}
 
-            {activeTab === 'agent' && (
-              <AgentSettingsTab
-                draft={draft}
-                agentMaxToolRoundsInput={agentMaxToolRoundsInput}
-                agentTextProfileOptions={agentTextProfileOptions}
-                agentImageProfileOptions={agentImageProfileOptions}
-                selectedAgentTextProfile={selectedAgentTextProfile}
-                selectedAgentImageProfile={selectedAgentImageProfile}
-                setAgentMaxToolRoundsInput={setAgentMaxToolRoundsInput}
-                updateAgentApiConfigMode={updateAgentApiConfigMode}
-                commitSettings={commitSettings}
-                commitAgentMaxToolRounds={commitAgentMaxToolRounds}
-              />
-            )}
-            
             {activeTab === 'api' && (
               <div className="space-y-4">
                 <div>
@@ -1681,7 +1619,7 @@ export default function SettingsModal() {
                     </div>
                   </div>
                   <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
-                    用于指导模型在执行任务时的思考深度，更高的档位会使模型花费更长时间进行思考，有助于提升 Agent 模式下模型完成复杂任务的能力。并非所有模型都支持全部推理强度。支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">?reasoningEffort=high</code>。
+                    用于指导模型在执行任务时的思考深度，更高的档位会使模型花费更长时间进行思考，有助于提升模型完成复杂任务的能力。并非所有模型都支持全部推理强度。支持通过查询参数覆盖：<code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">?reasoningEffort=high</code>。
                   </div>
                 </div>
               )}

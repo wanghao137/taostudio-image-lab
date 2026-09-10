@@ -4,16 +4,19 @@ import { remapImageMentionsForOrder } from './promptImageMentions'
 
 const AGENT_INPUT_DRAFT_RETENTION_MS = 3 * 24 * 60 * 60 * 1000
 
+/** 存量/测试仍可能携带 'agent'（AppMode 已收窄为 gallery|engine）；agent 草稿链由 Task 3 删除。 */
+type RuntimeAppMode = AppMode | 'agent'
+
 type InputDraftFields = Pick<AgentInputDraft, 'prompt' | 'inputImages' | 'maskDraft' | 'maskEditorImageId'>
 
 type AgentInputDraftState = InputDraftFields & {
-  appMode: AppMode
+  appMode: RuntimeAppMode
   activeAgentConversationId: string | null
   agentInputDrafts: Record<string, AgentInputDraft>
 }
 
 type GalleryInputDraftState = InputDraftFields & {
-  appMode: AppMode
+  appMode: RuntimeAppMode
   galleryInputDraft: AgentInputDraft | null
 }
 

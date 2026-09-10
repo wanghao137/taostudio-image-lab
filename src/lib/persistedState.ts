@@ -5,6 +5,9 @@ import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveD
 import { cleanStaleAgentInputDrafts, getPersistableAgentInputDrafts, getPersistableInputImage, isEmptyAgentInputDraft, normalizeAgentInputDraft, normalizeAgentInputDrafts, normalizeAgentInputDraftsByKey, saveGalleryInputDraft } from './inputDraftState'
 import { getPersistableAgentConversations, stripPersistedAgentConversations } from './agentResponseState'
 
+/** 存量持久化仍可能携带 'agent'（AppMode 已收窄为 gallery|engine）；agent 持久化链由 Task 3 删除。 */
+type PersistedAppMode = AppMode | 'agent'
+
 export interface PersistedAppState {
   settings: AppSettings
   previousPresetConfig?: Pick<AppSettings, 'customProviders' | 'profiles'> | null
@@ -14,7 +17,7 @@ export interface PersistedAppState {
   prompt?: string
   inputImages?: InputImage[]
   dismissedCodexCliPrompts: string[]
-  appMode: AppMode
+  appMode: PersistedAppMode
   galleryInputDraft: AgentInputDraft | null
   agentConversations?: AgentConversation[]
   activeAgentConversationId: string | null

@@ -219,7 +219,7 @@ function isErrorToastTitle(title: string): boolean {
   return /(?:失败|错误|异常|报错|无法|不能|超时|中断|断开|请先|请输入|已达上限|不存在|已丢失)$/.test(title)
 }
 
-export type SettingsTab = 'general' | 'agent' | 'api' | 'data' | 'about'
+export type SettingsTab = 'general' | 'api' | 'data' | 'about'
 
 const TIMEOUT_STREAMING_HINT = '也可尝试打开「流式传输」，并提高「请求中间步骤图像数」来维持连接。'
 const TIMEOUT_PARTIAL_IMAGES_ZERO_HINT = '官方流式接口不发送心跳，当前「请求中间步骤图像数」为 0，连接可能因无数据传输而断开。建议提高到 2 或 3。'
@@ -393,10 +393,16 @@ function mergePersistedState(persistedState: unknown, currentState: AppState): A
 
 // ===== Store 类型 =====
 
+/**
+ * 运行时模式：AppMode 的 UI 类型面已收窄为 gallery|engine（智能体 UI 移除，P1b Task 2），
+ * 但存量持久化数据与 store 级测试仍可能携带 'agent'；agent 状态与执行链由 Task 3 删除。
+ */
+type RuntimeAppMode = AppMode | 'agent'
+
 interface AppState {
   // 模式
-  appMode: AppMode
-  setAppMode: (mode: AppMode) => void
+  appMode: RuntimeAppMode
+  setAppMode: (mode: RuntimeAppMode) => void
 
   // 设置
   settings: AppSettings
@@ -727,11 +733,11 @@ export const useStore = create<AppState>()(
         if (settings.agentApiConfigMode !== 'off') {
           state.setConfirmDialog({
             title: 'Agent API 配置不完整',
-            message: `${agentValidationError.message}\n\n请前往 Agent 配置页，选择或新建可用配置。`,
+            message: `${agentValidationError.message}\n\n请前往 API 配置页，选择或新建可用配置。`,
             confirmText: '去设置',
             cancelText: '取消',
             action: () => {
-              useStore.getState().setShowSettings(true, 'agent')
+              useStore.getState().setShowSettings(true, 'api')
             },
           })
           return
@@ -2708,7 +2714,7 @@ export async function submitAgentMessage() {
   const agentValidationError = getAgentProfileValidationError(normalizedSettings)
   if (agentValidationError) {
     showToast(`请先完善 Agent API 配置：${agentValidationError.message}`, 'error')
-    state.setShowSettings(true, normalizedSettings.agentApiConfigMode === 'off' ? 'api' : 'agent')
+    state.setShowSettings(true, 'api')
     return
   }
 
@@ -2858,7 +2864,7 @@ export async function regenerateAgentAssistantMessage(conversationId: string, ro
   const agentValidationError = getAgentProfileValidationError(normalizedSettings)
   if (agentValidationError) {
     showToast(`请先完善 Agent API 配置：${agentValidationError.message}`, 'error')
-    state.setShowSettings(true, normalizedSettings.agentApiConfigMode === 'off' ? 'api' : 'agent')
+    state.setShowSettings(true, 'api')
     return
   }
 

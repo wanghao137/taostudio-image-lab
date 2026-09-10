@@ -21,7 +21,6 @@ import ErrorBoundary from './components/ErrorBoundary'
 const MOBILE_STAT_LABELS = ['输出', '生成中', '收藏']
 
 let defaultConfigImportStarted = false
-const AgentWorkspace = lazy(() => import('./components/AgentWorkspace'))
 const EngineWorkspace = lazy(() => import('./components/EngineWorkspace'))
 const TaskGrid = lazy(() => import('./components/TaskGrid'))
 const DetailModal = lazy(() => import('./components/DetailModal'))
@@ -283,15 +282,6 @@ export default function App() {
                   <EngineWorkspace />
                 </Suspense>
               </>
-            ) : appMode === 'agent' ? (
-              <div className="safe-area-x">
-                <div className="m-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-                  智能体工作台为多图工作流，建议在桌面端使用以获得更好体验。
-                </div>
-                <Suspense fallback={null}>
-                  <AgentWorkspace />
-                </Suspense>
-              </div>
             ) : (
               <div className="safe-area-x max-w-7xl mx-auto">
                 <GalleryWorkspaceHeader onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
@@ -312,14 +302,10 @@ export default function App() {
       ) : (
         <>
           <Header />
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : appMode === 'agent' ? '智能体工作台' : '画廊'}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : '画廊'}>
             {appMode === 'engine' ? (
               <Suspense fallback={<div className="min-h-[320px]" />}>
                 <EngineWorkspace />
-              </Suspense>
-            ) : appMode === 'agent' ? (
-              <Suspense fallback={null}>
-                <AgentWorkspace />
               </Suspense>
             ) : (
               <main data-home-main data-drag-select-surface className="pb-[calc(var(--input-bar-clearance,12rem)+1.5rem)]">

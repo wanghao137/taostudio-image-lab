@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFromFile } from '../store'
+import { useStore, submitTask, addImageFromFile } from '../store'
 import { DEFAULT_PARAMS } from '../types'
 import { getActiveApiProfile, normalizeSettings } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
@@ -37,8 +37,6 @@ export function useImageComposer() {
   const settings = useStore((s) => s.settings)
   const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
   const showToast = useStore((s) => s.showToast)
-  const agentConversations = useStore((s) => s.agentConversations)
-  const activeAgentConversationId = useStore((s) => s.activeAgentConversationId)
   const maskDraft = useStore((s) => s.maskDraft)
 
   // --- Local input mirrors ---
@@ -58,37 +56,23 @@ export function useImageComposer() {
       ? settings.profiles.find((profile) => profile.id === reusedTaskApiProfileId) ?? currentActiveProfile
       : currentActiveProfile
   ), [currentActiveProfile, reusedTaskApiProfileId, settings])
-  const activeAgentConversation = appMode === 'agent'
-    ? agentConversations.find((conversation) => conversation.id === activeAgentConversationId) ?? null
-    : null
-  const activeAgentIsRunning = Boolean(activeAgentConversation?.rounds.some((round) => round.status === 'running'))
+  const hasSubmitApiConfig = Boolean(activeProfile.apiKey)
+  const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig)
   const effectiveSettings = useMemo(() => (
     activeProfile.id === currentActiveProfile.id
       ? settings
       : normalizeSettings({ ...settings, activeProfileId: activeProfile.id })
   ), [activeProfile.id, currentActiveProfile.id, settings])
-  const hasSubmitApiConfig = Boolean(activeProfile.apiKey)
-  const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig && !activeAgentIsRunning)
-  const submitButtonAriaLabel = activeAgentIsRunning
-    ? '停止生成'
-    : hasSubmitApiConfig
+  const submitButtonAriaLabel = hasSubmitApiConfig
     ? maskDraft ? '遮罩编辑' : '生成图像'
     : '请先配置 API'
-  const submitTooltipText = activeAgentIsRunning ? '停止生成' : '尚未完成 API 配置，请在右上角设置中进行'
+  const submitTooltipText = '尚未完成 API 配置，请在右上角设置中进行'
   const promptPlaceholder = '描述你想生成的图片，可输入 @ 来指定参考图...'
   const submitCurrentMode = useCallback(() => {
-    if (appMode === 'agent') {
-      void submitAgentMessage()
-    } else {
-      void submitTask()
-    }
-  }, [appMode])
-  const stopActiveAgentResponse = useCallback(() => {
-    stopAgentResponse(activeAgentConversationId)
-  }, [activeAgentConversationId])
+    void submitTask()
+  }, [])
   const activeProvider = activeProfile.provider
   const isFalProvider = activeProvider === 'fal'
-  const agentAutoImageCount = appMode === 'agent' && activeProfile.provider === 'openai' && activeProfile.apiMode === 'responses'
 
   // --- Capability flags ---
   const moderationDisabled = isFalProvider
@@ -100,10 +84,8 @@ export function useImageComposer() {
   const isFalTextToImage = isFalProvider && inputImages.length === 0
   const nDraftValue = Number(nInput)
   const effectiveNValue = Number.isNaN(nDraftValue) ? params.n : nDraftValue
-  const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && !agentAutoImageCount && effectiveNValue > 1
-  const nLimitHintText = agentAutoImageCount
-    ? 'Agent 模式下数量由模型根据提示词自动决定'
-    : isFalProvider
+  const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && effectiveNValue > 1
+  const nLimitHintText = isFalProvider
     ? `fal.ai 最大请求数量为 ${outputImageLimit}`
     : `OpenAI 最大请求数量为 ${outputImageLimit}`
   const displaySize = isFalTextToImage && params.size === 'auto'
@@ -112,7 +94,7 @@ export function useImageComposer() {
   const exactSizeDisabled = params.size === 'auto'
   const exactSizeEnabled = !exactSizeDisabled && params.exact_size
 
-  // --- 4K 派生（依赖 isFalProvider/activeProfile/exactSizeEnabled/agentAutoImageCount/params/inputImages） ---
+  // --- 4K 派生（依赖 isFalProvider/activeProfile/exactSizeEnabled/params/inputImages） ---
   const baseGenerationStrategyItems = isFalProvider
     ? ['fal.ai 队列', '自动恢复']
     : [
@@ -123,7 +105,7 @@ export function useImageComposer() {
   const generationStrategyItems = exactSizeEnabled
     ? [...baseGenerationStrategyItems, '精确尺寸']
     : baseGenerationStrategyItems
-  const asset4KPresetN = agentAutoImageCount ? params.n : 1
+  const asset4KPresetN = 1
   const asset4KInheritedSource = getAsset4KInheritedRatioSource({
     inputImages,
     currentSize: params.size,
@@ -182,8 +164,8 @@ export function useImageComposer() {
   }, [params.output_compression])
 
   useEffect(() => {
-    setNInput(agentAutoImageCount ? 'auto' : String(params.n))
-  }, [agentAutoImageCount, params.n])
+    setNInput(String(params.n))
+  }, [params.n])
 
   useEffect(() => {
     const normalizedParams = normalizeParamsForSettings(params, effectiveSettings, {
@@ -216,17 +198,13 @@ export function useImageComposer() {
 
   const commitN = useCallback(() => {
     nLimitHint.hide()
-    if (agentAutoImageCount) {
-      setNInput('auto')
-      return
-    }
     const nextValue = Number(nInput)
     const normalizedValue =
       nInput.trim() === '' ? DEFAULT_PARAMS.n : Number.isNaN(nextValue) ? params.n : nextValue
     const clampedValue = Math.min(outputImageLimit, Math.max(1, normalizedValue))
     setNInput(String(clampedValue))
     setParams({ n: clampedValue })
-  }, [agentAutoImageCount, nInput, nLimitHint, outputImageLimit, params.n, setParams])
+  }, [nInput, nLimitHint, outputImageLimit, params.n, setParams])
 
   // --- n-limit wrappers（依赖已全部在 hook 内） ---
   const showNLimitHint = useCallback(() => {
@@ -237,24 +215,11 @@ export function useImageComposer() {
     nLimitHint.hide()
   }, [nLimitHint])
 
-  const clearAgentNHintTouchTimer = useCallback(() => {
+  const clearNHintTouchTimer = useCallback(() => {
     nLimitHint.clearTimer()
   }, [nLimitHint])
 
-  const showAgentNHint = useCallback(() => {
-    if (agentAutoImageCount) showNLimitHint()
-  }, [agentAutoImageCount, showNLimitHint])
-
-  const startAgentNHintTouch = useCallback(() => {
-    if (!agentAutoImageCount) return
-    nLimitHint.startTouch()
-  }, [agentAutoImageCount, nLimitHint])
-
   const handleNInputChange = useCallback((value: string) => {
-    if (agentAutoImageCount) {
-      setNInput('auto')
-      return
-    }
     setNInput(value)
     const nextValue = Number(value)
     if (!Number.isNaN(nextValue) && nextValue > outputImageLimit) {
@@ -262,27 +227,22 @@ export function useImageComposer() {
     } else {
       hideNLimitHint()
     }
-  }, [agentAutoImageCount, hideNLimitHint, outputImageLimit, showNLimitHint])
+  }, [hideNLimitHint, outputImageLimit, showNLimitHint])
 
   const handleNLimitIncreaseAttempt = useCallback((preventDefault: () => void) => {
-    if (agentAutoImageCount) {
-      preventDefault()
-      showNLimitHint()
-      return
-    }
     const currentValue = Number(nInput)
     const effectiveValue = Number.isNaN(currentValue) ? params.n : currentValue
     if (!nInputFocused || effectiveValue < outputImageLimit) return
 
     preventDefault()
     showNLimitHint()
-  }, [agentAutoImageCount, nInput, nInputFocused, outputImageLimit, params.n, showNLimitHint])
+  }, [nInput, nInputFocused, outputImageLimit, params.n, showNLimitHint])
 
   // --- 4K apply callbacks ---
   const applyAsset4KOriginalRatioPreset = useCallback(() => {
     const patch = createAsset4KOriginalRatioPresetParams(asset4KSourceSize, {
       codexCli: activeProfile.codexCli,
-      n: agentAutoImageCount ? params.n : 1,
+      n: 1,
     })
     if (!patch) {
       showToast('请先上传源图，或选择一个明确的基准尺寸', 'info')
@@ -298,10 +258,8 @@ export function useImageComposer() {
     )
   }, [
     activeProfile.codexCli,
-    agentAutoImageCount,
     asset4KOriginalRatioLabel,
     asset4KSourceSize,
-    params.n,
     setParams,
     showToast,
   ])
@@ -309,7 +267,7 @@ export function useImageComposer() {
   const applyAsset4KRatioPreset = useCallback((ratio: CommonImageRatio) => {
     const patch = createAsset4KRatioPresetParams(ratio, {
       codexCli: activeProfile.codexCli,
-      n: agentAutoImageCount ? params.n : 1,
+      n: 1,
     })
     if (!patch) return
 
@@ -320,7 +278,7 @@ export function useImageComposer() {
         : `已切换改比例 ${ratio} high PNG`,
       activeProfile.codexCli ? 'info' : 'success',
     )
-  }, [activeProfile.codexCli, agentAutoImageCount, params.n, setParams, showToast])
+  }, [activeProfile.codexCli, setParams, showToast])
 
   // --- handleFiles ---
   const handleFiles = async (files: FileList | File[]) => {
@@ -375,17 +333,13 @@ export function useImageComposer() {
     setNInputFocused,
     // profile derivation
     activeProfile,
-    activeAgentConversation,
-    activeAgentIsRunning,
     hasSubmitApiConfig,
     canSubmit,
     submitButtonAriaLabel,
     submitTooltipText,
     promptPlaceholder,
     submitCurrentMode,
-    stopActiveAgentResponse,
     isFalProvider,
-    agentAutoImageCount,
     // capability flags
     moderationDisabled,
     transparentOutputAvailable,
@@ -429,9 +383,7 @@ export function useImageComposer() {
     // n-limit subsystem
     nLimitHint,
     hideNLimitHint,
-    clearAgentNHintTouchTimer,
-    showAgentNHint,
-    startAgentNHintTouch,
+    clearNHintTouchTimer,
     handleNInputChange,
     handleNLimitIncreaseAttempt,
     // files

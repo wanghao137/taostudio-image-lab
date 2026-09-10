@@ -19,7 +19,7 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
   const {
     prompt, setPrompt, inputImages,
     params, setParams, nInput, setNInput,
-    submitCurrentMode, hasSubmitApiConfig, canSubmit, activeAgentIsRunning, stopActiveAgentResponse,
+    submitCurrentMode, hasSubmitApiConfig, canSubmit,
     handleFiles, atImageLimit, uploadImageTooltipText,
     applyAsset4KOriginalRatioPreset,
     isFalTextToImage, outputImageLimit,
@@ -53,7 +53,6 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
   if (!open) return null
 
   const onSubmit = () => {
-    if (activeAgentIsRunning) return stopActiveAgentResponse()
     if (hasSubmitApiConfig) return submitCurrentMode()
     setShowSettings(true)
   }
@@ -153,11 +152,11 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
         <div className="shrink-0 border-t border-stone-200/60 p-3 dark:border-white/5">
           <button
             onClick={onSubmit}
-            disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
-            className={`flex w-full items-center justify-center gap-2 rounded-xl bg-[#df7b57] py-3 text-base font-semibold text-white ${(activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false) ? 'opacity-50' : 'active:scale-[0.99]'}`}
+            disabled={hasSubmitApiConfig ? !canSubmit : false}
+            className={`flex w-full items-center justify-center gap-2 rounded-xl bg-[#df7b57] py-3 text-base font-semibold text-white ${(hasSubmitApiConfig ? !canSubmit : false) ? 'opacity-50' : 'active:scale-[0.99]'}`}
           >
             <Sparkles className="h-5 w-5" />
-            {activeAgentIsRunning ? '停止' : '生成图像'}
+            生成图像
           </button>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react'
-import { Bot, BookOpen, Camera, Cpu, Image as ImageIcon, LayoutGrid, Moon, Smile, Sparkles, Sun, User } from 'lucide-react'
+import { BookOpen, Camera, Cpu, Image as ImageIcon, LayoutGrid, Moon, Smile, Sparkles, Sun, User } from 'lucide-react'
 import { useStore } from '../store'
 import { CANVAS_WORKSPACE_URL, SCENE_TABS } from './Header'
 import type { SceneId } from '../types'
@@ -138,8 +138,6 @@ function ThemeToggleButton() {
 
 function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSettings: () => void }) {
   const setSupportPromptOpen = useStore((s) => s.setSupportPromptOpen)
-  const setAppMode = useStore((s) => s.setAppMode)
-  const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const tasks = useStore((s) => s.tasks)
 
   const stats = useMemo(
@@ -160,18 +158,6 @@ function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSetti
     setSupportPromptOpen(true)
     onClose()
   }
-  const openAgent = () => {
-    setConfirmDialog({
-      title: '智能体工作台',
-      message: '智能体为多图工作流，建议在桌面端使用以获得更好体验。仍要继续吗？',
-      confirmText: '继续',
-      cancelText: '取消',
-      action: () => {
-        setAppMode('agent')
-        onClose()
-      },
-    })
-  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-end" onClick={onClose}>
@@ -191,7 +177,6 @@ function MyPanel({ onClose, onOpenSettings }: { onClose: () => void; onOpenSetti
         </div>
 
         <EntryRow icon={BookOpen} label="操作指南" onClick={openGuide} />
-        <EntryRow icon={Bot} label="智能体工作台" onClick={openAgent} />
         {CANVAS_WORKSPACE_URL !== '' && (
           <a
             href={CANVAS_WORKSPACE_URL}

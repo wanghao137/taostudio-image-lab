@@ -28,9 +28,9 @@ describe('useImageComposer (seed)', () => {
     expect(result.current.nLimitHint.visible).toBe(false)
   })
 
-  it('clearAgentNHintTouchTimer is a function', () => {
+  it('clearNHintTouchTimer is a function', () => {
     const { result } = renderHook(() => useImageComposer())
-    expect(typeof result.current.clearAgentNHintTouchTimer).toBe('function')
+    expect(typeof result.current.clearNHintTouchTimer).toBe('function')
   })
 })
 
@@ -96,8 +96,8 @@ describe('useImageComposer (core wiring)', () => {
 
   it('exposes the n-limit wrappers as functions', () => {
     const { result } = renderHook(() => useImageComposer())
-    expect(typeof result.current.showAgentNHint).toBe('function')
-    expect(typeof result.current.startAgentNHintTouch).toBe('function')
+    expect(typeof result.current.hideNLimitHint).toBe('function')
+    expect(typeof result.current.clearNHintTouchTimer).toBe('function')
     expect(typeof result.current.handleNInputChange).toBe('function')
     expect(typeof result.current.handleNLimitIncreaseAttempt).toBe('function')
   })

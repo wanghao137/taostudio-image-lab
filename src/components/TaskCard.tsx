@@ -5,7 +5,6 @@ import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imag
 import { formatImageRatio } from '../lib/size'
 import { getParamDisplay, ActualValueBadge } from '../lib/paramDisplay'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_FAL_MODEL } from '../lib/apiProfiles'
-import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { CodeIcon, TransparentBgIcon } from './icons'
 import ViewportTooltip from './ViewportTooltip'
 
@@ -328,9 +327,7 @@ function TaskCard({
   const showExactSize = task.params.exact_size
 
   const nDisplay = getParamDisplay(task, 'n')
-  const isAgentTask = task.sourceMode === 'agent' || Boolean(task.agentConversationId || task.agentRoundId)
-  const showPendingPrompt = isAgentTaskPromptPending(task)
-  const showN = !isAgentTask && (task.params.n > 1 || nDisplay.isMismatch)
+  const showN = task.params.n > 1 || nDisplay.isMismatch
   const outputErrorCount = task.outputErrors?.length ?? 0
   const outputSuccessCount = task.outputImages?.length ?? 0
   const requestedOutputCount = Math.max(task.params.n, outputSuccessCount + outputErrorCount)
@@ -388,7 +385,7 @@ function TaskCard({
         onDragStart={(e) => {
           if (task.status !== 'done' || !task.outputImages?.length) return;
           const imageIds = task.outputImages;
-          e.dataTransfer.setData('text/plain', `agent-images:${imageIds.join(',')}`);
+          e.dataTransfer.setData('text/plain', `task-images:${imageIds.join(',')}`);
           e.dataTransfer.effectAllowed = 'copy';
           // Optionally set drag image if we have thumbSrc
           if (thumbSrc) {
@@ -572,16 +569,9 @@ function TaskCard({
         {/* 右侧信息区域 */}
         <div className="flex-1 p-3 flex flex-col min-w-0">
           <div className="flex-1 min-h-0 mb-2 overflow-hidden">
-            {showPendingPrompt ? (
-              <div className="leading-relaxed">
-                <p className="text-sm text-gray-700 dark:text-gray-300">正在生成……</p>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">输入内容将在响应完成时接收</p>
-              </div>
-            ) : (
-              <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed line-clamp-3">
-                {task.prompt || '(无提示词)'}
-              </p>
-            )}
+            <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed line-clamp-3">
+              {task.prompt || '(无提示词)'}
+            </p>
           </div>
           <div className="mt-auto flex flex-col gap-1.5">
             {/* 参数与信息：横向滚动 */}
