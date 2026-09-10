@@ -7,11 +7,13 @@ import type { SceneId } from '../types'
 interface MobileShellProps {
   children: ReactNode
   onOpenCompose: () => void
+  /** skill 场景没有全局 InputBar，创作 FAB 隐藏避免无效入口（由 App 按场景传入） */
+  composeHidden?: boolean
 }
 
 const THEME_KEY = 'taostudio.imageLab.theme'
 
-// 场景 chip 图标（与 Header 的 SCENE_TABS 对齐；P2 上线 skill 后替换专属图标）。
+// 场景 chip 图标（与 Header 的 SCENE_TABS 对齐）。
 const SCENE_TAB_ICONS: Record<SceneId, ComponentType<{ className?: string }>> = {
   portrait: Camera,
   general: ImageIcon,
@@ -19,7 +21,7 @@ const SCENE_TAB_ICONS: Record<SceneId, ComponentType<{ className?: string }>> = 
   skill: Sparkles,
 }
 
-export default function MobileShell({ children, onOpenCompose }: MobileShellProps) {
+export default function MobileShell({ children, onOpenCompose, composeHidden = false }: MobileShellProps) {
   const appMode = useStore((s) => s.appMode)
   const setAppMode = useStore((s) => s.setAppMode)
   const activeScene = useStore((s) => s.settings.activeScene)
@@ -67,14 +69,16 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
           <TabButton icon={Cpu} label="引擎" active={appMode === 'engine'} onClick={() => setAppMode('engine')} />
           <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} />
         </div>
-        {/* FAB */}
-        <button
-          onClick={onOpenCompose}
-          aria-label="创作"
-          className="absolute -top-6 left-1/2 -translate-x-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-[#df7b57] text-white shadow-lg ring-4 ring-white dark:ring-[#13100d] active:scale-95 transition"
-        >
-          <Sparkles className="h-5 w-5" />
-        </button>
+        {/* FAB（skill 场景隐藏：工坊自带输入与生成入口） */}
+        {!composeHidden && (
+          <button
+            onClick={onOpenCompose}
+            aria-label="创作"
+            className="absolute -top-6 left-1/2 -translate-x-1/2 flex h-12 w-12 items-center justify-center rounded-full bg-[#df7b57] text-white shadow-lg ring-4 ring-white dark:ring-[#13100d] active:scale-95 transition"
+          >
+            <Sparkles className="h-5 w-5" />
+          </button>
+        )}
       </div>
 
       {/* 「我的」面板（简化：列出设置入口；本任务只做骨架） */}

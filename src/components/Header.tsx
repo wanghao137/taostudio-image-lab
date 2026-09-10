@@ -19,12 +19,12 @@ type ThemeValue = 'light' | 'dark'
 const THEME_KEY = 'taostudio.imageLab.theme'
 // 无限画布（独立应用，Vercel 项目 infinite-canvas）入口地址；置空字符串即可隐藏入口。
 export const CANVAS_WORKSPACE_URL: string = 'https://canvas.taostudioai.com'
-// 顶层导航的场景 Tab（桌面与移动端共用）；P2 上线 Skill 工坊视图后在数组中追加即可。
+// 顶层导航的场景 Tab（桌面与移动端共用）
 export const SCENE_TABS: Array<{ id: SceneId; label: string }> = [
   { id: 'portrait', label: '人像写真' },
   { id: 'general', label: '通用创作' },
   { id: 'sticker', label: '表情与头像' },
-  // P2 上线 Skill 工坊视图后追加：{ id: 'skill', label: 'Skill 工坊' }
+  { id: 'skill', label: 'Skill 工坊' },
 ]
 const HelpModal = lazy(() => import('./HelpModal'))
 
