@@ -65,7 +65,8 @@
       "provider": "openai",
       "baseUrl": "https://api.muteki.site",
       "model": "gpt-image-2.5-flare",
-      "apiMode": "images"
+      "apiMode": "images",
+      "transparentBackgroundMethod": "local"
     },
     {
       "id": "jucodex",
