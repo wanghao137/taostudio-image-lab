@@ -24,12 +24,15 @@ export default function MobileShell({ children, onOpenCompose }: MobileShellProp
   const setAppMode = useStore((s) => s.setAppMode)
   const activeScene = useStore((s) => s.settings.activeScene)
   const setActiveScene = useStore((s) => s.setActiveScene)
+  const setFilterFavorite = useStore((s) => s.setFilterFavorite)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const [myOpen, setMyOpen] = useState(false)
 
-  // 与桌面顶层导航一致：场景 chip 点击进入画廊并切换场景
+  // 与桌面顶层导航一致：场景 chip 点击进入画廊并切换场景；
+  // 复位收藏过滤（含 activeFavoriteCollectionId），否则停留在收藏总览时画廊内容不切换
   const goScene = (scene: SceneId) => {
     setAppMode('gallery')
+    setFilterFavorite(false)
     setActiveScene(scene)
   }
 

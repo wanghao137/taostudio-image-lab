@@ -62,6 +62,7 @@ export default function Header() {
   const agentConversations = useStore((s) => s.agentConversations)
   const activeAgentConversationId = useStore((s) => s.activeAgentConversationId)
   const filterFavorite = useStore((s) => s.filterFavorite)
+  const setFilterFavorite = useStore((s) => s.setFilterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
   const favoriteCollections = useStore((s) => s.favoriteCollections)
   const activeConversation = agentConversations.find((item) => item.id === activeAgentConversationId)
@@ -293,7 +294,7 @@ export default function Header() {
               <button
                 key={id}
                 type="button"
-                onClick={() => { setAppMode('gallery'); setActiveScene(id); }}
+                onClick={() => { setAppMode('gallery'); setFilterFavorite(false); setActiveScene(id); }}
                 className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' && activeScene === id ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
               >
                 {label}
