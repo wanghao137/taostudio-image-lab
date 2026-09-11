@@ -44,7 +44,7 @@ describe('callSkillExpansionApi', () => {
     expect((init as RequestInit).method).toBe('POST')
     expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer test-key' })
     const body = JSON.parse(String((init as RequestInit).body))
-    expect(body.instructions).toBe(buildExpansionInstructions(SKILL_BODY))
+    expect(body.instructions).toBe(buildExpansionInstructions(SKILL_BODY, 5))
     expect(body.instructions).toContain('海报提示词专家')
     expect(body.instructions).toContain('不要输出解释')
     expect(body.input).toHaveLength(1)

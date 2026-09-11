@@ -34,8 +34,10 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const clearSkillsRootDirectory = useStore((s) => s.clearSkillsRootDirectory)
   const setActiveSkill = useStore((s) => s.setActiveSkill)
   const setSkillInputDraft = useStore((s) => s.setSkillInputDraft)
+  const setSkillExpansionPrefs = useStore((s) => s.setSkillExpansionPrefs)
   const runSkillExpansion = useStore((s) => s.runSkillExpansion)
   const abortSkillExpansion = useStore((s) => s.abortSkillExpansion)
+  const rerollSkillEntry = useStore((s) => s.rerollSkillEntry)
   const updateSkillEntry = useStore((s) => s.updateSkillEntry)
   const removeSkillEntry = useStore((s) => s.removeSkillEntry)
   const generateFromSkillEntries = useStore((s) => s.generateFromSkillEntries)
@@ -61,8 +63,11 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   )
 
   const expansionRunning = skillExpansion.status === 'running'
+  const rerollingEntryId = skillExpansion.rerollingEntryId
   const enabledCount = useMemo(() => skillExpansion.entries.filter((entry) => entry.enabled).length, [skillExpansion.entries])
-  const hasTextProfile = useMemo(() => getSceneTextApiProfileResolution(settings).profile !== null, [settings])
+  // 扩写链路与反推同源：场景文本覆盖 > 全局文本自动链（E. 模型透明化：展示生效档案与模型）
+  const textProfile = useMemo(() => getSceneTextApiProfileResolution(settings).profile, [settings])
+  const hasTextProfile = textProfile !== null
 
   return (
     <section data-no-drag-select data-ui-summary className={CARD_CLASS_NAME}>
@@ -211,24 +216,61 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
               </button>
             </div>
           ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => { void runSkillExpansion() }}
-                disabled={expansionRunning || !activeSkill || !skillInputDraft.trim()}
-                className={PRIMARY_BUTTON_CLASS_NAME}
-              >
-                {expansionRunning
-                  ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                  : <Sparkles className="h-4 w-4" aria-hidden />}
-                {expansionRunning ? '扩写中…' : '扩写提示词'}
-              </button>
-              {expansionRunning && (
-                <button type="button" onClick={abortSkillExpansion} className={SECONDARY_BUTTON_CLASS_NAME}>
-                  停止
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <button
+                  type="button"
+                  onClick={() => { void runSkillExpansion() }}
+                  disabled={expansionRunning || !activeSkill || !skillInputDraft.trim()}
+                  className={PRIMARY_BUTTON_CLASS_NAME}
+                >
+                  {expansionRunning
+                    ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    : <Sparkles className="h-4 w-4" aria-hidden />}
+                  {expansionRunning
+                    ? (skillExpansion.phase === 'extracting' ? '抽取变量中…' : '扩写中…')
+                    : '扩写提示词'}
                 </button>
+                {expansionRunning && (
+                  <button type="button" onClick={abortSkillExpansion} className={SECONDARY_BUTTON_CLASS_NAME}>
+                    停止
+                  </button>
+                )}
+                {/* 严格模式（两段式：先抽变量再逐条成文）+ 期望条数 */}
+                <Checkbox
+                  checked={skillExpansion.strictMode}
+                  onChange={(checked) => setSkillExpansionPrefs({ strictMode: checked })}
+                  label="严格模式"
+                  aria-label="严格模式"
+                  className="ml-auto"
+                />
+                <select
+                  value={skillExpansion.entryCount}
+                  onChange={(event) => setSkillExpansionPrefs({ entryCount: Number(event.target.value) })}
+                  disabled={expansionRunning}
+                  aria-label="扩写条数"
+                  title="扩写条数"
+                  className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
+                >
+                  {Array.from({ length: 10 }, (_, i) => i + 1).map((count) => (
+                    <option key={count} value={count}>{count} 条</option>
+                  ))}
+                </select>
+              </div>
+              {/* E. 扩写模型透明化：显示当前生效的文本档案与模型（场景覆盖优先，其次全局文本链） */}
+              {textProfile && (
+                <p className={HINT_CLASS_NAME}>
+                  扩写模型：{textProfile.name} · {textProfile.model}
+                </p>
               )}
             </div>
+          )}
+
+          {skillExpansion.warning && (
+            // 警告级消息（降级/校验未过）：黄条提示「有结果但可能不合规」，与 error 红色硬失败区分
+            <p className="rounded-xl border border-yellow-200/70 bg-yellow-50 px-3 py-2.5 text-xs leading-relaxed text-yellow-700 dark:border-yellow-500/20 dark:bg-yellow-500/10 dark:text-yellow-200">
+              {skillExpansion.warning}
+            </p>
           )}
 
           {skillExpansion.error && (
@@ -258,6 +300,19 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                     rows={2}
                     className={ENTRY_TEXTAREA_CLASS_NAME}
                   />
+                  {/* D. 单条重 roll：携带「替换第 N 条」约束只重新生成该条，原位替换 */}
+                  <button
+                    type="button"
+                    onClick={() => { void rerollSkillEntry(index) }}
+                    disabled={expansionRunning || rerollingEntryId !== null}
+                    aria-label={`重写条目 ${index + 1}`}
+                    title={rerollingEntryId === entry.id ? '重写中…' : '重写：重新生成这一条'}
+                    className="mt-1 shrink-0 rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/[0.08] dark:hover:text-stone-200"
+                  >
+                    {rerollingEntryId === entry.id
+                      ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                      : <RefreshCw className="h-4 w-4" aria-hidden />}
+                  </button>
                   <button
                     type="button"
                     onClick={() => removeSkillEntry(entry.id)}

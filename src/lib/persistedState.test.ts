@@ -66,6 +66,16 @@ describe('persisted state codec', () => {
     expect(normalizePersistedState({}, fallback(), 100)!.settings.profiles[0].imageGenerationModel).toBe(DEFAULT_IMAGES_MODEL)
   })
 
+  it('normalizes skill expansion prefs: defaults, clamping, and garbage fallback', () => {
+    expect(normalizePersistedState({}, fallback(), 100)!.skillExpansionPrefs).toEqual({ strictMode: true, entryCount: 5 })
+    expect(normalizePersistedState({ skillExpansionPrefs: { strictMode: false, entryCount: 99 } }, fallback(), 100)!.skillExpansionPrefs)
+      .toEqual({ strictMode: false, entryCount: 10 })
+    expect(normalizePersistedState({ skillExpansionPrefs: { strictMode: 'yes', entryCount: -2 } }, fallback(), 100)!.skillExpansionPrefs)
+      .toEqual({ strictMode: true, entryCount: 1 })
+    expect(normalizePersistedState({ skillExpansionPrefs: 'garbage' }, fallback(), 100)!.skillExpansionPrefs)
+      .toEqual({ strictMode: true, entryCount: 5 })
+  })
+
   it.each(['xhigh', 'max'] as const)('restores the %s GPT Image 2.5 quality level', (quality) => {
     const result = normalizePersistedState({ params: { ...DEFAULT_PARAMS, quality } }, fallback(), 100)!
 
@@ -171,6 +181,14 @@ describe('persisted state codec', () => {
     expect(disabled).not.toHaveProperty('prompt')
     expect(disabled).not.toHaveProperty('inputImages')
     expect(disabled.galleryInputDraft).toBeNull()
+  })
+
+  it('persists skill expansion prefs with clamped entry count', () => {
+    const persisted = createPersistedState({
+      ...source(),
+      skillExpansion: { strictMode: false, entryCount: 3 },
+    })
+    expect(persisted.skillExpansionPrefs).toEqual({ strictMode: false, entryCount: 3 })
   })
 
   it('preserves an empty deployed profile snapshot when restoring persisted state', () => {

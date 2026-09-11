@@ -100,7 +100,18 @@ import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveFin
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
 import { BUILTIN_SKILL_IDS, loadBuiltinSkill } from './lib/skillWorkshop/builtinSkills'
 import { scanLocalSkills } from './lib/skillWorkshop/localSkills'
-import { parseExpansionEntries } from './lib/skillWorkshop/expansion'
+import {
+  buildComposeUserInput,
+  buildExtractionInstructions,
+  buildExtractionUserInput,
+  buildExpansionInstructions,
+  buildRetryInstructions,
+  clampSkillEntryCount,
+  parseExpansionEntries,
+  parseExtractionJson,
+  serializeExtractionJson,
+  validateExpansionEntries,
+} from './lib/skillWorkshop/expansion'
 import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
 
 export { ensureImageCached, getCachedImage } from './lib/imageCache'
@@ -304,9 +315,12 @@ export function getPersistedState(state: AppState) {
 function mergePersistedState(persistedState: unknown, currentState: AppState): AppState {
   const plan = normalizePersistedState(persistedState, currentState)
   if (!plan) return currentState
+  const { skillExpansionPrefs, ...rest } = plan
   return {
     ...currentState,
-    ...plan,
+    ...rest,
+    // 扩写偏好回填进运行态 skillExpansion：只覆盖偏好字段，运行态字段维持初始值
+    skillExpansion: { ...currentState.skillExpansion, ...skillExpansionPrefs },
     activeFavoriteCollectionId: null,
     favoritePickerTaskIds: null,
   }
@@ -320,10 +334,51 @@ export interface SkillExpansionEntry {
   enabled: boolean
 }
 
+/** 扩写运行阶段（仅 running 时有意义）：extracting=严格模式第一轮抽变量，composing=成文 */
+export type SkillExpansionPhase = 'extracting' | 'composing' | null
+
 export interface SkillExpansionState {
   status: 'idle' | 'running' | 'error'
   error: string | null
   entries: SkillExpansionEntry[]
+  /** 严格模式（两段式：先抽变量再成文）。用户偏好，持久化，默认 true。 */
+  strictMode: boolean
+  /** 期望条数（1-10）。用户偏好，持久化，默认 5。 */
+  entryCount: number
+  phase: SkillExpansionPhase
+  /** 警告级消息（UI 黄条）：降级/校验未过等「有结果但可能不合规」场景；error 保持硬失败语义 */
+  warning: string | null
+  /** 严格模式抽取轮 JSON 解析失败，已回退单轮 */
+  degraded: boolean
+  /** 正在单条重写的条目 id */
+  rerollingEntryId: string | null
+}
+
+/** 扩写状态工厂：初始 state、切换 skill、中断等重置场景统一从这里出，避免新增字段后散漏 */
+export function makeSkillExpansionState(overrides: Partial<SkillExpansionState> = {}): SkillExpansionState {
+  return {
+    status: 'idle',
+    error: null,
+    entries: [],
+    strictMode: true,
+    entryCount: 5,
+    phase: null,
+    warning: null,
+    degraded: false,
+    rerollingEntryId: null,
+    ...overrides,
+  }
+}
+
+/** 运行态重置/更新：保留用户偏好（strictMode/entryCount）与既有条目，运行态字段回归默认 */
+function resetSkillExpansion(prev: SkillExpansionState, patch: Partial<SkillExpansionState> = {}): SkillExpansionState {
+  return {
+    ...makeSkillExpansionState(),
+    ...patch,
+    entries: patch.entries ?? prev.entries,
+    strictMode: prev.strictMode,
+    entryCount: prev.entryCount,
+  }
 }
 
 export interface SkillWorkshopState {
@@ -443,8 +498,12 @@ interface AppState {
   clearSkillsRootDirectory: () => Promise<void>
   setActiveSkill: (id: string) => void
   setSkillInputDraft: (draft: string) => void
+  /** 扩写偏好（严格模式开关 / 期望条数），立即生效并持久化 */
+  setSkillExpansionPrefs: (patch: { strictMode?: boolean; entryCount?: number }) => void
   runSkillExpansion: () => Promise<void>
   abortSkillExpansion: () => void
+  /** 单条重 roll：携带「替换第 N 条」约束只重新生成该条，成功后原位替换 */
+  rerollSkillEntry: (index: number) => Promise<void>
   updateSkillEntry: (id: string, patch: Partial<Pick<SkillExpansionEntry, 'text' | 'enabled'>>) => void
   removeSkillEntry: (id: string) => void
   generateFromSkillEntries: () => Promise<void>
@@ -1005,7 +1064,7 @@ export const useStore = create<AppState>()(
       skills: { builtin: [], builtinLoading: false, local: [], localRootName: null, scanning: false },
       activeSkillId: null,
       skillInputDraft: '',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
       loadBuiltinSkills: async () => {
         set((state) => ({ skills: { ...state.skills, builtinLoading: true } }))
         const loaded = await Promise.all(BUILTIN_SKILL_IDS.map(async (id): Promise<SkillSummary | null> => {
@@ -1031,56 +1090,120 @@ export const useStore = create<AppState>()(
         // 在飞请求随后返回时被「最新 run」守卫（controller 引用已变/为 null）拦截，不回写。
         skillExpansionAbortController?.abort()
         skillExpansionAbortController = null
-        set({ activeSkillId: id, skillExpansion: { status: 'idle', error: null, entries: [] } })
+        set((prev) => ({ activeSkillId: id, skillExpansion: resetSkillExpansion(prev.skillExpansion, { entries: [] }) }))
       },
       setSkillInputDraft: (skillInputDraft) => set({ skillInputDraft }),
+      setSkillExpansionPrefs: (patch) => set((prev) => ({
+        skillExpansion: {
+          ...prev.skillExpansion,
+          ...(patch.strictMode !== undefined ? { strictMode: patch.strictMode } : {}),
+          ...(patch.entryCount !== undefined ? { entryCount: clampSkillEntryCount(patch.entryCount) } : {}),
+        },
+      })),
       runSkillExpansion: async () => {
         const state = get()
         const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
         // 校验失败不动 entries：保留已扩写结果，用户修正输入后重试不丢条目
         if (!activeSkill) {
-          set((prev) => ({ skillExpansion: { status: 'error', error: '请先选择一个 skill', entries: prev.skillExpansion.entries } }))
+          set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'error', error: '请先选择一个 skill' }) }))
           return
         }
         const userInput = state.skillInputDraft.trim()
         if (!userInput) {
-          set((prev) => ({ skillExpansion: { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）', entries: prev.skillExpansion.entries } }))
+          set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）' }) }))
           return
         }
         const resolution = getSceneTextApiProfileResolution(state.settings)
         if (!resolution.profile) {
-          set((prev) => ({ skillExpansion: { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', entries: prev.skillExpansion.entries } }))
+          set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加' }) }))
           return
         }
-        // 新扩写开始前先 abort 旧请求：旧请求 await 返回后被下方「最新 run」守卫拦截，不再回写污染状态
+        const entryCount = clampSkillEntryCount(state.skillExpansion.entryCount)
+        const strictMode = state.skillExpansion.strictMode
+        // 新扩写开始前先 abort 旧请求（含在飞单条重写）：旧请求 await 返回后被下方
+        // 「最新 run」守卫拦截，不再回写污染状态
         skillExpansionAbortController?.abort()
         const controller = new AbortController()
         skillExpansionAbortController = controller
-        set((prev) => ({ skillExpansion: { status: 'running', error: null, entries: prev.skillExpansion.entries } }))
+        set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: strictMode ? 'extracting' : 'composing' }) }))
         try {
+          // 成文轮的输入与降级标记；严格模式下先抽变量，解析失败回落单轮并标记降级
+          let composeInput = userInput
+          let degraded = false
+          if (strictMode) {
+            const extractRaw = await callSkillExpansionApi({
+              settings: state.settings,
+              profile: resolution.profile,
+              skillBody: activeSkill.body,
+              userInput: buildExtractionUserInput(userInput, entryCount),
+              instructions: buildExtractionInstructions(activeSkill.body),
+              signal: controller.signal,
+            })
+            // 仅最新一次扩写允许继续：被 abort/替换的孤儿请求后到不得再推进
+            if (skillExpansionAbortController !== controller) return
+            const extracted = parseExtractionJson(extractRaw)
+            if (extracted) {
+              set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: 'composing' }) }))
+              composeInput = buildComposeUserInput(userInput, serializeExtractionJson(extracted), entryCount)
+            } else {
+              // 第一轮输出非 JSON：不硬失败，回落单轮直出并在结果上标记降级
+              degraded = true
+              set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: 'composing' }) }))
+            }
+          }
+          const baseInstructions = buildExpansionInstructions(activeSkill.body, entryCount)
           const raw = await callSkillExpansionApi({
             settings: state.settings,
             profile: resolution.profile,
             skillBody: activeSkill.body,
-            userInput,
+            userInput: composeInput,
+            instructions: baseInstructions,
             signal: controller.signal,
           })
-          // 仅最新一次扩写允许回写：被 abort/替换的孤儿请求后到也不得覆盖新结果
           if (skillExpansionAbortController !== controller) return
-          const entries = parseExpansionEntries(raw).map((entry) => ({ ...entry, enabled: true }))
-          set({ skillExpansion: { status: 'idle', error: null, entries } })
+          // 解析后校验 + 一次自动重试：不合格时带具体原因重跑成文轮；仍不合格则
+          // 返回已有结果并置警告级消息（warning 黄条），不硬失败。
+          let entries = parseExpansionEntries(raw).map((entry) => ({ ...entry, enabled: true }))
+          let reasons = validateExpansionEntries(entries, entryCount)
+          if (reasons.length) {
+            set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: 'composing' }) }))
+            const retryRaw = await callSkillExpansionApi({
+              settings: state.settings,
+              profile: resolution.profile,
+              skillBody: activeSkill.body,
+              userInput: composeInput,
+              instructions: buildRetryInstructions(baseInstructions, reasons),
+              signal: controller.signal,
+            })
+            if (skillExpansionAbortController !== controller) return
+            const retryEntries = parseExpansionEntries(retryRaw).map((entry) => ({ ...entry, enabled: true }))
+            const retryReasons = validateExpansionEntries(retryEntries, entryCount)
+            entries = retryEntries
+            reasons = retryReasons
+          }
+          const warnings = [
+            ...(degraded ? ['严格模式变量抽取解析失败，已回退单轮扩写'] : []),
+            ...(reasons.length ? [`扩写可能不符合 skill 规范（${reasons.join('；')}），可点击「扩写提示词」重试`] : []),
+          ]
+          set((prev) => ({
+            skillExpansion: resetSkillExpansion(prev.skillExpansion, {
+              status: 'idle',
+              entries,
+              warning: warnings.length ? warnings.join('；') : null,
+              degraded,
+            }),
+          }))
         } catch (err) {
           if (skillExpansionAbortController !== controller) return
           if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
-            set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
+            set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { entries: [] }) }))
             return
           }
           set((prev) => ({
-            skillExpansion: {
+            skillExpansion: resetSkillExpansion(prev.skillExpansion, {
               status: 'error',
               error: err instanceof Error ? err.message : String(err),
-              entries: prev.skillExpansion.entries,
-            },
+            }),
           }))
         } finally {
           if (skillExpansionAbortController === controller) skillExpansionAbortController = null
@@ -1090,7 +1213,73 @@ export const useStore = create<AppState>()(
         skillExpansionAbortController?.abort()
         skillExpansionAbortController = null
         // 立即回 idle 清空条目；在飞请求随后返回时被「最新 run」守卫拦截，不回写
-        set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
+        set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { entries: [] }) }))
+      },
+      rerollSkillEntry: async (index) => {
+        const state = get()
+        const entries = state.skillExpansion.entries
+        if (index < 0 || index >= entries.length) return
+        const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
+        if (!activeSkill) {
+          state.showToast('请先选择一个 skill', 'error')
+          return
+        }
+        if (state.skillExpansion.rerollingEntryId) return // 单条重写串行：一次只重写一条
+        const resolution = getSceneTextApiProfileResolution(state.settings)
+        if (!resolution.profile) {
+          state.showToast('未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', 'error')
+          return
+        }
+        // 复用「最新 run」守卫：与整批扩写共用同一控制器，新扩写/切 skill/停止都会
+        // abort 本请求，await 返回后被引用比对拦截，不回写。
+        skillExpansionAbortController?.abort()
+        const controller = new AbortController()
+        skillExpansionAbortController = controller
+        const target = entries[index]
+        set((prev) => ({ skillExpansion: { ...prev.skillExpansion, rerollingEntryId: target.id } }))
+        try {
+          const anchorInput = state.skillInputDraft.trim()
+          const othersSummary = entries
+            .filter((_, i) => i !== index)
+            .map((entry, i) => `${i + 1}. ${entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text}`)
+            .join('\n')
+          const rerollInput = [
+            anchorInput ? `锚点要求：${anchorInput}` : null,
+            othersSummary ? `其余现有条目（新条目必须与它们保持明显差异）：\n${othersSummary}` : null,
+            `任务：替换第 ${index + 1} 条。只重新生成这一条提示词，不要输出其他条目或解释。`,
+          ].filter(Boolean).join('\n\n')
+          const raw = await callSkillExpansionApi({
+            settings: state.settings,
+            profile: resolution.profile,
+            skillBody: activeSkill.body,
+            userInput: rerollInput,
+            instructions: buildExpansionInstructions(activeSkill.body, 1),
+            signal: controller.signal,
+          })
+          if (skillExpansionAbortController !== controller) return
+          const text = parseExpansionEntries(raw)[0]?.text.trim()
+          if (!text) throw new Error('重写未返回有效内容')
+          // 原位替换该条：其余条目、勾选状态与偏好均不动
+          set((prev) => ({
+            skillExpansion: {
+              ...prev.skillExpansion,
+              rerollingEntryId: null,
+              entries: prev.skillExpansion.entries.map((entry) => (entry.id === target.id ? { ...entry, text } : entry)),
+            },
+          }))
+        } catch (err) {
+          if (skillExpansionAbortController !== controller) return
+          if (!(controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError'))) {
+            state.showToast(`重写失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+          }
+          set((prev) => ({
+            skillExpansion: prev.skillExpansion.rerollingEntryId === target.id
+              ? { ...prev.skillExpansion, rerollingEntryId: null }
+              : prev.skillExpansion,
+          }))
+        } finally {
+          if (skillExpansionAbortController === controller) skillExpansionAbortController = null
+        }
       },
       updateSkillEntry: (id, patch) => set((state) => ({
         skillExpansion: {

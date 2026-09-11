@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SkillWorkshop } from '../SkillWorkshop'
-import { useStore } from '../../store'
+import { useStore, makeSkillExpansionState } from '../../store'
 import { DEFAULT_SETTINGS, createDefaultOpenAIProfile, normalizeSettings } from '../../lib/apiProfiles'
 import type { SkillSummary, TaskRecord } from '../../types'
 
@@ -66,14 +66,12 @@ function seedStore(options: { withTextProfile?: boolean } = {}) {
     },
     activeSkillId: SKILL_A.id,
     skillInputDraft: '主题：夜市人像',
-    skillExpansion: {
-      status: 'idle',
-      error: null,
+    skillExpansion: makeSkillExpansionState({
       entries: [
         { id: 'e1', text: '提示词一', enabled: true },
         { id: 'e2', text: '提示词二', enabled: true },
       ],
-    },
+    }),
     tasks: [
       buildTask('skill-1', 3000, 'skill'),
       buildTask('general-1', 2500, 'general'),
@@ -124,6 +122,56 @@ describe('SkillWorkshop', () => {
     expect(screen.getByText('我的本地 Skill')).toBeTruthy()
   })
 
+  it('严格模式/条数控件、扩写模型透明化与单条重写按钮', () => {
+    seedStore()
+    const rerollSkillEntry = vi.spyOn(useStore.getState(), 'rerollSkillEntry').mockResolvedValue(undefined)
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    // E. 扩写模型透明化：小字展示生效的文本档案名与模型
+    expect(screen.getByText('扩写模型：文本配置C · gpt-test-text')).toBeTruthy()
+
+    // B. 严格模式开关（默认开）与条数选择（1-10，默认 5），联动 store 偏好
+    const strictToggle = screen.getByLabelText('严格模式') as HTMLInputElement
+    expect(strictToggle.checked).toBe(true)
+    fireEvent.click(strictToggle)
+    expect(useStore.getState().skillExpansion.strictMode).toBe(false)
+    const countSelect = screen.getByLabelText('扩写条数') as HTMLSelectElement
+    expect(countSelect.value).toBe('5')
+    fireEvent.change(countSelect, { target: { value: '3' } })
+    expect(useStore.getState().skillExpansion.entryCount).toBe(3)
+
+    // D. 单条重写：点击调用 rerollSkillEntry(下标)
+    fireEvent.click(screen.getByRole('button', { name: '重写条目 2' }))
+    expect(rerollSkillEntry).toHaveBeenCalledWith(1)
+  })
+
+  it('扩写运行中按阶段显示按钮文案，warning 黄条独立于 error 红色文案', () => {
+    seedStore()
+    useStore.setState({
+      skillExpansion: makeSkillExpansionState({
+        status: 'running',
+        phase: 'extracting',
+        entries: [{ id: 'e1', text: '提示词一', enabled: true }],
+      }),
+    })
+    const { rerender } = render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+    expect(screen.getByRole('button', { name: '抽取变量中…' })).toBeTruthy()
+
+    // 成文阶段 + 警告级消息（降级提示）以黄条展示
+    useStore.setState({
+      skillExpansion: makeSkillExpansionState({
+        status: 'running',
+        phase: 'composing',
+        degraded: true,
+        warning: '严格模式变量抽取解析失败，已回退单轮扩写',
+        entries: [{ id: 'e1', text: '提示词一', enabled: true }],
+      }),
+    })
+    rerender(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+    expect(screen.getByRole('button', { name: '扩写中…' })).toBeTruthy()
+    expect(screen.getByText('严格模式变量抽取解析失败，已回退单轮扩写')).toBeTruthy()
+  })
+
   it('最近生成条只显示 sceneId=skill 的任务且点击打开详情', () => {
     seedStore()
     const setDetailTaskId = vi.spyOn(useStore.getState(), 'setDetailTaskId').mockImplementation(() => {})
@@ -150,11 +198,11 @@ describe('SkillWorkshop', () => {
   it('扩写进行中左列点击不切换 skill（防误触中断在飞请求）', () => {
     seedStore()
     useStore.setState({
-      skillExpansion: {
+      skillExpansion: makeSkillExpansionState({
         status: 'running',
-        error: null,
+        phase: 'composing',
         entries: [{ id: 'e1', text: '提示词一', enabled: true }],
-      },
+      }),
     })
     render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
 

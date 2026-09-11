@@ -24,6 +24,14 @@ export interface PersistedAppState {
   supportPromptDismissed: boolean
   supportPromptOpen: boolean
   supportPromptSkippedForImportedData: boolean
+  /** Skill 工坊扩写偏好（严格模式/期望条数）；旧持久化数据缺失时按默认值兜底 */
+  skillExpansionPrefs?: SkillExpansionPrefs
+}
+
+/** Skill 工坊扩写偏好：与运行态无关的轻量用户设置，跨会话记忆 */
+export interface SkillExpansionPrefs {
+  strictMode: boolean
+  entryCount: number
 }
 
 type PersistedStateSource = Omit<PersistedAppState, 'prompt' | 'inputImages'> & {
@@ -31,6 +39,8 @@ type PersistedStateSource = Omit<PersistedAppState, 'prompt' | 'inputImages'> & 
   inputImages: InputImage[]
   maskDraft: MaskDraft | null
   maskEditorImageId: string | null
+  /** partialize 时从完整 store state 读取扩写偏好（结构宽松，逐字段校验） */
+  skillExpansion?: { strictMode?: unknown; entryCount?: unknown }
 }
 
 type PersistedStateFallback = Pick<
@@ -47,6 +57,7 @@ export type NormalizedPersistedAppState = PersistedAppState & {
   maskDraft: MaskDraft | null
   maskEditorImageId: string | null
   sceneDrafts: SceneDrafts
+  skillExpansionPrefs: SkillExpansionPrefs
 }
 
 /** 参与草稿持久化的场景键（不含 skill） */
@@ -119,6 +130,15 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
   }
 }
 
+/** Skill 扩写偏好归一：非法值回落默认（严格模式开、5 条），条数收口 1-10 */
+export function normalizeSkillExpansionPrefs(value: unknown): SkillExpansionPrefs {
+  if (!isRecord(value)) return { strictMode: true, entryCount: 5 }
+  const entryCount = typeof value.entryCount === 'number' && Number.isFinite(value.entryCount)
+    ? Math.min(10, Math.max(1, Math.round(value.entryCount)))
+    : 5
+  return { strictMode: value.strictMode !== false, entryCount }
+}
+
 export function normalizePromptHistory(value: unknown): PromptHistoryEntry[] {
   if (!Array.isArray(value)) return []
   const entries: PromptHistoryEntry[] = []
@@ -162,6 +182,7 @@ export function createPersistedState(state: PersistedStateSource): PersistedAppS
     favoriteCollections: state.favoriteCollections,
     defaultFavoriteCollectionId: state.defaultFavoriteCollectionId,
     promptHistory: normalizePromptHistory(state.promptHistory),
+    skillExpansionPrefs: normalizeSkillExpansionPrefs(state.skillExpansion),
     supportPromptDismissed: state.supportPromptDismissed,
     supportPromptOpen: state.supportPromptOpen,
     supportPromptSkippedForImportedData: state.supportPromptSkippedForImportedData,
@@ -234,6 +255,7 @@ export function normalizePersistedState(
     defaultFavoriteCollectionId: resolveDefaultFavoriteCollectionId(favoriteCollections, preferredDefaultFavoriteCollectionId),
     promptHistory: normalizePromptHistory(persistedState.promptHistory),
     sceneDrafts: normalizeSceneDrafts(persistedState.sceneDrafts, normalizeParams(persistedState.params, fallback.params)),
+    skillExpansionPrefs: normalizeSkillExpansionPrefs(persistedState.skillExpansionPrefs),
     supportPromptDismissed: Boolean(persistedState.supportPromptDismissed),
     supportPromptOpen: Boolean(persistedState.supportPromptOpen),
     supportPromptSkippedForImportedData: Boolean(persistedState.supportPromptSkippedForImportedData),

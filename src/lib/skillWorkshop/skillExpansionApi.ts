@@ -10,7 +10,7 @@
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from '../devProxy'
 import { createHeaders, extractText, getApiErrorMessage, normalizeResponsePayload } from '../imageApiShared'
 import type { ApiProfile, AppSettings, ResponsesApiResponse } from '../../types'
-import { buildExpansionInstructions } from './expansion'
+import { buildExpansionInstructions, SKILL_ENTRY_COUNT_DEFAULT } from './expansion'
 
 /** 部分 OpenAI 兼容网关直接返回顶层 output_text（SDK 便捷字段形态），类型层补齐该字段。 */
 type SkillExpansionPayload = ResponsesApiResponse & { output_text?: unknown }
@@ -20,9 +20,14 @@ export async function callSkillExpansionApi(opts: {
   profile: ApiProfile
   skillBody: string
   userInput: string
+  /** 覆盖默认契约指令（严格模式抽取轮 / 校验重试轮由调用方构造后传入） */
+  instructions?: string
+  /** 输出契约的条数参数（默认 5）；instructions 覆盖时本参数不参与指令构造 */
+  entryCount?: number
   signal?: AbortSignal
 }): Promise<string> {
   const { settings, profile, skillBody, userInput, signal } = opts
+  const instructions = opts.instructions ?? buildExpansionInstructions(skillBody, opts.entryCount ?? SKILL_ENTRY_COUNT_DEFAULT)
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
   const controller = new AbortController()
@@ -39,7 +44,7 @@ export async function callSkillExpansionApi(opts: {
     const content: Array<Record<string, string>> = [{ type: 'input_text', text: userInput }]
     const body: Record<string, unknown> = {
       model: profile.model || settings.model,
-      instructions: buildExpansionInstructions(skillBody),
+      instructions,
       input: [{ role: 'user', content }],
     }
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
