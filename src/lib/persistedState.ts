@@ -1,4 +1,4 @@
-import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PromptHistoryEntry, TaskParams } from '../types'
+import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PromptHistoryEntry, SceneDraft, SceneDraftSceneId, SceneDrafts, TaskParams } from '../types'
 import { normalizeSettings } from './apiProfiles'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
 import { getPersistableInputImage, isEmptyAgentInputDraft, normalizeAgentInputDraft, saveGalleryInputDraft } from './inputDraftState'
@@ -18,6 +18,9 @@ export interface PersistedAppState {
   defaultFavoriteCollectionId: string | null
   /** 画廊提示词历史；旧持久化数据可能缺失，恢复时由 normalizePromptHistory 兜底为 [] */
   promptHistory?: PromptHistoryEntry[]
+  /** 场景草稿（提示词/参数/输入图 id，均轻量）；与 prompt/inputImages 一样受 persistInputOnRestart 门控，
+   *  旧持久化数据缺失时恢复为 {} */
+  sceneDrafts?: SceneDrafts
   supportPromptDismissed: boolean
   supportPromptOpen: boolean
   supportPromptSkippedForImportedData: boolean
@@ -43,6 +46,45 @@ export type NormalizedPersistedAppState = PersistedAppState & {
   inputImages: InputImage[]
   maskDraft: MaskDraft | null
   maskEditorImageId: string | null
+  sceneDrafts: SceneDrafts
+}
+
+/** 参与草稿持久化的场景键（不含 skill） */
+const SCENE_DRAFT_SCENE_IDS: readonly SceneDraftSceneId[] = ['portrait', 'general', 'sticker']
+
+/** 只保留三个非 skill 场景的合法草稿键，逐字段拷贝防外层可变性渗透 */
+export function toPersistableSceneDrafts(drafts: SceneDrafts | undefined): SceneDrafts {
+  const out: SceneDrafts = {}
+  if (!drafts) return out
+  for (const sceneId of SCENE_DRAFT_SCENE_IDS) {
+    const draft = drafts[sceneId]
+    if (!draft) continue
+    out[sceneId] = {
+      prompt: draft.prompt,
+      params: { ...draft.params },
+      inputImageIds: [...draft.inputImageIds],
+    }
+  }
+  return out
+}
+
+function normalizeSceneDraft(value: unknown, fallbackParams: TaskParams): SceneDraft | null {
+  if (!isRecord(value)) return null
+  return {
+    prompt: typeof value.prompt === 'string' ? value.prompt : '',
+    params: normalizeParams(value.params, fallbackParams),
+    inputImageIds: normalizeStringArray(value.inputImageIds, []),
+  }
+}
+
+function normalizeSceneDrafts(value: unknown, fallbackParams: TaskParams): SceneDrafts {
+  if (!isRecord(value)) return {}
+  const drafts: SceneDrafts = {}
+  for (const sceneId of SCENE_DRAFT_SCENE_IDS) {
+    const draft = normalizeSceneDraft(value[sceneId], fallbackParams)
+    if (draft) drafts[sceneId] = draft
+  }
+  return drafts
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -106,6 +148,7 @@ export function createPersistedState(state: PersistedStateSource): PersistedAppS
       ? {
           prompt: galleryInputDraft?.prompt ?? '',
           inputImages: galleryInputDraft?.inputImages.map(getPersistableInputImage) ?? [],
+          sceneDrafts: toPersistableSceneDrafts(state.sceneDrafts),
         }
       : {}),
     dismissedCodexCliPrompts: state.dismissedCodexCliPrompts,
@@ -187,6 +230,7 @@ export function normalizePersistedState(
     favoriteCollections,
     defaultFavoriteCollectionId: resolveDefaultFavoriteCollectionId(favoriteCollections, preferredDefaultFavoriteCollectionId),
     promptHistory: normalizePromptHistory(persistedState.promptHistory),
+    sceneDrafts: normalizeSceneDrafts(persistedState.sceneDrafts, normalizeParams(persistedState.params, fallback.params)),
     supportPromptDismissed: Boolean(persistedState.supportPromptDismissed),
     supportPromptOpen: Boolean(persistedState.supportPromptOpen),
     supportPromptSkippedForImportedData: Boolean(persistedState.supportPromptSkippedForImportedData),

@@ -3518,6 +3518,11 @@ describe('场景 actions 与保存链', () => {
       tasks: [],
       localAutoSaveRunningTaskIds: {},
       gallerySceneFilter: 'general',
+      // T1 场景草稿隔离：sceneDrafts 跨测试持久会串味（上一用例的草稿被下一用例当成"已有草稿"载入），
+      // 与 prompt/inputImages 一起显式重置，保证每个用例都从"首次进入"语义开始。
+      prompt: '',
+      inputImages: [],
+      sceneDrafts: {},
       showToast: vi.fn(),
     })
   })
@@ -3801,6 +3806,221 @@ describe('场景 actions 与保存链', () => {
     expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
     expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'needs_permission' })
     expect(useStore.getState().showToast).toHaveBeenCalledWith('未获得文件夹写入权限，请允许后重试', 'error')
+  })
+})
+
+describe('场景草稿隔离（T1 sceneDrafts）', () => {
+  beforeEach(() => {
+    useStore.setState({
+      settings: normalizeSettings({
+        profiles: [createDefaultOpenAIProfile({ id: 'scene-draft-profile', apiKey: 'test-key' })],
+        activeProfileId: 'scene-draft-profile',
+        apiKey: 'test-key',
+        scenes: {
+          portrait: { defaults: { ratio: '3:4', tier: '2K' } },
+          sticker: { defaults: { ratio: '1:1', tier: '1K' } },
+        },
+      }),
+      params: { ...DEFAULT_PARAMS },
+      prompt: '',
+      inputImages: [],
+      galleryInputDraft: null,
+      sceneDrafts: {},
+      appMode: 'gallery',
+      gallerySceneFilter: 'general',
+      maskDraft: null,
+      maskEditorImageId: null,
+      showToast: vi.fn(),
+    })
+  })
+
+  it('切走场景保存草稿，切回整体恢复 prompt/params/输入图', () => {
+    useStore.getState().setActiveScene('portrait')
+    useStore.getState().setPrompt('人像提示词')
+    useStore.getState().addInputImage(imageA)
+    useStore.getState().setParams({ quality: 'high', n: 3 })
+
+    // 切到 sticker：portrait 草稿保存，sticker 首次进入为空白工作区（不带出 portrait 的参数）
+    useStore.getState().setActiveScene('sticker')
+    expect(useStore.getState().prompt).toBe('')
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().params.quality).toBe('auto')
+    expect(useStore.getState().params.n).toBe(1)
+    expect(useStore.getState().params.size).toBe(calculateImageSize('1K', '1:1'))
+    expect(useStore.getState().sceneDrafts.portrait).toMatchObject({
+      prompt: '人像提示词',
+      params: { quality: 'high', n: 3 },
+      inputImageIds: [imageA.id],
+    })
+
+    // 切回 portrait：prompt/params/输入图全量恢复（同会话内存 memo，dataUrl 同步可用）
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().prompt).toBe('人像提示词')
+    expect(useStore.getState().params).toMatchObject({
+      quality: 'high',
+      n: 3,
+      size: calculateImageSize('2K', '3:4'),
+    })
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it('首次进入场景：prompt/图片置空，params 以 DEFAULT_PARAMS+场景 defaults 初始化', () => {
+    useStore.setState({
+      prompt: '通用创作的提示词',
+      inputImages: [imageA],
+      params: { ...DEFAULT_PARAMS, quality: 'max', size: '1024x1024' },
+    })
+    useStore.getState().setActiveScene('portrait')
+
+    expect(useStore.getState().prompt).toBe('')
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().params).toEqual({ ...DEFAULT_PARAMS, size: calculateImageSize('2K', '3:4') })
+    // 离开的 general 场景草稿已保存，不丢用户内容
+    expect(useStore.getState().sceneDrafts.general).toMatchObject({
+      prompt: '通用创作的提示词',
+      params: { quality: 'max', size: '1024x1024' },
+      inputImageIds: [imageA.id],
+    })
+  })
+
+  it('迁移：升级后首次启动把全局草稿归属当前场景，首次切换不清空用户草稿', async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    // 模拟老版本升级：只有全局 prompt/params/inputImages，没有 sceneDrafts
+    useStore.setState({
+      prompt: '升级前的全局草稿',
+      params: { ...DEFAULT_PARAMS, quality: 'max' },
+      inputImages: [imageA],
+      sceneDrafts: {},
+    })
+
+    await initStore()
+
+    expect(useStore.getState().sceneDrafts.general).toMatchObject({
+      prompt: '升级前的全局草稿',
+      params: { quality: 'max' },
+      inputImageIds: [imageA.id],
+    })
+
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().prompt).toBe('')
+    useStore.getState().setActiveScene('general')
+    expect(useStore.getState().prompt).toBe('升级前的全局草稿')
+    expect(useStore.getState().params.quality).toBe('max')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it('skill 场景不保存也不载入草稿，底部输入区状态在进出时保持', () => {
+    useStore.setState({
+      prompt: '通用草稿',
+      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      inputImages: [imageA],
+    })
+
+    useStore.getState().setActiveScene('skill')
+    // skill 有独立输入区：全局输入原样保留，不存草稿键
+    expect(useStore.getState().prompt).toBe('通用草稿')
+    expect(useStore.getState().params.quality).toBe('high')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+    expect((useStore.getState().sceneDrafts as Record<string, unknown>).skill).toBeUndefined()
+
+    useStore.getState().setActiveScene('general')
+    // 离开 skill 没有保存草稿；进入 general 恢复的是离开 general 时保存的草稿
+    expect(useStore.getState().prompt).toBe('通用草稿')
+    expect(useStore.getState().params.quality).toBe('high')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+    expect(Object.keys(useStore.getState().sceneDrafts)).not.toContain('skill')
+  })
+
+  it('engine 模式下切换场景：草稿隔离照常生效，galleryInputDraft 不被改写', () => {
+    useStore.setState({
+      appMode: 'engine',
+      galleryInputDraft: { prompt: '引擎前的画廊草稿', inputImages: [], maskDraft: null, maskEditorImageId: null, updatedAt: 1 },
+    })
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().galleryInputDraft?.prompt).toBe('引擎前的画廊草稿')
+    expect(useStore.getState().prompt).toBe('')
+  })
+
+  it('刷新后切回场景：草稿图片按 id 从 IndexedDB 水合；已不存在的图片被丢弃', async () => {
+    await clearImages()
+    await putImage({ id: 'scene-hydrate-image', dataUrl: 'data:image/png;base64,hydrate', source: 'upload', createdAt: 1 })
+    // 模拟 persist 恢复后的形态：草稿只有 id 引用（无 dataUrl），当前停在 general（输入为空）
+    useStore.setState({
+      sceneDrafts: {
+        portrait: {
+          prompt: '刷新前的提示词',
+          params: { ...DEFAULT_PARAMS, quality: 'high' },
+          inputImageIds: ['scene-hydrate-image', 'scene-missing-image'],
+        },
+      },
+    })
+
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().prompt).toBe('刷新前的提示词')
+    // 同步阶段先按 id 恢复占位，dataUrl 由异步水合补齐
+    expect(useStore.getState().inputImages).toEqual([
+      { id: 'scene-hydrate-image', dataUrl: '' },
+      { id: 'scene-missing-image', dataUrl: '' },
+    ])
+
+    await vi.waitFor(() => {
+      expect(useStore.getState().inputImages).toEqual([
+        { id: 'scene-hydrate-image', dataUrl: 'data:image/png;base64,hydrate' },
+      ])
+    })
+  })
+
+  it('切换场景后遮罩目标图不在新场景输入中时清除遮罩', () => {
+    useStore.setState({
+      inputImages: [imageA],
+      maskDraft: { targetImageId: imageA.id, maskDataUrl: 'data:image/png;base64,mask', updatedAt: 1 },
+      maskEditorImageId: imageA.id,
+    })
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().maskDraft).toBeNull()
+    expect(useStore.getState().maskEditorImageId).toBeNull()
+
+    // general 草稿只存了图片引用，没有遮罩
+    useStore.getState().setActiveScene('general')
+    expect(useStore.getState().inputImages.map((img) => img.id)).toEqual([imageA.id])
+    expect(useStore.getState().maskDraft).toBeNull()
+  })
+
+  it('持久化语义：sceneDrafts 跟随 persistInputOnRestart 保存（仅 id 引用，不含 skill 键）', () => {
+    useStore.setState({ prompt: '草稿', inputImages: [imageA] })
+    useStore.getState().setActiveScene('portrait')
+
+    const persisted = getPersistedState(useStore.getState())
+    expect(persisted.sceneDrafts?.general).toMatchObject({ prompt: '草稿', inputImageIds: [imageA.id] })
+    expect(persisted.sceneDrafts && 'skill' in persisted.sceneDrafts).toBe(false)
+
+    useStore.setState({ settings: { ...useStore.getState().settings, persistInputOnRestart: false } })
+    expect(getPersistedState(useStore.getState())).not.toHaveProperty('sceneDrafts')
+  })
+
+  it('持久化恢复：normalizePersistedState 校验 sceneDrafts 字段并丢弃 skill/非法场景键', () => {
+    const restored = normalizePersistedState({
+      settings: { ...DEFAULT_SETTINGS },
+      params: { ...DEFAULT_PARAMS },
+      sceneDrafts: {
+        general: {
+          prompt: '持久化草稿',
+          params: { ...DEFAULT_PARAMS, quality: 'high' },
+          inputImageIds: ['img-1', 42, null],
+        },
+        skill: { prompt: '不应恢复', params: { ...DEFAULT_PARAMS }, inputImageIds: [] },
+        bogus: { prompt: '非法场景键', params: { ...DEFAULT_PARAMS }, inputImageIds: [] },
+      },
+    }, useStore.getState())!
+
+    expect(restored.sceneDrafts.general).toEqual({
+      prompt: '持久化草稿',
+      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      inputImageIds: ['img-1'],
+    })
+    expect(Object.keys(restored.sceneDrafts)).toEqual(['general'])
   })
 })
 

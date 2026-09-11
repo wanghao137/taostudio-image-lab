@@ -15,6 +15,8 @@ import type {
   FavoriteCollection,
   PromptHistoryEntry,
   SceneDefaults,
+  SceneDraftSceneId,
+  SceneDrafts,
   SceneId,
   SceneSettings,
   StoredImage,
@@ -420,6 +422,8 @@ interface AppState {
 
   // 场景
   setActiveScene: (scene: SceneId) => void
+  /** 场景草稿：切换场景时按场景保存/恢复 prompt/params/输入图（skill 场景不参与） */
+  sceneDrafts: SceneDrafts
   setSceneImageProfileId: (scene: SceneId, profileId: string | null) => void
   setSceneImageOverrides: (scene: SceneId, patch: { imageProviderId?: string | null; imageModelOverride?: string | null; imageGenerationModelOverride?: string | null }) => void
   setSceneTextProfileId: (scene: SceneId, profileId: string | null) => void
@@ -517,6 +521,8 @@ function isImageReferencedByState(state: AppState, imageId: string) {
   if (state.promptReverseSource?.imageId === imageId) return true
   if (state.inputImages.some((img) => img.id === imageId)) return true
   if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId)) return true
+  // 其他场景的草稿仍引用该图（草稿隔离后输入图按场景成套），不能当作孤儿回收
+  if (Object.values(state.sceneDrafts).some((draft) => draft?.inputImageIds.includes(imageId))) return true
   return state.tasks.some((task) =>
     task.inputImageIds.includes(imageId) ||
     task.outputImages.includes(imageId) ||
@@ -922,6 +928,7 @@ export const useStore = create<AppState>()(
       retryPendingLocalAutoSaves: async () => retryPendingLocalAutoSaves(),
 
       // Scenes
+      sceneDrafts: {},
       setActiveScene: (scene) => {
         const state = get()
         // 同场景重复点击：不重放默认参数，但要修复漂移的画廊过滤
@@ -930,8 +937,51 @@ export const useStore = create<AppState>()(
           if (state.gallerySceneFilter !== scene) set({ gallerySceneFilter: scene })
           return
         }
-        set({ settings: { ...state.settings, activeScene: scene }, gallerySceneFilter: scene })
-        applySceneDefaults(scene)
+        const previousScene = state.settings.activeScene
+        const sceneDrafts: SceneDrafts = { ...state.sceneDrafts }
+        // 离开非 skill 场景：当前工作区快照（prompt/params/输入图 id）存入该场景草稿；
+        // 完整输入图对象（含预览 dataUrl）同时进内存 memo，同会话切回零延迟恢复。
+        if (previousScene !== 'skill') {
+          sceneDrafts[previousScene] = {
+            prompt: state.prompt,
+            params: { ...state.params },
+            inputImageIds: state.inputImages.map((img) => img.id),
+          }
+          sceneDraftImageMemo.set(previousScene, state.inputImages)
+        }
+
+        let inputPatch: Partial<Pick<AppState, 'prompt' | 'inputImages' | 'maskDraft' | 'maskEditorImageId' | 'galleryInputDraft'>> = {}
+        let nextParams = state.params
+        let restoredImages: InputImage[] = []
+        if (scene !== 'skill') {
+          const draft = sceneDrafts[scene]
+          // 进入非 skill 场景：有草稿整体恢复；首次进入 prompt/图片置空、参数以场景 defaults 初始化。
+          restoredImages = draft ? resolveSceneDraftImages(scene, draft.inputImageIds) : []
+          const incomingImageIds = new Set(restoredImages.map((img) => img.id))
+          inputPatch = syncActiveInputDraft(state, {
+            prompt: draft?.prompt ?? '',
+            inputImages: restoredImages,
+            // 遮罩归属目标图：目标图不在新场景输入中时清除，避免跨场景携带失效遮罩
+            ...(state.maskDraft && !incomingImageIds.has(state.maskDraft.targetImageId)
+              ? { maskDraft: null, maskEditorImageId: null }
+              : {}),
+          })
+          nextParams = draft ? { ...draft.params } : buildSceneInitialParams(scene)
+          sceneDraftHydrationToken += 1
+        }
+
+        set({
+          settings: { ...state.settings, activeScene: scene },
+          gallerySceneFilter: scene,
+          sceneDrafts,
+          params: nextParams,
+          ...inputPatch,
+        })
+
+        // 草稿输入图跨刷新只剩 id：异步从 IndexedDB 补回预览 dataUrl（skill 场景不载入草稿）
+        if (scene !== 'skill' && restoredImages.length > 0) {
+          void hydrateSceneDraftImages(scene, restoredImages, sceneDraftHydrationToken)
+        }
       },
       setSceneImageProfileId: (scene, profileId) => {
         patchSceneSettings(scene, { imageProfileId: profileId })
@@ -1666,6 +1716,8 @@ export async function initStore() {
   // 页面加载/刷新：重置数据清除标志，允许从（已清空后的）IndexedDB 正常加载，
   // 并允许后续生成正常写入。
   tasksCleared = false
+  // 场景草稿迁移 + 刷新恢复：persist 恢复完成后，把全局输入归属到当前场景草稿键
+  syncActiveSceneDraftFromGlobalInput()
   await refreshTaskStorageGeneration()
   const initTaskStorageGeneration = taskStorageGeneration
   // Agent 功能已移除（2026-09 设计决策）：一次性清空存量会话并释放其引用图；
@@ -1725,6 +1777,8 @@ export async function initStore() {
   if (galleryInputDraft) {
     for (const img of galleryInputDraft.inputImages) referencedIds.add(img.id)
   }
+  // 其他场景的草稿仍引用其输入图：草稿隔离后这些图不属于孤儿
+  addSceneDraftReferencedImageIds(referencedIds, state.sceneDrafts)
   for (const t of tasks) {
     addTaskReferencedImageIds(referencedIds, t)
   }
@@ -1995,10 +2049,11 @@ async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
   const candidates = Array.from(new Set(Array.from(imageIds).filter(Boolean)))
   if (candidates.length === 0) return
 
-  const { tasks, inputImages, galleryInputDraft } = useStore.getState()
+  const { tasks, inputImages, galleryInputDraft, sceneDrafts } = useStore.getState()
   const stillUsed = new Set<string>()
   for (const task of tasks) addTaskReferencedImageIds(stillUsed, task)
   addInputDraftReferencedImageIds(stillUsed, galleryInputDraft)
+  addSceneDraftReferencedImageIds(stillUsed, sceneDrafts)
   for (const img of inputImages) stillUsed.add(img.id)
 
   for (const imgId of candidates) {
@@ -2401,19 +2456,91 @@ function patchSceneSettings(sceneId: SceneId, patch: Partial<SceneSettings>) {
   })
 }
 
-/** 切换场景时应用场景默认参数：只覆盖场景显式给出的维度，其余参数保持用户当前值 */
-function applySceneDefaults(sceneId: SceneId) {
-  const { settings, params } = useStore.getState()
-  const defaults = settings.scenes[sceneId].defaults
-  const patch: Partial<TaskParams> = {}
+// ===== 场景草稿隔离 =====
+
+/**
+ * 同会话内记住各场景输入图的完整对象（含预览 dataUrl）：切走场景时快照、切回时同步零延迟恢复。
+ * 跨刷新时草稿只剩 id（persist 轻量化），由 hydrateSceneDraftImages 从 IndexedDB 补回。仅内存，不持久化。
+ */
+const sceneDraftImageMemo = new Map<SceneDraftSceneId, InputImage[]>()
+
+/** 每次真实场景切换递增：用于丢弃过期场景切换触发的异步图片水合结果 */
+let sceneDraftHydrationToken = 0
+
+/** 草稿输入图 id → 输入图对象：优先用同会话 memo（有预览 dataUrl），跨刷新时占位 dataUrl 空串待水合 */
+function resolveSceneDraftImages(scene: SceneDraftSceneId, inputImageIds: string[]): InputImage[] {
+  const remembered = sceneDraftImageMemo.get(scene) ?? []
+  return inputImageIds.map((id) => remembered.find((img) => img.id === id) ?? { id, dataUrl: '' })
+}
+
+/** 首次进入场景时以 DEFAULT_PARAMS 为底、按场景 defaults 覆盖（ratio/tier → size；透明开关）。
+ *  旧 applySceneDefaults「每次切换都重算」的语义已随草稿隔离废弃：defaults 只在首次进入时生效。 */
+function buildSceneInitialParams(sceneId: SceneId): TaskParams {
+  const defaults = useStore.getState().settings.scenes[sceneId].defaults
+  const params: TaskParams = { ...DEFAULT_PARAMS }
   if (defaults.ratio || defaults.tier) {
     // calculateImageSize 对无法解析的比例返回 null（如 '1:1' 缺省回落始终有效，此保护针对异常自定义值）
     const size = calculateImageSize(defaults.tier ?? '1K', defaults.ratio ?? '1:1')
-    if (size) patch.size = size
+    if (size) params.size = size
   }
-  if (defaults.transparentBackground === true && params.output_format === 'png') patch.transparent_output = true
-  if (defaults.transparentBackground === false) patch.transparent_output = false
-  if (Object.keys(patch).length) useStore.getState().setParams(patch)
+  if (defaults.transparentBackground === true && params.output_format === 'png') params.transparent_output = true
+  if (defaults.transparentBackground === false) params.transparent_output = false
+  return params
+}
+
+/** 草稿输入图跨刷新只剩 id：从 IndexedDB 按 id 补回预览 dataUrl；
+ *  已被清理/删除的图片直接丢弃（置空），避免渲染空预览或发出无效编辑请求。 */
+async function hydrateSceneDraftImages(scene: SceneDraftSceneId, resolvedImages: InputImage[], token: number) {
+  if (resolvedImages.every((img) => img.dataUrl)) return
+  const restored: InputImage[] = []
+  for (const img of resolvedImages) {
+    if (img.dataUrl) {
+      restored.push(img)
+      continue
+    }
+    try {
+      const storedImage = await getImage(img.id)
+      if (storedImage?.dataUrl) {
+        cacheImage(img.id, storedImage.dataUrl)
+        restored.push(restoreInputImageFromStoredImage(img, storedImage))
+      }
+      // 找不到已存图：该图丢弃，剩余图照常恢复
+    } catch {
+      // 单张读取失败按缺失处理
+    }
+  }
+  const latest = useStore.getState()
+  // 场景已再切换 / 输入已被用户改动（增删图）时放弃回写，避免覆盖新状态
+  if (token !== sceneDraftHydrationToken || latest.settings.activeScene !== scene) return
+  if (latest.inputImages.map((img) => img.id).join('|') !== resolvedImages.map((img) => img.id).join('|')) return
+  useStore.getState().setInputImages(restored)
+}
+
+/** 启动时把全局输入写回当前场景草稿键，承担两个职责：
+ *  1. 迁移：老版本没有 sceneDrafts，升级后首次启动即把存量全局草稿归属到当前场景，避免升级即清空；
+ *  2. 刷新恢复：persist 恢复的全局输入比「上次切走时保存的草稿」更新（用户可能输入后没切场景就刷新），
+ *     以全局输入为准写回当前场景键。skill 场景不使用底部输入区，不参与。 */
+function syncActiveSceneDraftFromGlobalInput() {
+  const { settings, prompt, params, inputImages, sceneDrafts } = useStore.getState()
+  if (settings.activeScene === 'skill') return
+  useStore.setState({
+    sceneDrafts: {
+      ...sceneDrafts,
+      [settings.activeScene]: {
+        prompt,
+        params: { ...params },
+        inputImageIds: inputImages.map((img) => img.id),
+      },
+    },
+  })
+  sceneDraftImageMemo.set(settings.activeScene, inputImages)
+}
+
+/** 收集场景草稿引用的图片 id：孤儿清扫 / 删除回收时这些图不能被当作无引用清理 */
+function addSceneDraftReferencedImageIds(target: Set<string>, drafts: SceneDrafts) {
+  for (const draft of Object.values(drafts)) {
+    for (const id of draft?.inputImageIds ?? []) target.add(id)
+  }
 }
 
 export async function selectSceneSaveDirectory(sceneId: SceneId) {
@@ -3256,9 +3383,12 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     }
 
     clearImageCaches()
+    // 场景草稿引用的输入图已随 images 清空：草稿一并清空，内存 memo 同步释放
+    sceneDraftImageMemo.clear()
     useStore.setState({
       supportPromptOpen: false,
       supportPromptSkippedForImportedData: false,
+      sceneDrafts: {},
     })
     clearInputImages()
     clearMaskDraft()

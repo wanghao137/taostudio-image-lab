@@ -122,6 +122,18 @@ export interface LocalAutoSaveTaskState {
 
 export type SceneId = 'portrait' | 'general' | 'sticker' | 'skill'
 export const SCENE_ID_VALUES = ['portrait', 'general', 'sticker', 'skill'] as const
+/** 参与底部输入区草稿隔离的场景（skill 工坊有独立输入区，不参与） */
+export type SceneDraftSceneId = Exclude<SceneId, 'skill'>
+
+/** 场景草稿：切换场景时按场景保存/恢复的工作区快照（提示词 + 参数 + 输入图引用） */
+export interface SceneDraft {
+  prompt: string
+  params: TaskParams
+  /** 输入图只存 IndexedDB 引用 id：图片数据不进草稿，预览 dataUrl 在内存缓存/IndexedDB 按 id 找回 */
+  inputImageIds: string[]
+}
+
+export type SceneDrafts = Partial<Record<SceneDraftSceneId, SceneDraft>>
 
 export interface SceneDefaults {
   /** COMMON_IMAGE_RATIOS 的比例 key（如 '3:4'、'1:1'）；缺省不覆盖 */
