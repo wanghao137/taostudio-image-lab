@@ -10,6 +10,25 @@ describe('parseSkillMarkdown', () => {
     expect(r.body).toContain('# 标题')
     expect(r.body).toContain('正文内容')
   })
+  it('frontmatter 含 title：解析出 title 中文标题', () => {
+    const md = '---\nname: vibeshot-candid-photography\ntitle: 生活感随手抓拍写真\ndescription: 描述。\n---\n\n正文'
+    const r = parseSkillMarkdown(md, 'fallback')!
+    expect(r.title).toBe('生活感随手抓拍写真')
+    expect(r.name).toBe('vibeshot-candid-photography')
+    expect(r.body).toContain('正文')
+  })
+  it('frontmatter 无 title：title 为 undefined（展示层回落 name）', () => {
+    const md = '---\nname: my-skill\ndescription: 描述。\n---\n正文'
+    const r = parseSkillMarkdown(md, 'fallback')!
+    expect(r.name).toBe('my-skill')
+    expect(r.title).toBeUndefined()
+  })
+  it('title 为空串：视为未设置（undefined），回落 name', () => {
+    const md = '---\nname: my-skill\ntitle: \ndescription: 描述。\n---\n正文'
+    const r = parseSkillMarkdown(md, 'fallback')!
+    expect(r.title).toBeUndefined()
+    expect(r.name).toBe('my-skill')
+  })
   it('无 frontmatter：name=fallback，body=全文', () => {
     const r = parseSkillMarkdown('就是一段提示词体系', 'my-skill')!
     expect(r.name).toBe('my-skill')

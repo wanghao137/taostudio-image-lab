@@ -176,8 +176,11 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
         <div className="min-w-0 space-y-4 p-4">
           <div>
             <h3 className="text-base font-bold text-stone-900 dark:text-stone-50">
-              {activeSkill ? activeSkill.name : '未选择 skill'}
+              {activeSkill ? (activeSkill.title ?? activeSkill.name) : '未选择 skill'}
             </h3>
+            {activeSkill?.title && activeSkill.title !== activeSkill.name && (
+              <p className="mt-0.5 truncate font-mono text-xs text-stone-400 dark:text-stone-500">{activeSkill.name}</p>
+            )}
             {activeSkill?.description && (
               <p className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">{activeSkill.description}</p>
             )}
@@ -324,7 +327,7 @@ function SkillListItem({
       <span className={`block truncate text-[13px] font-medium ${
         active ? 'text-[#b4552f] dark:text-[#ffb096]' : 'text-stone-700 dark:text-stone-200'
       }`}>
-        {skill.name}
+        {skill.title ?? skill.name}
       </span>
       <span className="mt-0.5 block truncate text-xs text-stone-400 dark:text-stone-500">{skill.description}</span>
     </button>

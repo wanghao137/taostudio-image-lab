@@ -9,6 +9,7 @@ import type { SkillSummary, TaskRecord } from '../../types'
 const SKILL_A: SkillSummary = {
   id: 'vibeshot',
   name: 'Vibeshot 抓拍',
+  title: '生活感随手抓拍写真',
   description: '生活感人像抓拍风格',
   source: 'builtin',
   body: '# 正文 A',
@@ -91,11 +92,12 @@ describe('SkillWorkshop', () => {
     seedStore()
     render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
 
-    // 左列：分区标题与计数、三个 skill 条目（激活 skill 的名称/描述在左列与右列各出现一次）
+    // 左列：分区标题与计数、三个 skill 条目（激活 skill 的 title 在左列与右列各出现一次，name 以副行保留）
     expect(screen.getByText('内置 (2)')).toBeTruthy()
     expect(screen.getByText('本地 (1)')).toBeTruthy()
-    expect(screen.getAllByText('Vibeshot 抓拍')).toHaveLength(2)
+    expect(screen.getAllByText('生活感随手抓拍写真')).toHaveLength(2)
     expect(screen.getAllByText('生活感人像抓拍风格')).toHaveLength(2)
+    expect(screen.getByText('Vibeshot 抓拍')).toBeTruthy()
     expect(screen.getByText('Voyeur 风格')).toBeTruthy()
     expect(screen.getByText('我的本地 Skill')).toBeTruthy()
     expect(screen.getByText('导入目录')).toBeTruthy()
@@ -107,6 +109,19 @@ describe('SkillWorkshop', () => {
     expect(screen.getByLabelText('条目 1 提示词')).toBeTruthy()
     expect(screen.getByLabelText('条目 2 提示词')).toBeTruthy()
     expect(screen.getByRole('button', { name: '生成 2 张图片' })).toBeTruthy()
+  })
+
+  it('skill 含 title 时主显 title 且保留 name 副行；无 title 时回落 name', () => {
+    seedStore()
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    // 有 title：左列列表项与右侧详情主标题均主显中文 title
+    expect(screen.getAllByText('生活感随手抓拍写真')).toHaveLength(2)
+    // 右侧详情在 title 下方以小字等宽保留英文 name，可追溯
+    expect(screen.getByText('Vibeshot 抓拍')).toBeTruthy()
+    // 无 title 的 skill（内置 B / 本地）主行回落 name，不渲染重复副行
+    expect(screen.getByText('Voyeur 风格')).toBeTruthy()
+    expect(screen.getByText('我的本地 Skill')).toBeTruthy()
   })
 
   it('最近生成条只显示 sceneId=skill 的任务且点击打开详情', () => {

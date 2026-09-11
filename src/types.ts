@@ -429,6 +429,8 @@ export interface FavoriteCollection {
 export interface SkillSummary {
   /** 展示名（frontmatter name，无则目录名） */
   name: string
+  /** 可选中文标题（frontmatter title，未设置/空串为 undefined），展示层回落 name */
+  title?: string
   description: string
   /** 来源目录名（内置=public/skills 目录名，本地=一级子目录名），作稳定 id */
   id: string

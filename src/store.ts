@@ -959,7 +959,7 @@ export const useStore = create<AppState>()(
         const loaded = await Promise.all(BUILTIN_SKILL_IDS.map(async (id): Promise<SkillSummary | null> => {
           const parsed = await loadBuiltinSkill(id)
           if (!parsed) return null
-          return { id, name: parsed.name, description: parsed.description, body: parsed.body, source: 'builtin' }
+          return { id, name: parsed.name, title: parsed.title, description: parsed.description, body: parsed.body, source: 'builtin' }
         }))
         const builtin = loaded.filter((skill): skill is SkillSummary => skill !== null)
         set((state) => ({
