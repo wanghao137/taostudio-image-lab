@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import { DEFAULT_PARAMS } from './types'
-import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from './lib/apiProfiles'
+import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, getCustomProviderDefinition, getSceneImageApiProfile, normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
 import type { AgentConversation, AppSettings, ExportData, SkillSummary, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
 import { getSelectedImageMentionLabel } from './lib/promptImageMentions'
 import { hasActiveDataOperations } from './lib/dataOperations'
@@ -213,6 +213,16 @@ vi.mock('./lib/falAiImageApi', () => ({
     revisedPrompts: [],
   })),
 }))
+vi.mock('./lib/openaiCompatibleImageApi', () => ({
+  // store.ts 仅从该模块导入恢复轮询入口；请求侧经被 mock 的 ./lib/api 走，
+  // 此处 mock 让「自定义异步恢复链」在测试中可观测且不发真实请求。
+  getCustomQueuedImageResult: vi.fn(async () => ({
+    images: [],
+    actualParams: {},
+    actualParamsList: [],
+    revisedPrompts: [],
+  })),
+}))
 vi.mock('./lib/transparentImage', () => ({
   GREEN_KEY_COLOR: '#00FF00',
   MAGENTA_KEY_COLOR: '#FF00FF',
@@ -302,6 +312,7 @@ import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { formatExportFileTime } from './lib/exportFileName'
 import { calculateImageSize } from './lib/size'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
+import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
@@ -3790,6 +3801,179 @@ describe('场景 actions 与保存链', () => {
     expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
     expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'needs_permission' })
     expect(useStore.getState().showToast).toHaveBeenCalledWith('未获得文件夹写入权限，请允许后重试', 'error')
+  })
+})
+
+describe('场景 provider 覆盖执行链（Fix Round 1）', () => {
+  // openai 当前 + sb2api-async（内置异步自定义 provider，带 poll/taskIdPath）草稿：
+  // 全局切换过服务商再切回的真实形态；场景覆盖到 sb2api-async。
+  const SB2API_ASYNC = getCustomProviderDefinition({}, 'sb2api-async')!
+
+  function buildAsyncOverrideSettings() {
+    const base = createDefaultOpenAIProfile({ id: 'scene-exec-profile', name: '场景执行配置', apiKey: 'openai-key' })
+    let onAsync = switchApiProfileProvider(base, 'sb2api-async', SB2API_ASYNC ?? undefined)
+    onAsync = { ...onAsync, baseUrl: 'https://async.example.com/v1', apiKey: 'async-key', model: 'async-model' }
+    const profileWithDraft = switchApiProfileProvider(onAsync, 'openai')
+    return normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      profiles: [profileWithDraft],
+      activeProfileId: profileWithDraft.id,
+      activeScene: 'skill',
+      scenes: {
+        skill: {
+          imageProfileId: profileWithDraft.id,
+          imageProviderId: 'sb2api-async',
+          imageModelOverride: null,
+          imageGenerationModelOverride: null,
+        },
+      },
+    })
+  }
+
+  function resetExecutionState(overrides: Partial<ReturnType<typeof useStore.getState>> = {}) {
+    useStore.setState({
+      settings: buildAsyncOverrideSettings(),
+      prompt: '场景覆盖执行链',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      showToast: vi.fn(),
+      ...overrides,
+    })
+  }
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(putDbTask).mockClear()
+    vi.mocked(getCustomQueuedImageResult).mockClear()
+    vi.useRealTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('场景覆盖为异步自定义 provider：执行链走异步轮询路径，不调度 OpenAI 看门狗（晚到成功不丢）', async () => {
+    vi.useFakeTimers()
+    const apiDeferred = deferred<{ images: string[]; actualParams: Record<string, unknown>; actualParamsList: Array<Partial<Record<string, unknown>>>; revisedPrompts: (string | null)[] }>()
+    vi.mocked(callImageApi).mockReturnValueOnce(apiDeferred.promise as ReturnType<typeof callImageApi>)
+    resetExecutionState()
+
+    await submitTask()
+    expect(useStore.getState().tasks.length).toBe(1)
+    const taskId = useStore.getState().tasks[0].id
+    // 打点侧（请求链）：任务快照记录覆盖后 provider
+    expect(useStore.getState().tasks[0].apiProvider).toBe('sb2api-async')
+    await vi.advanceTimersByTimeAsync(0) // 让 executeTask 跑到 callImageApi 挂起
+
+    // 推进超过看门狗全窗口（timeout 600s + 宽限 1830s）：若执行链误挂 raw provider
+    // （openai），会调度 OpenAI 看门狗并在此误杀排队/轮询中的任务。
+    await vi.advanceTimersByTimeAsync(600_000 + (600 * 4 + 30 - 600) * 1000 + 1_000)
+    const midTask = useStore.getState().tasks.find((t) => t.id === taskId)
+    expect(midTask?.status).toBe('running')
+    expect(useStore.getState().showToast).not.toHaveBeenCalledWith('OpenAI 任务请求超时', 'error')
+
+    // 晚到的成功结果不丢（看门狗误杀后这里会停留在 error 且图片被清理）
+    apiDeferred.resolve({
+      images: ['data:image/png;base64,11x11'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    const doneTask = useStore.getState().tasks.find((t) => t.id === taskId)
+    expect(doneTask?.status).toBe('done')
+    expect(doneTask?.outputImages.length).toBe(1)
+  })
+
+  it('场景覆盖为异步自定义 provider：capRequestSize 用覆盖后 provider 判定，4K 请求不收口；isAsyncCustomTask 正确分类', async () => {
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      opts.onCustomTaskEnqueued?.({ taskId: 'async-queued-task-1' })
+      return {
+        images: ['data:image/png;base64,11x11'],
+        actualParams: {},
+        actualParamsList: [],
+        revisedPrompts: ['接口改写后的提示词'],
+      } as Awaited<ReturnType<typeof callImageApi>>
+    })
+    resetExecutionState({ params: { ...DEFAULT_PARAMS, size: '3072x2048', exact_size: true } })
+
+    await submitTask()
+    for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const doneTask = useStore.getState().tasks[0]
+    expect(doneTask.status).toBe('done')
+    expect(doneTask.customTaskId).toBe('async-queued-task-1')
+
+    // 执行侧传给请求链的 settings 与请求链同源：场景解析后 provider 是覆盖值
+    const requestSettings = vi.mocked(callImageApi).mock.calls[0][0].settings
+    expect(getSceneImageApiProfile(requestSettings, 'skill').provider).toBe('sb2api-async')
+    // capRequestSize 用覆盖后 provider：openai 才收口 4K → 此处保持原尺寸
+    const requestParams = vi.mocked(callImageApi).mock.calls[0][0].params
+    expect(requestParams.size).toBe('3072x2048')
+    expect(requestParams.exact_size).toBe(true)
+    // isAsyncCustomTask 分类正确（openai 误分类会把接口改写提示词存成 revisedPromptByImage）
+    expect(doneTask.revisedPromptByImage).toBeUndefined()
+  })
+
+  it('getCustomRecoveryProfile 覆盖场景可解析：断网恢复轮询拿到覆盖后的 profile 而非被相等性检查禁用', async () => {
+    vi.useFakeTimers()
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      opts.onCustomTaskEnqueued?.({ taskId: 'async-queued-task-2' })
+      throw new DOMException('The operation was aborted', 'AbortError')
+    })
+    vi.mocked(getCustomQueuedImageResult).mockResolvedValueOnce({
+      images: ['data:image/png;base64,9x9'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    resetExecutionState()
+
+    await submitTask()
+    await vi.advanceTimersByTimeAsync(0) // 请求 AbortError → customRecoverable + 10s 恢复定时器
+    const errorTask = useStore.getState().tasks[0]
+    expect(errorTask.status).toBe('error')
+    expect(errorTask.customRecoverable).toBe(true)
+    expect(errorTask.customTaskId).toBe('async-queued-task-2')
+
+    await vi.advanceTimersByTimeAsync(10_000) // CUSTOM_RECOVERY_POLL_MS
+
+    // 恢复链用覆盖后的 profile（sb2api-async + 草稿 baseUrl）成功轮询并恢复任务；
+    // 若 raw profile 参与 taskProfile.provider === task.apiProvider 相等性检查，恢复会被禁用。
+    expect(vi.mocked(getCustomQueuedImageResult)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(getCustomQueuedImageResult).mock.calls[0][0]).toMatchObject({
+      provider: 'sb2api-async',
+      baseUrl: 'https://async.example.com/v1',
+      apiKey: 'async-key',
+    })
+    const recoveredTask = useStore.getState().tasks[0]
+    expect(recoveredTask.status).toBe('done')
+    expect(recoveredTask.customRecoverable).toBe(false)
+  })
+
+  it('任务场景未引用该配置时守卫不命中：仍走 raw provider 语义（OpenAI 看门狗正常调度，覆盖不跨场景泄漏）', async () => {
+    vi.useFakeTimers()
+    const apiDeferred = deferred<{ images: string[]; actualParams: Record<string, unknown>; actualParamsList: Array<Partial<Record<string, unknown>>>; revisedPrompts: (string | null)[] }>()
+    vi.mocked(callImageApi).mockReturnValueOnce(apiDeferred.promise as ReturnType<typeof callImageApi>)
+    // skill 场景引用 P 并覆盖 sb2api-async；但 activeScene=general（未引用具体配置）→
+    // 任务打点用全局激活链（raw openai），守卫不命中，执行链保持 raw provider 语义。
+    const settings = buildAsyncOverrideSettings()
+    resetExecutionState({ settings: normalizeSettings({ ...settings, activeScene: 'general', scenes: { skill: settings.scenes.skill } }) })
+
+    await submitTask()
+    expect(useStore.getState().tasks[0].apiProvider).toBe('openai')
+    await vi.advanceTimersByTimeAsync(0)
+
+    // raw openai 任务照常调度看门狗：推进全窗口后按超时失败（守卫修复不改变非覆盖路径）
+    await vi.advanceTimersByTimeAsync(600_000 + (600 * 4 + 30 - 600) * 1000 + 1_000)
+    const timedOutTask = useStore.getState().tasks[0]
+    expect(timedOutTask.status).toBe('error')
+    expect(timedOutTask.error).toContain('请求超时')
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('OpenAI 任务请求超时', 'error')
   })
 })
 

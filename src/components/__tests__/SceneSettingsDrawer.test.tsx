@@ -244,4 +244,48 @@ describe('SceneSettingsDrawer 生图模型覆盖（Fix C）', () => {
     expect(scene.imageModelOverride).toBeNull()
     expect(scene.imageGenerationModelOverride).toBeNull()
   })
+
+  it('Minor 1：全局切到与场景覆盖相同 provider 后，服务商 Select 补兜底选项而非显示裸 id', () => {
+    // 全局把该配置切到 custom-chatgpt2api（草稿被消费，只剩 openai 草稿）；
+    // 场景内存里的 imageProviderId 仍是 custom-chatgpt2api（未归一化折叠的残留值）。
+    let onCustom = switchApiProfileProvider(IMAGE_PROFILE_A, CHATGPT2API_PROVIDER.id, CHATGPT2API_PROVIDER)
+    onCustom = { ...onCustom, baseUrl: 'https://chatgpt2api.example.com/v1', apiKey: 'cg-key', model: 'cg-model' }
+    const settings = buildSceneReferencingSettings([onCustom])
+    const scene = settings.scenes.general
+    useStore.setState({
+      settings: {
+        ...settings,
+        scenes: { ...settings.scenes, general: { ...scene, imageProviderId: CHATGPT2API_PROVIDER.id } },
+      },
+    })
+
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    // 触发器显示该 provider 的 label（兜底选项命中），而不是裸 id
+    expect(screen.getByText('chatgpt2api 网关')).toBeTruthy()
+    expect(screen.queryByText(CHATGPT2API_PROVIDER.id)).toBeNull()
+
+    // 打开下拉：兜底选项存在，仍可选「跟随」清掉残留覆盖
+    fireEvent.click(screen.getByText('chatgpt2api 网关'))
+    expect(document.querySelector(`[data-option-value="${CHATGPT2API_PROVIDER.id}"]`)).toBeTruthy()
+    clickSelectOption('')
+    expect(useStore.getState().settings.scenes.general.imageProviderId).toBeNull()
+  })
+
+  it('Minor 2：onBlur trim 后与已存值相同时跳过提交，但输入框回写 trim 后文本', () => {
+    const profile = buildProfileWithDraft()
+    useStore.setState({
+      settings: buildSceneReferencingSettings([profile], { imageModelOverride: 'scene-model' }),
+    })
+
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    const modelInput = screen.getByLabelText('模型 ID') as HTMLInputElement
+    expect(modelInput.value).toBe('scene-model')
+    // 输入同值但带空白：blur 后不重复提交，且输入框不留残留空白
+    fireEvent.change(modelInput, { target: { value: '  scene-model  ' } })
+    fireEvent.blur(modelInput)
+    expect((screen.getByLabelText('模型 ID') as HTMLInputElement).value).toBe('scene-model')
+    expect(useStore.getState().settings.scenes.general.imageModelOverride).toBe('scene-model')
+  })
 })

@@ -1360,13 +1360,22 @@ export function showCodexCliPrompt(force = false, reason = '接口返回的提�
 
 function getFalRecoveryProfile(settings: AppSettings, task: TaskRecord) {
   const taskProfile = getTaskApiProfile(settings, task)
-  if (taskProfile?.provider === 'fal' && task.apiProvider === 'fal') return taskProfile
+  if (!taskProfile) return null
+  // 与执行链同语义的场景覆盖解析：场景把服务商覆盖到 fal 时，raw profile 的
+  // provider（如 openai）≠ task.apiProvider（fal），不解析会错误禁用 fal 恢复。
+  const profile = getSceneOverriddenTaskProfile(settings, task, taskProfile)
+  if (profile.provider === 'fal' && task.apiProvider === 'fal') return profile
   return null
 }
 
 function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {
   const taskProfile = getTaskApiProfile(settings, task)
-  if (taskProfile && taskProfile.provider === task.apiProvider && taskProfile.provider !== 'openai' && taskProfile.provider !== 'fal') return taskProfile
+  if (!taskProfile) return null
+  // 与执行链同语义的场景覆盖解析：场景把服务商覆盖为异步自定义 provider 时，
+  // raw profile 的 provider ≠ task.apiProvider，不解析会因相等性检查失败而
+  // 错误禁用自定义异步恢复（恢复轮询拿不到正确的 baseUrl/apiKey）。
+  const profile = getSceneOverriddenTaskProfile(settings, task, taskProfile)
+  if (profile.provider === task.apiProvider && profile.provider !== 'openai' && profile.provider !== 'fal') return profile
   return null
 }
 
@@ -1374,6 +1383,23 @@ export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiP
   const normalized = normalizeSettings(settings)
   if (!task.apiProfileId) return null
   return normalized.profiles.find((profile) => profile.id === task.apiProfileId) ?? null
+}
+
+/**
+ * 执行/恢复链的任务 profile 场景覆盖解析（与请求侧 callImageApi →
+ * getSceneImageApiProfile 完全同链，显式传 task.sceneId）：
+ * 仅当任务引用的配置正是任务场景当前生图引用的配置
+ * （scenes[task.sceneId].imageProfileId === taskProfile.id）时，返回叠加场景
+ * 服务商/模型覆盖后的解析结果；其余情况（无场景、场景未引用该配置、任务无
+ * profileId）原样返回 raw profile，行为字节不变。
+ * 守卫命中时 resolved.provider === task.apiProvider 应天然成立——submitTask/
+ * retryTask 的打点与 getSceneImageApiProfile 同源解析（此处为同构断言依据）。
+ */
+function getSceneOverriddenTaskProfile(settings: AppSettings, task: TaskRecord, taskProfile: ApiProfile): ApiProfile {
+  if (task.sceneId == null) return taskProfile
+  const normalized = normalizeSettings(settings)
+  if (normalized.scenes[task.sceneId].imageProfileId !== taskProfile.id) return taskProfile
+  return getSceneImageApiProfile(normalized, task.sceneId)
 }
 
 function createSettingsForApiProfile(settings: AppSettings, profile: ApiProfile): AppSettings {
@@ -2033,8 +2059,18 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     return
   }
   const activeProfile = taskProfile ?? getSceneImageApiProfile(settings)
-  const requestSettings = createSettingsForApiProfile(settings, activeProfile)
-  const taskProvider = taskProfile?.provider ?? task.apiProvider ?? activeProfile.provider
+  // 执行链与请求链同用场景解析：场景把服务商/模型覆盖到别的 provider 时，
+  // raw taskProfile 的 provider ≠ callImageApi 实际请求用的 provider——不替换会让
+  // taskProvider 派生、看门狗调度、isAsyncCustom 分类、参数归一化/收口全部看到
+  // 原始 provider（误杀排队任务、错误收口 4K 请求等）。守卫：任务场景当前仍引用
+  // 该配置时才走 getSceneImageApiProfile（与请求侧完全同链，显式传 task.sceneId）；
+  // 否则保持现状字节不变。守卫命中时 executionProfile.provider === task.apiProvider
+  // 天然成立（submitTask 打点同源，此处为同构断言依据）。
+  const executionProfile = taskProfile
+    ? getSceneOverriddenTaskProfile(settings, task, taskProfile)
+    : activeProfile
+  const requestSettings = createSettingsForApiProfile(settings, executionProfile)
+  const taskProvider = taskProfile ? executionProfile.provider : (task.apiProvider ?? activeProfile.provider)
   let falRequestInfo: { requestId: string; endpoint: string } | null = task.falRequestId && task.falEndpoint
         ? { requestId: task.falRequestId, endpoint: task.falEndpoint }
     : null
@@ -2054,8 +2090,8 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     // 预算，避免 lib 还在重试时提前判死、丢弃晚到的成功结果（白烧额度）。
     scheduleOpenAIWatchdog(
       taskId,
-      activeProfile.timeout + getOpenAIWatchdogGraceSeconds(activeProfile.timeout),
-      activeProfile,
+      executionProfile.timeout + getOpenAIWatchdogGraceSeconds(executionProfile.timeout),
+      executionProfile,
       requestStartedAt,
     )
   }
@@ -2153,7 +2189,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     )
     const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
-    const revisedPrompts = activeProfile.codexCli && task.sourceMode !== 'agent'
+    const revisedPrompts = executionProfile.codexCli && task.sourceMode !== 'agent'
       ? result.revisedPrompts?.map((prompt) => prompt == null ? prompt : stripInjectedCodexCliSizePrompt(prompt, requestPrompt, providerParams.size))
       : result.revisedPrompts
     const revisedPromptByImage = shouldStoreRevisedPrompts ? mapRevisedPromptsByImage(outputIds, revisedPrompts) : undefined
@@ -2161,7 +2197,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== promptSentToApi.trim(),
     )
     const hasRevisedPromptValue = shouldStoreRevisedPrompts && revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
-    if (taskProvider === 'openai' && activeProfile.apiMode === 'responses' && !activeProfile.codexCli && !result.refusalRecovery) {
+    if (taskProvider === 'openai' && executionProfile.apiMode === 'responses' && !executionProfile.codexCli && !result.refusalRecovery) {
       if (promptWasRevised) {
         showCodexCliPrompt()
       } else if (!hasRevisedPromptValue) {

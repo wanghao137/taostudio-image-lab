@@ -61,7 +61,12 @@ function SceneOverrideTextInput({ id, value, placeholder, onCommit }: {
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => {
         const trimmed = draft.trim()
-        if (trimmed === (value?.trim() ?? '')) return
+        if (trimmed === (value?.trim() ?? '')) {
+          // 与已存值相同（如仅多出空白）：跳过提交，但把输入框回写为 trim 后
+          // 文本，避免残留未 trim 的显示值。
+          setDraft(trimmed)
+          return
+        }
         onCommit(trimmed || null)
       }}
       placeholder={placeholder}
@@ -115,9 +120,18 @@ export function SceneSettingsDrawer({ scene, onClose }: { scene: SceneId; onClos
   const providerDraftIds = referencedProfile
     ? Object.keys(referencedProfile.providerDrafts ?? {}).filter((id) => id !== referencedProfile.provider)
     : []
+  // 兜底：场景覆盖的 provider 不在草稿选项里时补一条选项，避免 Select 显示裸 id。
+  // 典型场景：全局把该配置切到与场景覆盖相同的服务商后，该 provider 因是当前
+  // provider 被草稿列表排除（草稿已消费），但场景内存值（未归一化折叠）仍是它；
+  // 也覆盖草稿缺失的其他残留值。label 回落 getApiProviderLabel 的裸 id 兜底。
+  const sceneProviderId = sceneSettings.imageProviderId ?? ''
+  const providerFallbackIds = referencedProfile && sceneProviderId && !providerDraftIds.includes(sceneProviderId)
+    ? [sceneProviderId]
+    : []
   const providerOptions = [
     { label: `跟随该配置当前（${getApiProviderLabel(settings, referencedProfile?.provider ?? 'openai')}）`, value: '' },
     ...providerDraftIds.map((id) => ({ label: getApiProviderLabel(settings, id), value: id })),
+    ...providerFallbackIds.map((id) => ({ label: getApiProviderLabel(settings, id), value: id })),
   ]
   const resolvedSummary = `实际生效：${getApiProviderLabel(settings, resolvedImageProfile.provider)} · ${resolvedImageProfile.apiMode} · 模型 ${resolvedImageProfile.model}` +
     (resolvedImageProfile.apiMode === 'responses' ? ` · 生图 ${resolvedImageProfile.imageGenerationModel || '默认'}` : '')
