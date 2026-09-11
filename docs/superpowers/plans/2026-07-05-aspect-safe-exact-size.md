@@ -1,5 +1,7 @@
 # Aspect-Safe Exact Size Implementation Plan
 
+> ⚠️ **已废弃（2026-09-11，commit 97e8f90）**：本计划中的「Target frame: ...」画幅提示注入已从产品代码中完全移除——实测它不贡献画布收益（chatgpt2api 网关自身会追加尺寸行，真实尺寸通道由 size 参数锁定），却会诱导主体拉长。画幅保证现由 `size` 参数 + 本地等比（cover）裁切承担。本文件仅作历史归档。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make TaoStudio Image Lab produce exact-size outputs without geometric deformation, regardless of requested aspect ratio or provider-returned source dimensions.
