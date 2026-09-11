@@ -44,7 +44,7 @@ describe('callSkillExpansionApi', () => {
     expect((init as RequestInit).method).toBe('POST')
     expect((init as RequestInit).headers).toMatchObject({ Authorization: 'Bearer test-key' })
     const body = JSON.parse(String((init as RequestInit).body))
-    expect(body.instructions).toBe(buildExpansionInstructions(SKILL_BODY))
+    expect(body.instructions).toBe(buildExpansionInstructions(SKILL_BODY, 5))
     expect(body.instructions).toContain('海报提示词专家')
     expect(body.instructions).toContain('不要输出解释')
     expect(body.input).toHaveLength(1)
@@ -126,6 +126,15 @@ describe('callSkillExpansionApi', () => {
 
     await expect(
       callSkillExpansionApi({ settings: DEFAULT_SETTINGS, profile, skillBody: SKILL_BODY, userInput: USER_INPUT }),
+    ).rejects.toThrow(/Skill 扩写请求超时（0\.2 秒）/)
+  })
+
+  it('timeoutSecs 覆盖 profile.timeout：按覆盖值计时与报错（两段式抽取轮短预算）', async () => {
+    mockFetchAbortable()
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses', timeout: 600 })
+
+    await expect(
+      callSkillExpansionApi({ settings: DEFAULT_SETTINGS, profile, skillBody: SKILL_BODY, userInput: USER_INPUT, timeoutSecs: 0.2 }),
     ).rejects.toThrow(/Skill 扩写请求超时（0\.2 秒）/)
   })
 

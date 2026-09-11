@@ -2035,7 +2035,7 @@ describe('场景配置归一化与解析', () => {
         general: { defaults: { transparentBackground: 'yes' } },
       },
     })
-    // 显式 false 必须存活归一化：applySceneDefaults 依赖 === false 关闭 transparent_output
+    // 显式 false 必须存活归一化：buildSceneInitialParams（场景首次进入参数初始化）依赖 === false 关闭 transparent_output
     expect(s.scenes.sticker.defaults.transparentBackground).toBe(false)
     expect(s.scenes.portrait.defaults.transparentBackground).toBe(true)
     expect(s.scenes.skill.defaults.transparentBackground).toBeUndefined()

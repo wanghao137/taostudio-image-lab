@@ -122,6 +122,18 @@ export interface LocalAutoSaveTaskState {
 
 export type SceneId = 'portrait' | 'general' | 'sticker' | 'skill'
 export const SCENE_ID_VALUES = ['portrait', 'general', 'sticker', 'skill'] as const
+/** 参与底部输入区草稿隔离的场景（skill 工坊有独立输入区，不参与） */
+export type SceneDraftSceneId = Exclude<SceneId, 'skill'>
+
+/** 场景草稿：切换场景时按场景保存/恢复的工作区快照（提示词 + 参数 + 输入图引用） */
+export interface SceneDraft {
+  prompt: string
+  params: TaskParams
+  /** 输入图只存 IndexedDB 引用 id：图片数据不进草稿，预览 dataUrl 在内存缓存/IndexedDB 按 id 找回 */
+  inputImageIds: string[]
+}
+
+export type SceneDrafts = Partial<Record<SceneDraftSceneId, SceneDraft>>
 
 export interface SceneDefaults {
   /** COMMON_IMAGE_RATIOS 的比例 key（如 '3:4'、'1:1'）；缺省不覆盖 */
@@ -167,6 +179,8 @@ export interface AppSettings {
   allowPromptRewrite: boolean
   taskCompletionNotification: boolean
   enterSubmit: boolean
+  /** 输出比例自动校正：非 exact_size 任务返回图比例与请求尺寸偏差 >5% 时本地 cover 裁切到目标比例 */
+  ratioAutoCorrect: boolean
   referenceImageEditAction: ReferenceImageEditAction
   zipDownloadRoutes: ZipDownloadRoute[]
   localAutoSave: LocalAutoSaveSettings
@@ -181,6 +195,9 @@ export interface AppSettings {
 
 // ===== 任务参数 =====
 
+/** 编辑任务输入图比例预处理策略 */
+export type InputRatioPolicy = 'auto' | 'crop' | 'outpaint' | 'off'
+
 export interface TaskParams {
   size: string
   exact_size: boolean
@@ -190,6 +207,10 @@ export interface TaskParams {
   moderation: 'auto' | 'low'
   n: number
   transparent_output: boolean
+  /** 编辑任务输入图比例预处理策略（仅 size 为具体尺寸时有意义）：
+   *  auto=输入图比例与目标偏差 >2% 时按 crop 处理；off=不做预处理。
+   *  网关编辑链路输出画幅=输入图原尺寸，预处理输入图是控画幅的主力手段。 */
+  input_ratio_policy?: InputRatioPolicy
 }
 
 /** 画廊提示词历史条目：提交生成时记录，供一键回填提示词与参数。 */
@@ -212,6 +233,7 @@ export const DEFAULT_PARAMS: TaskParams = {
   moderation: 'low',
   n: 1,
   transparent_output: false,
+  input_ratio_policy: 'auto',
 }
 
 export type ExactSizeFitMode = 'cover' | 'contain'
@@ -363,6 +385,21 @@ export interface TaskRecord {
   exactSizeOriginalImages?: string[]
   /** 精确尺寸本地后处理几何信息，key 为 outputImages 中的图片 id */
   exactSizeTransforms?: Record<string, ExactSizeTransformRecord>
+  /** 编辑任务输入图比例预处理记录：policy='crop'/'outpaint' 表示发送前已把输入图
+   *  处理到目标比例；'none' 表示决策未触发处理（比例已匹配或策略关闭）。 */
+  inputPreprocess?: {
+    policy: 'crop' | 'outpaint' | 'none'
+    /** 提交时的输入图张数 */
+    originalCount: number
+    /** outpaint 策略拼在提示词开头的功能性扩边指令（请求侧使用，不写入 prompt） */
+    promptHint?: string
+    /** 预处理执行失败（解码/canvas 编码等），已回退按原图提交 */
+    failed?: boolean
+  }
+  /** 输入图预处理前的原始输入图 id 列表（与提交时输入图顺序一致），供下载原图 */
+  originalInputImageIds?: string[]
+  /** 返回图比例与请求尺寸偏差过大，已本地校正到目标比例 */
+  ratioCorrected?: boolean
   // 历史任务记录专用（2026-09-11 前注入过画幅提示）；新任务不再写入
   targetAspectPromptHint?: string
   /** 输入图片的 image store id 列表 */
@@ -429,6 +466,8 @@ export interface FavoriteCollection {
 export interface SkillSummary {
   /** 展示名（frontmatter name，无则目录名） */
   name: string
+  /** 可选中文标题（frontmatter title，未设置/空串为 undefined），展示层回落 name */
+  title?: string
   description: string
   /** 来源目录名（内置=public/skills 目录名，本地=一级子目录名），作稳定 id */
   id: string

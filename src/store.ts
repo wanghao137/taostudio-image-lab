@@ -15,6 +15,8 @@ import type {
   FavoriteCollection,
   PromptHistoryEntry,
   SceneDefaults,
+  SceneDraftSceneId,
+  SceneDrafts,
   SceneId,
   SceneSettings,
   StoredImage,
@@ -78,7 +80,8 @@ import { hasActiveDataOperations } from './lib/dataOperations'
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 import { storeTaskOutputImages } from './lib/taskOutputPersistence'
-import { calculateImageSize } from './lib/size'
+import { preprocessInputImagesForTarget } from './lib/inputPreprocess'
+import { calculateImageSize, parseImageSize } from './lib/size'
 import {
   buildLocalAutoSaveFolderName,
   buildLocalAutoSaveMetadata,
@@ -97,7 +100,18 @@ import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveFin
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
 import { BUILTIN_SKILL_IDS, loadBuiltinSkill } from './lib/skillWorkshop/builtinSkills'
 import { scanLocalSkills } from './lib/skillWorkshop/localSkills'
-import { parseExpansionEntries } from './lib/skillWorkshop/expansion'
+import {
+  buildComposeUserInput,
+  buildExtractionInstructions,
+  buildExtractionUserInput,
+  buildExpansionInstructions,
+  buildRetryInstructions,
+  clampSkillEntryCount,
+  parseExpansionEntries,
+  parseExtractionJson,
+  serializeExtractionJson,
+  validateExpansionEntries,
+} from './lib/skillWorkshop/expansion'
 import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
 
 export { ensureImageCached, getCachedImage } from './lib/imageCache'
@@ -118,6 +132,10 @@ let taskStorageGeneration = 0
 // Skill 扩写进行中的中止器（工坊单飞：新扩写开始时覆盖旧引用）。与
 // customRecoveryAbortControllers 同为模块级 AbortController 既有模式。
 let skillExpansionAbortController: AbortController | null = null
+
+// 严格模式抽取轮的单次超时上限（秒）：抽取是短任务，若复用 profile.timeout（默认 600s），
+// 两段式最坏 2×600s、加校验重试 3×600s=30 分钟。成文轮/单轮/重试/reroll 仍走 profile.timeout。
+const SKILL_EXTRACTION_TIMEOUT_SECS_MAX = 120
 
 // ===== 生成并发队列 =====
 // 浏览器同源约 6 个 HTTP 连接：>6 个长耗时图像任务并发时，排队任务的超时
@@ -301,9 +319,12 @@ export function getPersistedState(state: AppState) {
 function mergePersistedState(persistedState: unknown, currentState: AppState): AppState {
   const plan = normalizePersistedState(persistedState, currentState)
   if (!plan) return currentState
+  const { skillExpansionPrefs, ...rest } = plan
   return {
     ...currentState,
-    ...plan,
+    ...rest,
+    // 扩写偏好回填进运行态 skillExpansion：只覆盖偏好字段，运行态字段维持初始值
+    skillExpansion: { ...currentState.skillExpansion, ...skillExpansionPrefs },
     activeFavoriteCollectionId: null,
     favoritePickerTaskIds: null,
   }
@@ -317,10 +338,51 @@ export interface SkillExpansionEntry {
   enabled: boolean
 }
 
+/** 扩写运行阶段（仅 running 时有意义）：extracting=严格模式第一轮抽变量，composing=成文 */
+export type SkillExpansionPhase = 'extracting' | 'composing' | null
+
 export interface SkillExpansionState {
   status: 'idle' | 'running' | 'error'
   error: string | null
   entries: SkillExpansionEntry[]
+  /** 严格模式（两段式：先抽变量再成文）。用户偏好，持久化，默认 true。 */
+  strictMode: boolean
+  /** 期望条数（1-10）。用户偏好，持久化，默认 5。 */
+  entryCount: number
+  phase: SkillExpansionPhase
+  /** 警告级消息（UI 黄条）：降级/校验未过等「有结果但可能不合规」场景；error 保持硬失败语义 */
+  warning: string | null
+  /** 严格模式抽取轮 JSON 解析失败，已回退单轮 */
+  degraded: boolean
+  /** 正在单条重写的条目 id */
+  rerollingEntryId: string | null
+}
+
+/** 扩写状态工厂：初始 state、切换 skill、中断等重置场景统一从这里出，避免新增字段后散漏 */
+export function makeSkillExpansionState(overrides: Partial<SkillExpansionState> = {}): SkillExpansionState {
+  return {
+    status: 'idle',
+    error: null,
+    entries: [],
+    strictMode: true,
+    entryCount: 5,
+    phase: null,
+    warning: null,
+    degraded: false,
+    rerollingEntryId: null,
+    ...overrides,
+  }
+}
+
+/** 运行态重置/更新：保留用户偏好（strictMode/entryCount）与既有条目，运行态字段回归默认 */
+function resetSkillExpansion(prev: SkillExpansionState, patch: Partial<SkillExpansionState> = {}): SkillExpansionState {
+  return {
+    ...makeSkillExpansionState(),
+    ...patch,
+    entries: patch.entries ?? prev.entries,
+    strictMode: prev.strictMode,
+    entryCount: prev.entryCount,
+  }
 }
 
 export interface SkillWorkshopState {
@@ -420,6 +482,8 @@ interface AppState {
 
   // 场景
   setActiveScene: (scene: SceneId) => void
+  /** 场景草稿：切换场景时按场景保存/恢复 prompt/params/输入图（skill 场景不参与） */
+  sceneDrafts: SceneDrafts
   setSceneImageProfileId: (scene: SceneId, profileId: string | null) => void
   setSceneImageOverrides: (scene: SceneId, patch: { imageProviderId?: string | null; imageModelOverride?: string | null; imageGenerationModelOverride?: string | null }) => void
   setSceneTextProfileId: (scene: SceneId, profileId: string | null) => void
@@ -438,8 +502,12 @@ interface AppState {
   clearSkillsRootDirectory: () => Promise<void>
   setActiveSkill: (id: string) => void
   setSkillInputDraft: (draft: string) => void
+  /** 扩写偏好（严格模式开关 / 期望条数），立即生效并持久化 */
+  setSkillExpansionPrefs: (patch: { strictMode?: boolean; entryCount?: number }) => void
   runSkillExpansion: () => Promise<void>
   abortSkillExpansion: () => void
+  /** 单条重 roll：携带「替换第 N 条」约束只重新生成该条，成功后原位替换 */
+  rerollSkillEntry: (index: number) => Promise<void>
   updateSkillEntry: (id: string, patch: Partial<Pick<SkillExpansionEntry, 'text' | 'enabled'>>) => void
   removeSkillEntry: (id: string) => void
   generateFromSkillEntries: () => Promise<void>
@@ -517,11 +585,14 @@ function isImageReferencedByState(state: AppState, imageId: string) {
   if (state.promptReverseSource?.imageId === imageId) return true
   if (state.inputImages.some((img) => img.id === imageId)) return true
   if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId)) return true
+  // 其他场景的草稿仍引用该图（草稿隔离后输入图按场景成套），不能当作孤儿回收
+  if (Object.values(state.sceneDrafts).some((draft) => draft?.inputImageIds.includes(imageId))) return true
   return state.tasks.some((task) =>
     task.inputImageIds.includes(imageId) ||
     task.outputImages.includes(imageId) ||
     task.transparentOriginalImages?.includes(imageId) ||
     task.exactSizeOriginalImages?.includes(imageId) ||
+    task.originalInputImageIds?.includes(imageId) ||
     task.streamPartialImageIds?.includes(imageId) ||
     task.maskTargetImageId === imageId ||
     task.maskImageId === imageId
@@ -922,6 +993,7 @@ export const useStore = create<AppState>()(
       retryPendingLocalAutoSaves: async () => retryPendingLocalAutoSaves(),
 
       // Scenes
+      sceneDrafts: {},
       setActiveScene: (scene) => {
         const state = get()
         // 同场景重复点击：不重放默认参数，但要修复漂移的画廊过滤
@@ -930,8 +1002,51 @@ export const useStore = create<AppState>()(
           if (state.gallerySceneFilter !== scene) set({ gallerySceneFilter: scene })
           return
         }
-        set({ settings: { ...state.settings, activeScene: scene }, gallerySceneFilter: scene })
-        applySceneDefaults(scene)
+        const previousScene = state.settings.activeScene
+        const sceneDrafts: SceneDrafts = { ...state.sceneDrafts }
+        // 离开非 skill 场景：当前工作区快照（prompt/params/输入图 id）存入该场景草稿；
+        // 完整输入图对象（含预览 dataUrl）同时进内存 memo，同会话切回零延迟恢复。
+        if (previousScene !== 'skill') {
+          sceneDrafts[previousScene] = {
+            prompt: state.prompt,
+            params: { ...state.params },
+            inputImageIds: state.inputImages.map((img) => img.id),
+          }
+          sceneDraftImageMemo.set(previousScene, state.inputImages)
+        }
+
+        let inputPatch: Partial<Pick<AppState, 'prompt' | 'inputImages' | 'maskDraft' | 'maskEditorImageId' | 'galleryInputDraft'>> = {}
+        let nextParams = state.params
+        let restoredImages: InputImage[] = []
+        if (scene !== 'skill') {
+          const draft = sceneDrafts[scene]
+          // 进入非 skill 场景：有草稿整体恢复；首次进入 prompt/图片置空、参数以场景 defaults 初始化。
+          restoredImages = draft ? resolveSceneDraftImages(scene, draft.inputImageIds) : []
+          const incomingImageIds = new Set(restoredImages.map((img) => img.id))
+          inputPatch = syncActiveInputDraft(state, {
+            prompt: draft?.prompt ?? '',
+            inputImages: restoredImages,
+            // 遮罩归属目标图：目标图不在新场景输入中时清除，避免跨场景携带失效遮罩
+            ...(state.maskDraft && !incomingImageIds.has(state.maskDraft.targetImageId)
+              ? { maskDraft: null, maskEditorImageId: null }
+              : {}),
+          })
+          nextParams = draft ? { ...draft.params } : buildSceneInitialParams(scene)
+          sceneDraftHydrationToken += 1
+        }
+
+        set({
+          settings: { ...state.settings, activeScene: scene },
+          gallerySceneFilter: scene,
+          sceneDrafts,
+          params: nextParams,
+          ...inputPatch,
+        })
+
+        // 草稿输入图跨刷新只剩 id：异步从 IndexedDB 补回预览 dataUrl（skill 场景不载入草稿）
+        if (scene !== 'skill' && restoredImages.length > 0) {
+          void hydrateSceneDraftImages(scene, restoredImages, sceneDraftHydrationToken)
+        }
       },
       setSceneImageProfileId: (scene, profileId) => {
         patchSceneSettings(scene, { imageProfileId: profileId })
@@ -953,13 +1068,13 @@ export const useStore = create<AppState>()(
       skills: { builtin: [], builtinLoading: false, local: [], localRootName: null, scanning: false },
       activeSkillId: null,
       skillInputDraft: '',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
       loadBuiltinSkills: async () => {
         set((state) => ({ skills: { ...state.skills, builtinLoading: true } }))
         const loaded = await Promise.all(BUILTIN_SKILL_IDS.map(async (id): Promise<SkillSummary | null> => {
           const parsed = await loadBuiltinSkill(id)
           if (!parsed) return null
-          return { id, name: parsed.name, description: parsed.description, body: parsed.body, source: 'builtin' }
+          return { id, name: parsed.name, title: parsed.title, description: parsed.description, body: parsed.body, source: 'builtin' }
         }))
         const builtin = loaded.filter((skill): skill is SkillSummary => skill !== null)
         set((state) => ({
@@ -979,56 +1094,122 @@ export const useStore = create<AppState>()(
         // 在飞请求随后返回时被「最新 run」守卫（controller 引用已变/为 null）拦截，不回写。
         skillExpansionAbortController?.abort()
         skillExpansionAbortController = null
-        set({ activeSkillId: id, skillExpansion: { status: 'idle', error: null, entries: [] } })
+        set((prev) => ({ activeSkillId: id, skillExpansion: resetSkillExpansion(prev.skillExpansion, { entries: [] }) }))
       },
       setSkillInputDraft: (skillInputDraft) => set({ skillInputDraft }),
+      setSkillExpansionPrefs: (patch) => set((prev) => ({
+        skillExpansion: {
+          ...prev.skillExpansion,
+          ...(patch.strictMode !== undefined ? { strictMode: patch.strictMode } : {}),
+          ...(patch.entryCount !== undefined ? { entryCount: clampSkillEntryCount(patch.entryCount) } : {}),
+        },
+      })),
       runSkillExpansion: async () => {
         const state = get()
         const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
         // 校验失败不动 entries：保留已扩写结果，用户修正输入后重试不丢条目
         if (!activeSkill) {
-          set((prev) => ({ skillExpansion: { status: 'error', error: '请先选择一个 skill', entries: prev.skillExpansion.entries } }))
+          set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'error', error: '请先选择一个 skill' }) }))
           return
         }
         const userInput = state.skillInputDraft.trim()
         if (!userInput) {
-          set((prev) => ({ skillExpansion: { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）', entries: prev.skillExpansion.entries } }))
+          set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'error', error: '请输入锚点内容（主题、场景或角色设定）' }) }))
           return
         }
         const resolution = getSceneTextApiProfileResolution(state.settings)
         if (!resolution.profile) {
-          set((prev) => ({ skillExpansion: { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', entries: prev.skillExpansion.entries } }))
+          set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'error', error: '未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加' }) }))
           return
         }
-        // 新扩写开始前先 abort 旧请求：旧请求 await 返回后被下方「最新 run」守卫拦截，不再回写污染状态
+        const entryCount = clampSkillEntryCount(state.skillExpansion.entryCount)
+        const strictMode = state.skillExpansion.strictMode
+        // 新扩写开始前先 abort 旧请求（含在飞单条重写）：旧请求 await 返回后被下方
+        // 「最新 run」守卫拦截，不再回写污染状态
         skillExpansionAbortController?.abort()
         const controller = new AbortController()
         skillExpansionAbortController = controller
-        set((prev) => ({ skillExpansion: { status: 'running', error: null, entries: prev.skillExpansion.entries } }))
+        set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: strictMode ? 'extracting' : 'composing' }) }))
         try {
+          // 成文轮的输入与降级标记；严格模式下先抽变量，解析失败回落单轮并标记降级
+          let composeInput = userInput
+          let degraded = false
+          if (strictMode) {
+            const extractRaw = await callSkillExpansionApi({
+              settings: state.settings,
+              profile: resolution.profile,
+              skillBody: activeSkill.body,
+              userInput: buildExtractionUserInput(userInput, entryCount),
+              instructions: buildExtractionInstructions(activeSkill.body),
+              // 抽取是短任务：短预算压缩两段式+重试的最坏总时长（成文轮仍走 profile.timeout）
+              timeoutSecs: Math.min(resolution.profile.timeout, SKILL_EXTRACTION_TIMEOUT_SECS_MAX),
+              signal: controller.signal,
+            })
+            // 仅最新一次扩写允许继续：被 abort/替换的孤儿请求后到不得再推进
+            if (skillExpansionAbortController !== controller) return
+            const extracted = parseExtractionJson(extractRaw)
+            if (extracted) {
+              set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: 'composing' }) }))
+              composeInput = buildComposeUserInput(userInput, serializeExtractionJson(extracted), entryCount)
+            } else {
+              // 第一轮输出非 JSON：不硬失败，回落单轮直出并在结果上标记降级
+              degraded = true
+              set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: 'composing' }) }))
+            }
+          }
+          const baseInstructions = buildExpansionInstructions(activeSkill.body, entryCount)
           const raw = await callSkillExpansionApi({
             settings: state.settings,
             profile: resolution.profile,
             skillBody: activeSkill.body,
-            userInput,
+            userInput: composeInput,
+            instructions: baseInstructions,
             signal: controller.signal,
           })
-          // 仅最新一次扩写允许回写：被 abort/替换的孤儿请求后到也不得覆盖新结果
           if (skillExpansionAbortController !== controller) return
-          const entries = parseExpansionEntries(raw).map((entry) => ({ ...entry, enabled: true }))
-          set({ skillExpansion: { status: 'idle', error: null, entries } })
+          // 解析后校验 + 一次自动重试：不合格时带具体原因重跑成文轮；仍不合格则
+          // 返回已有结果并置警告级消息（warning 黄条），不硬失败。
+          let entries = parseExpansionEntries(raw).map((entry) => ({ ...entry, enabled: true }))
+          let reasons = validateExpansionEntries(entries, entryCount)
+          if (reasons.length) {
+            set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { status: 'running', phase: 'composing' }) }))
+            const retryRaw = await callSkillExpansionApi({
+              settings: state.settings,
+              profile: resolution.profile,
+              skillBody: activeSkill.body,
+              userInput: composeInput,
+              instructions: buildRetryInstructions(baseInstructions, reasons),
+              signal: controller.signal,
+            })
+            if (skillExpansionAbortController !== controller) return
+            const retryEntries = parseExpansionEntries(retryRaw).map((entry) => ({ ...entry, enabled: true }))
+            const retryReasons = validateExpansionEntries(retryEntries, entryCount)
+            entries = retryEntries
+            reasons = retryReasons
+          }
+          const warnings = [
+            ...(degraded ? ['严格模式变量抽取解析失败，已回退单轮扩写'] : []),
+            ...(reasons.length ? [`扩写可能不符合 skill 规范（${reasons.join('；')}），可点击「扩写提示词」重试`] : []),
+          ]
+          set((prev) => ({
+            skillExpansion: resetSkillExpansion(prev.skillExpansion, {
+              status: 'idle',
+              entries,
+              warning: warnings.length ? warnings.join('；') : null,
+              degraded,
+            }),
+          }))
         } catch (err) {
           if (skillExpansionAbortController !== controller) return
           if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
-            set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
+            set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { entries: [] }) }))
             return
           }
           set((prev) => ({
-            skillExpansion: {
+            skillExpansion: resetSkillExpansion(prev.skillExpansion, {
               status: 'error',
               error: err instanceof Error ? err.message : String(err),
-              entries: prev.skillExpansion.entries,
-            },
+            }),
           }))
         } finally {
           if (skillExpansionAbortController === controller) skillExpansionAbortController = null
@@ -1038,7 +1219,80 @@ export const useStore = create<AppState>()(
         skillExpansionAbortController?.abort()
         skillExpansionAbortController = null
         // 立即回 idle 清空条目；在飞请求随后返回时被「最新 run」守卫拦截，不回写
-        set({ skillExpansion: { status: 'idle', error: null, entries: [] } })
+        set((prev) => ({ skillExpansion: resetSkillExpansion(prev.skillExpansion, { entries: [] }) }))
+      },
+      rerollSkillEntry: async (index) => {
+        const state = get()
+        // 整批扩写进行中不接受单条重写：reroll 与 run 共用同一中止器，放行会互相 abort 打架
+        if (state.skillExpansion.status === 'running') return
+        const entries = state.skillExpansion.entries
+        if (index < 0 || index >= entries.length) return
+        const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
+        if (!activeSkill) {
+          state.showToast('请先选择一个 skill', 'error')
+          return
+        }
+        if (state.skillExpansion.rerollingEntryId) return // 单条重写串行：一次只重写一条
+        const resolution = getSceneTextApiProfileResolution(state.settings)
+        if (!resolution.profile) {
+          state.showToast('未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加', 'error')
+          return
+        }
+        // 复用「最新 run」守卫：与整批扩写共用同一控制器，新扩写/切 skill/停止都会
+        // abort 本请求，await 返回后被引用比对拦截，不回写。
+        skillExpansionAbortController?.abort()
+        const controller = new AbortController()
+        skillExpansionAbortController = controller
+        const target = entries[index]
+        set((prev) => ({ skillExpansion: { ...prev.skillExpansion, rerollingEntryId: target.id } }))
+        try {
+          const anchorInput = state.skillInputDraft.trim()
+          // 其余条目摘要保留原编号（第 {原始下标+1} 条），与任务行「替换第 N 条」的 N 一致，
+          // 模型不因摘要重排而错位理解替换目标
+          const othersSummary = entries
+            .map((entry, i) => (i === index ? null : `第 ${i + 1} 条：${entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text}`))
+            .filter((line): line is string => line !== null)
+            .join('\n')
+          const rerollInput = [
+            anchorInput ? `锚点要求：${anchorInput}` : null,
+            othersSummary ? `其余现有条目（新条目必须与它们保持明显差异）：\n${othersSummary}` : null,
+            `任务：替换第 ${index + 1} 条。只重新生成这一条提示词，不要输出其他条目或解释。`,
+          ].filter(Boolean).join('\n\n')
+          const raw = await callSkillExpansionApi({
+            settings: state.settings,
+            profile: resolution.profile,
+            skillBody: activeSkill.body,
+            userInput: rerollInput,
+            instructions: buildExpansionInstructions(activeSkill.body, 1),
+            signal: controller.signal,
+          })
+          if (skillExpansionAbortController !== controller) return
+          const text = parseExpansionEntries(raw)[0]?.text.trim()
+          if (!text) throw new Error('重写未返回有效内容')
+          // 原位替换该条：其余条目、勾选状态与偏好均不动；
+          // 单条成功说明扩写链路可用，一并清掉上一批残留的 warning/error
+          set((prev) => ({
+            skillExpansion: {
+              ...prev.skillExpansion,
+              rerollingEntryId: null,
+              warning: null,
+              error: null,
+              entries: prev.skillExpansion.entries.map((entry) => (entry.id === target.id ? { ...entry, text } : entry)),
+            },
+          }))
+        } catch (err) {
+          if (skillExpansionAbortController !== controller) return
+          if (!(controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError'))) {
+            state.showToast(`重写失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+          }
+          set((prev) => ({
+            skillExpansion: prev.skillExpansion.rerollingEntryId === target.id
+              ? { ...prev.skillExpansion, rerollingEntryId: null }
+              : prev.skillExpansion,
+          }))
+        } finally {
+          if (skillExpansionAbortController === controller) skillExpansionAbortController = null
+        }
       },
       updateSkillEntry: (id, patch) => set((state) => ({
         skillExpansion: {
@@ -1589,7 +1843,9 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   if (!latest || latest.status === 'done') return
   if (latest.status !== 'running' && !latest.falRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+    ratioAutoCorrect: useStore.getState().settings.ratioAutoCorrect,
+  })
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -1605,6 +1861,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
     exactSizeTransforms,
+    ratioCorrected: ratioCorrected || undefined,
     outputPersistWarning: persistFailedCount > 0 || undefined,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
@@ -1666,6 +1923,11 @@ export async function initStore() {
   // 页面加载/刷新：重置数据清除标志，允许从（已清空后的）IndexedDB 正常加载，
   // 并允许后续生成正常写入。
   tasksCleared = false
+  // 场景切换守卫基准：init 无 ready 门，下方多个 await 间隙 UI 可交互，用户可能切换
+  // 场景；此后的全局输入回写只服务启动时的 activeScene（见下方两处守卫）。
+  const initActiveScene = useStore.getState().settings.activeScene
+  // 场景草稿迁移 + 刷新恢复：persist 恢复完成后，把全局输入归属到当前场景草稿键
+  syncActiveSceneDraftFromGlobalInput()
   await refreshTaskStorageGeneration()
   const initTaskStorageGeneration = taskStorageGeneration
   // Agent 功能已移除（2026-09 设计决策）：一次性清空存量会话并释放其引用图；
@@ -1725,6 +1987,8 @@ export async function initStore() {
   if (galleryInputDraft) {
     for (const img of galleryInputDraft.inputImages) referencedIds.add(img.id)
   }
+  // 其他场景的草稿仍引用其输入图：草稿隔离后这些图不属于孤儿
+  addSceneDraftReferencedImageIds(referencedIds, state.sceneDrafts)
   for (const t of tasks) {
     addTaskReferencedImageIds(referencedIds, t)
   }
@@ -1775,7 +2039,13 @@ export async function initStore() {
     }
   }
   if (restoredInputImages.length !== persistedInputImages.length || restoredInputImages.some((img, index) => img.dataUrl !== persistedInputImages[index]?.dataUrl)) {
-    useStore.getState().setInputImages(restoredInputImages)
+    // init 期间已切换场景时跳过：live input 已归属新场景，把旧场景图写进来会被随后的
+    // 离场快照粘进新场景草稿。被跳过场景的图片不丢：init 开头 syncActiveSceneDraftFromGlobalInput
+    // 已把这些图的 id 归入其场景草稿，切回时 resolveSceneDraftImages 占位 +
+    // hydrateSceneDraftImages 按 id 从 IndexedDB 补回。
+    if (useStore.getState().settings.activeScene === initActiveScene) {
+      useStore.getState().setInputImages(restoredInputImages)
+    }
   }
 
   if (galleryInputDraft) {
@@ -1801,7 +2071,11 @@ export async function initStore() {
       restoredGalleryImages.length !== galleryInputDraft.inputImages.length ||
       restoredGalleryImages.some((img, index) => img.dataUrl !== galleryInputDraft.inputImages[index]?.dataUrl) ||
       shouldClearMask
-    if (galleryDraftsChanged) {
+    // 与上方 inputImages 回写同一守卫：galleryInputDraft 并非特定场景专属——它在 gallery
+    // 模式下经 syncActiveInputDraft 始终镜像 live input（persist 恢复时 prompt/inputImages
+    // 也由它派生），因此刷新后它属于启动时的 activeScene。场景已切换时新场景草稿图由
+    // setActiveScene → hydrateSceneDraftImages 恢复，此时回写旧草稿会覆盖新场景工作区。
+    if (galleryDraftsChanged && useStore.getState().settings.activeScene === initActiveScene) {
       const latestState = useStore.getState()
       const nextGalleryInputDraft = isEmptyAgentInputDraft(restoredGalleryDraft) ? null : restoredGalleryDraft
       useStore.setState({
@@ -1918,6 +2192,52 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
     : { ...normalizedParams, transparent_output: false }
+
+  // 编辑链路画幅防御第一层：输入图比例预处理（网关编辑输出画幅=输入图原尺寸，
+  // 预处理输入图是控画幅的主力，详见 docs/portrait-general-skill-optimization-plan-2026-09-11.md T2）。
+  // 仅「有输入图 + size 为具体尺寸」时执行；带遮罩的任务跳过（遮罩坐标绑定原图像素）。
+  const preprocessTarget = orderedInputImages.length > 0 && !maskDraft && taskParams.size !== 'auto'
+    ? parseImageSize(taskParams.size)
+    : null
+  let preprocessResult: Awaited<ReturnType<typeof preprocessInputImagesForTarget>> | null = null
+  let preprocessFailed = false
+  if (preprocessTarget) {
+    try {
+      preprocessResult = await preprocessInputImagesForTarget(orderedInputImages, preprocessTarget, taskParams.input_ratio_policy)
+    } catch (err) {
+      // 预处理失败（解码/canvas/toBlob 等本地环节）不阻断提交：回退发送原图，
+      // 任务记录 policy='none' + failed 标记，并在任务提交后 toast 提示。
+      console.warn('输入图预处理失败，已按原图提交', err)
+      preprocessFailed = true
+      preprocessResult = {
+        images: orderedInputImages.map((img) => ({ dataUrl: img.dataUrl, width: img.width ?? 0, height: img.height ?? 0 })),
+        policy: 'none',
+      }
+    }
+  }
+  let inputImageIds = orderedInputImages.map((i) => i.id)
+  let originalInputImageIds: string[] | undefined
+  let inputPreprocess: TaskRecord['inputPreprocess']
+  if (preprocessResult) {
+    if (preprocessResult.policy !== 'none') {
+      const processedIds: string[] = []
+      for (const img of preprocessResult.images) {
+        const id = await storeImage(img.dataUrl)
+        cacheImage(id, img.dataUrl)
+        processedIds.push(id)
+      }
+      inputImageIds = processedIds
+      // 原图（草稿 id）已在上面的循环里持久化，记录到任务供下载原图
+      originalInputImageIds = orderedInputImages.map((i) => i.id)
+    }
+    inputPreprocess = {
+      policy: preprocessResult.policy,
+      originalCount: orderedInputImages.length,
+      promptHint: preprocessResult.promptHint,
+      ...(preprocessFailed ? { failed: true } : {}),
+    }
+  }
+
   const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
     ? createTransparentOutputMeta(prompt.trim())
     : null
@@ -1942,9 +2262,11 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     apiProfileName: activeProfile.name,
     apiMode: activeProfile.apiMode,
     apiModel: activeProfile.model,
-    inputImageIds: orderedInputImages.map((i) => i.id),
+    inputImageIds,
     maskTargetImageId,
     maskImageId,
+    inputPreprocess,
+    originalInputImageIds,
     transparentOutput: transparentMeta?.transparentOutput,
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
@@ -1962,6 +2284,10 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   useStore.getState().setTasks([task, ...latestTasks])
   await putTask(task)
   useStore.getState().showToast('任务已提交', 'success')
+  // 预处理失败的提示放在「任务已提交」之后，避免被后者立刻覆盖
+  if (preprocessFailed) {
+    useStore.getState().showToast('输入图预处理失败，已按原图提交', 'error')
+  }
 
   if (settings.clearInputAfterSubmit) {
     useStore.getState().setPrompt('')
@@ -1981,6 +2307,9 @@ function addInputDraftReferencedImageIds(target: Set<string>, draft: AgentInputD
 function addTaskReferencedImageIds(target: Set<string>, task: TaskRecord) {
   for (const id of task.inputImageIds || []) target.add(id)
   if (task.maskImageId) target.add(task.maskImageId)
+  for (const id of task.originalInputImageIds || []) {
+    if (id) target.add(id)
+  }
   for (const id of task.outputImages || []) target.add(id)
   for (const id of task.transparentOriginalImages || []) {
     if (id) target.add(id)
@@ -1995,10 +2324,11 @@ async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
   const candidates = Array.from(new Set(Array.from(imageIds).filter(Boolean)))
   if (candidates.length === 0) return
 
-  const { tasks, inputImages, galleryInputDraft } = useStore.getState()
+  const { tasks, inputImages, galleryInputDraft, sceneDrafts } = useStore.getState()
   const stillUsed = new Set<string>()
   for (const task of tasks) addTaskReferencedImageIds(stillUsed, task)
   addInputDraftReferencedImageIds(stillUsed, galleryInputDraft)
+  addSceneDraftReferencedImageIds(stillUsed, sceneDrafts)
   for (const img of inputImages) stillUsed.add(img.id)
 
   for (const imgId of candidates) {
@@ -2111,9 +2441,14 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     // 原生透明：background 参数照发（官方后端按参数出 alpha）；部分后端不读
     // 该参数但遵循提示词意图，因此叠加透明指令，两类后端都能直出真透明。
     const nativeTransparentRequested = Boolean(task.params.transparent_output) && !task.transparentOutput
-    const baseRequestPrompt = task.transparentOutput && task.transparentPrompt
+    // outpaint 预处理的功能性扩边指令拼在提示词开头（与用户提示词换行分隔）；
+    // task.prompt 保持用户原文，画廊历史/复用不受影响。
+    const rawBasePrompt = task.transparentOutput && task.transparentPrompt
       ? task.transparentPrompt
       : task.prompt
+    const baseRequestPrompt = task.inputPreprocess?.promptHint
+      ? `${task.inputPreprocess.promptHint}\n${rawBasePrompt}`
+      : rawBasePrompt
     const requestPrompt = nativeTransparentRequested
       ? buildNativeTransparentPrompt(baseRequestPrompt)
       : baseRequestPrompt
@@ -2164,7 +2499,9 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds)
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+      ratioAutoCorrect: settings.ratioAutoCorrect,
+    })
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const resolvedActualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
@@ -2219,6 +2556,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       transparentOriginalImages: transparentOriginalImageIds,
       exactSizeOriginalImages: exactSizeOriginalImageIds,
       exactSizeTransforms,
+      ratioCorrected: ratioCorrected || undefined,
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       outputPersistWarning: persistFailedCount > 0 || undefined,
       streamPartialImageIds: undefined,
@@ -2401,19 +2739,91 @@ function patchSceneSettings(sceneId: SceneId, patch: Partial<SceneSettings>) {
   })
 }
 
-/** 切换场景时应用场景默认参数：只覆盖场景显式给出的维度，其余参数保持用户当前值 */
-function applySceneDefaults(sceneId: SceneId) {
-  const { settings, params } = useStore.getState()
-  const defaults = settings.scenes[sceneId].defaults
-  const patch: Partial<TaskParams> = {}
+// ===== 场景草稿隔离 =====
+
+/**
+ * 同会话内记住各场景输入图的完整对象（含预览 dataUrl）：切走场景时快照、切回时同步零延迟恢复。
+ * 跨刷新时草稿只剩 id（persist 轻量化），由 hydrateSceneDraftImages 从 IndexedDB 补回。仅内存，不持久化。
+ */
+const sceneDraftImageMemo = new Map<SceneDraftSceneId, InputImage[]>()
+
+/** 每次真实场景切换递增：用于丢弃过期场景切换触发的异步图片水合结果 */
+let sceneDraftHydrationToken = 0
+
+/** 草稿输入图 id → 输入图对象：优先用同会话 memo（有预览 dataUrl），跨刷新时占位 dataUrl 空串待水合 */
+function resolveSceneDraftImages(scene: SceneDraftSceneId, inputImageIds: string[]): InputImage[] {
+  const remembered = sceneDraftImageMemo.get(scene) ?? []
+  return inputImageIds.map((id) => remembered.find((img) => img.id === id) ?? { id, dataUrl: '' })
+}
+
+/** 首次进入场景时以 DEFAULT_PARAMS 为底、按场景 defaults 覆盖（ratio/tier → size；透明开关）。
+ *  旧 applySceneDefaults「每次切换都重算」的语义已随草稿隔离废弃：defaults 只在首次进入时生效。 */
+function buildSceneInitialParams(sceneId: SceneId): TaskParams {
+  const defaults = useStore.getState().settings.scenes[sceneId].defaults
+  const params: TaskParams = { ...DEFAULT_PARAMS }
   if (defaults.ratio || defaults.tier) {
     // calculateImageSize 对无法解析的比例返回 null（如 '1:1' 缺省回落始终有效，此保护针对异常自定义值）
     const size = calculateImageSize(defaults.tier ?? '1K', defaults.ratio ?? '1:1')
-    if (size) patch.size = size
+    if (size) params.size = size
   }
-  if (defaults.transparentBackground === true && params.output_format === 'png') patch.transparent_output = true
-  if (defaults.transparentBackground === false) patch.transparent_output = false
-  if (Object.keys(patch).length) useStore.getState().setParams(patch)
+  if (defaults.transparentBackground === true && params.output_format === 'png') params.transparent_output = true
+  if (defaults.transparentBackground === false) params.transparent_output = false
+  return params
+}
+
+/** 草稿输入图跨刷新只剩 id：从 IndexedDB 按 id 补回预览 dataUrl；
+ *  已被清理/删除的图片直接丢弃（置空），避免渲染空预览或发出无效编辑请求。 */
+async function hydrateSceneDraftImages(scene: SceneDraftSceneId, resolvedImages: InputImage[], token: number) {
+  if (resolvedImages.every((img) => img.dataUrl)) return
+  const restored: InputImage[] = []
+  for (const img of resolvedImages) {
+    if (img.dataUrl) {
+      restored.push(img)
+      continue
+    }
+    try {
+      const storedImage = await getImage(img.id)
+      if (storedImage?.dataUrl) {
+        cacheImage(img.id, storedImage.dataUrl)
+        restored.push(restoreInputImageFromStoredImage(img, storedImage))
+      }
+      // 找不到已存图：该图丢弃，剩余图照常恢复
+    } catch {
+      // 单张读取失败按缺失处理
+    }
+  }
+  const latest = useStore.getState()
+  // 场景已再切换 / 输入已被用户改动（增删图）时放弃回写，避免覆盖新状态
+  if (token !== sceneDraftHydrationToken || latest.settings.activeScene !== scene) return
+  if (latest.inputImages.map((img) => img.id).join('|') !== resolvedImages.map((img) => img.id).join('|')) return
+  useStore.getState().setInputImages(restored)
+}
+
+/** 启动时把全局输入写回当前场景草稿键，承担两个职责：
+ *  1. 迁移：老版本没有 sceneDrafts，升级后首次启动即把存量全局草稿归属到当前场景，避免升级即清空；
+ *  2. 刷新恢复：persist 恢复的全局输入比「上次切走时保存的草稿」更新（用户可能输入后没切场景就刷新），
+ *     以全局输入为准写回当前场景键。skill 场景不使用底部输入区，不参与。 */
+function syncActiveSceneDraftFromGlobalInput() {
+  const { settings, prompt, params, inputImages, sceneDrafts } = useStore.getState()
+  if (settings.activeScene === 'skill') return
+  useStore.setState({
+    sceneDrafts: {
+      ...sceneDrafts,
+      [settings.activeScene]: {
+        prompt,
+        params: { ...params },
+        inputImageIds: inputImages.map((img) => img.id),
+      },
+    },
+  })
+  sceneDraftImageMemo.set(settings.activeScene, inputImages)
+}
+
+/** 收集场景草稿引用的图片 id：孤儿清扫 / 删除回收时这些图不能被当作无引用清理 */
+function addSceneDraftReferencedImageIds(target: Set<string>, drafts: SceneDrafts) {
+  for (const draft of Object.values(drafts)) {
+    for (const id of draft?.inputImageIds ?? []) target.add(id)
+  }
 }
 
 export async function selectSceneSaveDirectory(sceneId: SceneId) {
@@ -2976,6 +3386,8 @@ export async function retryTask(task: TaskRecord) {
     inputImageIds: [...task.inputImageIds],
     maskTargetImageId: task.maskTargetImageId ?? null,
     maskImageId: task.maskImageId ?? null,
+    inputPreprocess: task.inputPreprocess,
+    originalInputImageIds: task.originalInputImageIds ? [...task.originalInputImageIds] : undefined,
     transparentOutput: transparentMeta?.transparentOutput,
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
@@ -3017,20 +3429,45 @@ export async function reuseConfig(task: TaskRecord) {
   )
   clearMaskDraft()
 
-  // 恢复输入图片
-  const imgs: InputImage[] = []
-  for (const imgId of task.inputImageIds) {
-    const storedImage = await getImage(imgId)
-    const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
-    if (dataUrl) {
-      imgs.push({
-        id: imgId,
-        dataUrl,
-        ...(storedImage?.width ? { width: storedImage.width } : {}),
-        ...(storedImage?.height ? { height: storedImage.height } : {}),
-      })
+  // 恢复输入图片：任务记录了预处理前原图（originalInputImageIds）时优先恢复原图，
+  // input_ratio_policy 保持——用户再提交会对原图重新走一遍预处理，不会叠加处理；
+  // 原图已被清理时回落到处理图，并把策略置为 off（对已扩边/裁切过的图再套同一策略
+  // 会二次扩边/二次裁切，画幅防御应只作用于原生输入）。
+  const loadInputImagesByIds = async (ids: string[]) => {
+    const loaded: InputImage[] = []
+    for (const imgId of ids) {
+      const storedImage = await getImage(imgId)
+      const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
+      if (dataUrl) {
+        loaded.push({
+          id: imgId,
+          dataUrl,
+          ...(storedImage?.width ? { width: storedImage.width } : {}),
+          ...(storedImage?.height ? { height: storedImage.height } : {}),
+        })
+      }
+    }
+    return loaded
+  }
+  let imgs: InputImage[] = []
+  let restoredParams = task.params
+  const canRestoreOriginalInputs = Boolean(task.originalInputImageIds?.length) && !task.maskImageId
+  if (canRestoreOriginalInputs) {
+    const originals = await loadInputImagesByIds(task.originalInputImageIds || [])
+    if (originals.length === task.originalInputImageIds?.length) {
+      imgs = originals
+    } else {
+      restoredParams = { ...task.params, input_ratio_policy: 'off' }
     }
   }
+  if (!imgs.length) {
+    imgs = await loadInputImagesByIds(task.inputImageIds)
+  }
+
+  setParams(normalizeParamsForSettings(restoredParams, paramsSettings, {
+    hasInputImages: imgs.length > 0,
+    preserveExactSizeIntent: true,
+  }))
   setInputImages(imgs)
   setPrompt(task.prompt)
   const maskTargetImageId = task.maskTargetImageId ?? (task.maskImageId ? task.inputImageIds[0] : null)
@@ -3256,9 +3693,12 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     }
 
     clearImageCaches()
+    // 场景草稿引用的输入图已随 images 清空：草稿一并清空，内存 memo 同步释放
+    sceneDraftImageMemo.clear()
     useStore.setState({
       supportPromptOpen: false,
       supportPromptSkippedForImportedData: false,
+      sceneDrafts: {},
     })
     clearInputImages()
     clearMaskDraft()
@@ -3352,6 +3792,12 @@ export function getCleanupPlan(tasks: TaskRecord[], now = Date.now()): CleanupPl
           relatedTaskIds.add(task.id)
         }
       }
+      for (const id of task.originalInputImageIds ?? []) {
+        if (id) {
+          staleCopyIds.add(id)
+          relatedTaskIds.add(task.id)
+        }
+      }
     }
   }
 
@@ -3398,6 +3844,12 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
           patch.exactSizeOriginalImages = keep.length ? keep : undefined
         }
       }
+      if (task.originalInputImageIds?.length) {
+        const keep = task.originalInputImageIds.filter((id) => !id || protectedIds.has(id))
+        if (keep.length !== task.originalInputImageIds.length) {
+          patch.originalInputImageIds = keep.length ? keep : undefined
+        }
+      }
     }
     if (Object.keys(patch).length) taskPatches.push({ taskId: task.id, patch })
   }
@@ -3413,6 +3865,7 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
     for (const id of task.streamPartialImageIds ?? []) stillReferenced.add(id)
     for (const id of task.transparentOriginalImages ?? []) stillReferenced.add(id)
     for (const id of task.exactSizeOriginalImages ?? []) stillReferenced.add(id)
+    for (const id of task.originalInputImageIds ?? []) stillReferenced.add(id)
   }
 
   // 候选 = 清理前引用集 - 清理后引用集（真正孤立的图）
@@ -3421,6 +3874,7 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
     for (const id of task.streamPartialImageIds ?? []) if (id) before.add(id)
     for (const id of task.transparentOriginalImages ?? []) if (id) before.add(id)
     for (const id of task.exactSizeOriginalImages ?? []) if (id) before.add(id)
+    for (const id of task.originalInputImageIds ?? []) if (id) before.add(id)
   }
   const candidateIds = new Set<string>()
   for (const id of before) {
@@ -3459,6 +3913,11 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
       const keep = original.exactSizeOriginalImages.filter((id) => patch.exactSizeOriginalImages?.includes(id) || !deletedIds.has(id))
       const next = keep.length ? keep : undefined
       if (keep.length !== original.exactSizeOriginalImages.length) applied.exactSizeOriginalImages = next
+    }
+    if (original.originalInputImageIds?.length) {
+      const keep = original.originalInputImageIds.filter((id) => patch.originalInputImageIds?.includes(id) || !deletedIds.has(id))
+      const next = keep.length ? keep : undefined
+      if (keep.length !== original.originalInputImageIds.length) applied.originalInputImageIds = next
     }
     if (Object.keys(applied).length) appliedPatches.push({ taskId, patch: applied })
   }
@@ -3502,7 +3961,9 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   if (!latest || latest.status === 'done') return
   if (latest.status !== 'running' && !latest.customRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+    ratioAutoCorrect: useStore.getState().settings.ratioAutoCorrect,
+  })
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -3518,6 +3979,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
     exactSizeTransforms,
+    ratioCorrected: ratioCorrected || undefined,
     outputPersistWarning: persistFailedCount > 0 || undefined,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),

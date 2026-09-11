@@ -6,7 +6,8 @@ import { useTooltip } from '../hooks/useTooltip'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMobileSheet } from '../hooks/useMobileSheet'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
-import { formatImageRatio } from '../lib/size'
+import { getImageMetadata } from '../lib/db'
+import { formatImageRatio, parseImageSize } from '../lib/size'
 import { ActualValueBadge, DetailParamValue } from '../lib/paramDisplay'
 import { copyImageSourceToClipboard, copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
@@ -82,6 +83,8 @@ export default function DetailModal() {
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   // 「拆分贴纸」入口门控：仅透明类型的输出图展示（详情页预览就是原图，可直接采样）
   const [splitEligible, setSplitEligible] = useState(false)
+  // 比例校正前的源输出图尺寸（读存储元数据，取不到时警告条保持泛化文案）
+  const [ratioCorrectedSourceSize, setRatioCorrectedSourceSize] = useState<{ width: number; height: number } | null>(null)
 
   // 移动端：全屏 sheet + 下滑关闭（仅 <640px 生效，桌面完全不变）
   const isMobile = useIsMobile()
@@ -238,7 +241,33 @@ export default function DetailModal() {
   const currentOriginalOutputImageId = currentOutputImageIndex >= 0 ? task?.transparentOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentExactSizeSourceImageId = currentOutputImageIndex >= 0 ? task?.exactSizeOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentExactSizeTransform = currentOutputImageId ? task?.exactSizeTransforms?.[currentOutputImageId] : undefined
+  // 比例校正目标 = 请求的具体尺寸（校正本身即 resize 到该像素尺寸）
+  const ratioCorrectionTargetSize = task?.ratioCorrected && task.params.size !== 'auto'
+    ? parseImageSize(task.params.size)
+    : null
   const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
+
+  useEffect(() => {
+    const sourceId = task?.ratioCorrected && currentOutputImageIndex >= 0 ? currentExactSizeSourceImageId : ''
+    if (!sourceId) {
+      setRatioCorrectedSourceSize(null)
+      return
+    }
+    let cancelled = false
+    getImageMetadata(sourceId)
+      .then((metadata) => {
+        if (cancelled) return
+        setRatioCorrectedSourceSize(metadata?.width && metadata?.height
+          ? { width: metadata.width, height: metadata.height }
+          : null)
+      })
+      .catch(() => {
+        if (!cancelled) setRatioCorrectedSourceSize(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [task?.id, task?.ratioCorrected, currentOutputImageIndex, currentExactSizeSourceImageId])
 
   useEffect(() => {
     const imageId = currentOutputImageId
@@ -319,11 +348,14 @@ export default function DetailModal() {
     : { ...(baseActualParams ?? {}), size: currentImageSize.replace('×', 'x') }
   const currentRevisedPrompt = currentOutputImageId ? task.revisedPromptByImage?.[currentOutputImageId]?.trim() : ''
   const refusalRecovery = task.refusalRecovery
-  // 将 @图N 等 mention 标记和透明背景追加提示词都按实际请求内容比较，
-  // 避免仅由本地请求预处理导致的不一致被当作“API 改写”。
-  const requestPrompt = task.transparentOutput && task.transparentPrompt
+  // 将 @图N 等 mention 标记、透明背景/outpaint 预处理的追加提示词都按实际请求
+  // 内容比较，避免仅由本地请求预处理导致的不一致被当作“API 改写”。
+  const rawRequestPrompt = task.transparentOutput && task.transparentPrompt
     ? task.transparentPrompt
     : task.prompt
+  const requestPrompt = task.inputPreprocess?.promptHint
+    ? `${task.inputPreprocess.promptHint}\n${rawRequestPrompt}`
+    : rawRequestPrompt
   const promptSentToApi = replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length).trim()
   const showRevisedPrompt = Boolean(currentRevisedPrompt && currentRevisedPrompt !== promptSentToApi)
   const codexCliPromptKey = getCodexCliPromptKey(settings)
@@ -474,6 +506,28 @@ export default function DetailModal() {
         showToast('下载失败', 'error')
       } else {
         showToast('源图下载成功', 'success')
+      }
+    } catch (err) {
+      console.error(err)
+      showToast('下载失败', 'error')
+    }
+  }
+
+  const originalInputImageIds = (task.originalInputImageIds ?? []).filter(Boolean)
+  const inputPreprocessPolicy = task.inputPreprocess && task.inputPreprocess.policy !== 'none'
+    ? task.inputPreprocess.policy
+    : null
+
+  const handleDownloadOriginalInputs = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!originalInputImageIds.length) return
+
+    try {
+      const result = await downloadImageIds(originalInputImageIds, `task-${task.id}-input-source`)
+      if (result.successCount === 0) {
+        showToast('下载失败', 'error')
+      } else {
+        showToast('原图下载成功', 'success')
       }
     } catch (err) {
       console.error(err)
@@ -1221,6 +1275,29 @@ export default function DetailModal() {
                   </div>
                 </>
               )}
+              {inputPreprocessPolicy && (
+                <div className="col-span-2 bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
+                  <span className="text-gray-400 dark:text-gray-500">输入图预处理</span>
+                  <br />
+                  <div className="mt-0.5 flex items-center gap-1.5 min-w-0 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2">
+                    <span className="font-medium text-gray-700 dark:text-gray-300 flex-shrink-0">
+                      {inputPreprocessPolicy === 'crop' ? '裁切到目标比例' : '智能扩边'}
+                    </span>
+                    <span className="text-gray-400 dark:text-gray-500 flex-shrink-0">
+                      · 原图 {task.inputPreprocess?.originalCount ?? originalInputImageIds.length} 张已保留
+                    </span>
+                    {originalInputImageIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleDownloadOriginalInputs}
+                        className="ml-auto flex-shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 transition hover:bg-blue-100 dark:bg-blue-500/10 dark:text-blue-400 dark:hover:bg-blue-500/20"
+                      >
+                        下载原图
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               {task.targetAspectPromptHint && (
                 <div className="col-span-2 bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
                   <span className="text-gray-400 dark:text-gray-500">画幅提示</span>
@@ -1271,6 +1348,18 @@ export default function DetailModal() {
             {currentExactSizeTransform?.aspectMismatch && (
               <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
                 API 返回比例与目标比例不同，已保持几何比例后处理。
+              </div>
+            )}
+            {task.ratioCorrected && (
+              <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                {ratioCorrectedSourceSize && ratioCorrectionTargetSize
+                  ? `返回比例偏差过大，已从 ${ratioCorrectedSourceSize.width}x${ratioCorrectedSourceSize.height} 校正为 ${ratioCorrectionTargetSize.width}x${ratioCorrectionTargetSize.height}。`
+                  : '返回比例偏差过大，已自动校正到目标比例。'}
+              </div>
+            )}
+            {currentActualParams?.quality != null && task.params.quality !== 'auto' && currentActualParams.quality !== task.params.quality && (
+              <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                质量档已被服务端改写为「{currentActualParams.quality}」（部分网关/通道会改写质量档，详见服务行为说明）。
               </div>
             )}
 

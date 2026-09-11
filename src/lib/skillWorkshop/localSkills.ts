@@ -27,6 +27,7 @@ export async function scanLocalSkills(root: FileSystemDirectoryHandle): Promise<
       skills.push({
         id: name,
         name: parsed.name,
+        title: parsed.title,
         description: parsed.description,
         body: parsed.body,
         source: 'local',

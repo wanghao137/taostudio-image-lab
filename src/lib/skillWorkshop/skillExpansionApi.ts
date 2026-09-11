@@ -10,7 +10,7 @@
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from '../devProxy'
 import { createHeaders, extractText, getApiErrorMessage, normalizeResponsePayload } from '../imageApiShared'
 import type { ApiProfile, AppSettings, ResponsesApiResponse } from '../../types'
-import { buildExpansionInstructions } from './expansion'
+import { buildExpansionInstructions, SKILL_ENTRY_COUNT_DEFAULT } from './expansion'
 
 /** 部分 OpenAI 兼容网关直接返回顶层 output_text（SDK 便捷字段形态），类型层补齐该字段。 */
 type SkillExpansionPayload = ResponsesApiResponse & { output_text?: unknown }
@@ -20,9 +20,17 @@ export async function callSkillExpansionApi(opts: {
   profile: ApiProfile
   skillBody: string
   userInput: string
+  /** 覆盖默认契约指令（严格模式抽取轮 / 校验重试轮由调用方构造后传入） */
+  instructions?: string
+  /** 输出契约的条数参数（默认 5）；instructions 覆盖时本参数不参与指令构造 */
+  entryCount?: number
+  /** 覆盖 profile.timeout 的单次调用超时（秒）；两段式的抽取轮是短任务，由调用方传短预算压缩总时长 */
+  timeoutSecs?: number
   signal?: AbortSignal
 }): Promise<string> {
   const { settings, profile, skillBody, userInput, signal } = opts
+  const timeoutSecs = opts.timeoutSecs ?? profile.timeout
+  const instructions = opts.instructions ?? buildExpansionInstructions(skillBody, opts.entryCount ?? SKILL_ENTRY_COUNT_DEFAULT)
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
   const controller = new AbortController()
@@ -30,7 +38,7 @@ export async function callSkillExpansionApi(opts: {
   const timeoutId = setTimeout(() => {
     timedOut = true
     controller.abort()
-  }, profile.timeout * 1000)
+  }, timeoutSecs * 1000)
   const abortFromCaller = () => controller.abort()
   if (signal?.aborted) controller.abort()
   signal?.addEventListener('abort', abortFromCaller, { once: true })
@@ -39,7 +47,7 @@ export async function callSkillExpansionApi(opts: {
     const content: Array<Record<string, string>> = [{ type: 'input_text', text: userInput }]
     const body: Record<string, unknown> = {
       model: profile.model || settings.model,
-      instructions: buildExpansionInstructions(skillBody),
+      instructions,
       input: [{ role: 'user', content }],
     }
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
@@ -65,7 +73,7 @@ export async function callSkillExpansionApi(opts: {
     } catch (error) {
       // 超时 abort 抛出的是裸 AbortError，用户看不懂——换成可行动的中文提示。
       if (timedOut) {
-        throw new Error(`Skill 扩写请求超时（${profile.timeout} 秒），请重试或在设置中调大超时`)
+        throw new Error(`Skill 扩写请求超时（${timeoutSecs} 秒），请重试或在设置中调大超时`)
       }
       throw error
     }

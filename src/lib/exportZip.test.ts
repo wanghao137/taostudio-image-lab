@@ -12,6 +12,7 @@ describe('exportZip', () => {
       inputImageIds: ['img-1'],
       outputImages: ['img-2'],
       streamPartialImageIds: ['img-3'],
+      originalInputImageIds: ['img-4'],
       status: 'done',
       error: null,
       createdAt: 1700000000000,
@@ -30,6 +31,10 @@ describe('exportZip', () => {
       id: 'img-3',
       dataUrl: 'data:image/png;base64,CAkKCw==',
       source: 'generated',
+    }, {
+      id: 'img-4',
+      dataUrl: 'data:image/png;base64,DAwMDA==',
+      source: 'upload',
     }]
     const thumbnail: StoredImageThumbnail = {
       id: 'img-1',
@@ -63,6 +68,15 @@ describe('exportZip', () => {
     })
     expect(parsed.manifest.imageFiles?.['img-2']?.path).toBe('images/task-task-1.png')
     expect(parsed.manifest.imageFiles?.['img-3']?.path).toBe('images/task-task-1-partial.png')
+    // 预处理前的原始输入图也进备份，命名与 processed 输入图（-input）区分
+    expect(parsed.manifest.imageFiles?.['img-4']?.path).toBe('images/task-task-1-input-source.png')
+    expect(parsed.manifest.imageFiles?.['img-4']).toEqual({
+      path: 'images/task-task-1-input-source.png',
+      createdAt: 1700000000000,
+      source: 'upload',
+      width: undefined,
+      height: undefined,
+    })
     expect(parsed.manifest.thumbnailFiles?.['img-1']).toEqual({
       path: 'thumbnails/task-task-1-input.jpeg',
       width: 32,
@@ -72,6 +86,7 @@ describe('exportZip', () => {
     expect(readExportZipFileAsDataUrl(parsed.files, 'images/task-task-1-input.png')).toBe(images[0].dataUrl)
     expect(readExportZipFileAsDataUrl(parsed.files, 'images/task-task-1.png')).toBe(images[1].dataUrl)
     expect(readExportZipFileAsDataUrl(parsed.files, 'images/task-task-1-partial.png')).toBe(images[2].dataUrl)
+    expect(readExportZipFileAsDataUrl(parsed.files, 'images/task-task-1-input-source.png')).toBe(images[3].dataUrl)
     expect(readExportZipFileAsDataUrl(parsed.files, 'thumbnails/task-task-1-input.jpeg')).toBe(thumbnail.thumbnailDataUrl)
   })
 

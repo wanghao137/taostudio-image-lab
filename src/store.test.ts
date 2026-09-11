@@ -278,9 +278,8 @@ vi.mock('./lib/exactImageSize', () => ({
           : target
     return {
       dataUrl: `data:image/png;base64,resized-${target.width}x${target.height}`,
-      sourceDataUrl: ratioMatches
-        ? dataUrl
-        : `data:image/png;base64,source-${canonicalSource.width}x${canonicalSource.height}`,
+      // 与真实 resizeImageDataUrlToExactSize 语义一致：sourceDataUrl 保留 provider 原始输出
+      sourceDataUrl: dataUrl,
       width: target.width,
       height: target.height,
       sourceWidth: canonicalSource.width,
@@ -305,17 +304,50 @@ vi.mock('./lib/exactImageSize', () => ({
     }
   }),
 }))
+vi.mock('./lib/canvasImage', () => ({
+  // store.ts 仅用 validateMaskMatchesImage（浏览器 canvas 校验，node 环境不可用）；
+  // mock 为 partial 让遮罩提交链在测试中可走通。
+  validateMaskMatchesImage: vi.fn(async () => 'partial'),
+}))
+vi.mock('./lib/inputPreprocess', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/inputPreprocess')>()
+  return {
+    ...actual,
+    preprocessInputImagesForTarget: vi.fn(async (
+      images: Array<{ dataUrl: string; width?: number; height?: number }>,
+      _target: { width: number; height: number },
+      policy?: string,
+    ) => {
+      // 默认实现：显式 crop/outpaint 时返回可辨识的处理图；auto/off 不处理
+      if (policy !== 'crop' && policy !== 'outpaint') {
+        return { images: images.map((img) => ({ dataUrl: img.dataUrl, width: img.width ?? 0, height: img.height ?? 0 })), policy: 'none' }
+      }
+      const longEdge = 1536
+      return {
+        images: images.map((img, index) => ({
+          dataUrl: `data:image/png;base64,pre-${policy}-${index + 1}`,
+          width: policy === 'crop' ? 1024 : longEdge,
+          height: policy === 'crop' ? 1536 : longEdge,
+        })),
+        policy,
+        ...(policy === 'outpaint' ? { promptHint: 'mock-outpaint-hint' } : {}),
+      }
+    }),
+  }
+})
 import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearSceneDirectoryHandle, clearSkillsRootDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getEngineDeliveryDirectoryHandle, getImage, getLocalAutoSaveDirectoryHandle, getSceneDirectoryHandle, getSkillsRootDirectoryHandle, getStoredFreshImageThumbnail, listSceneDirectoryHandles, putAgentConversation, putEngineDeliveryDirectoryHandle, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putSceneDirectoryHandle, putSkillsRootDirectoryHandle, putTask as putDbTask, SCENE_DIRECTORY_KEY_PREFIX } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
+import { preprocessInputImagesForTarget } from './lib/inputPreprocess'
 import { formatExportFileTime } from './lib/exportFileName'
 import { calculateImageSize } from './lib/size'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
+import { buildExpansionInstructions } from './lib/skillWorkshop/expansion'
+import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, makeSkillExpansionState, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -1241,12 +1273,12 @@ describe('mask draft lifecycle in store actions', () => {
     const outputImage = await getImage(task.outputImages[0])
     const sourceImage = await getImage(task.exactSizeOriginalImages![0])
     expect(outputImage?.dataUrl).toBe('data:image/png;base64,resized-2160x3840')
+    // sourceDataUrl 语义 = provider 原始输出（方图），最终输出为 cover 裁切到目标比例
     expect(sourceImage).toMatchObject({
-      dataUrl: 'data:image/png;base64,source-720x1280',
-      width: 720,
-      height: 1280,
+      dataUrl: 'data:image/png;base64,actual-1254x1254',
+      width: 1254,
+      height: 1254,
     })
-    expect(sourceImage!.width! * outputImage!.height!).toBe(outputImage!.width! * sourceImage!.height!)
     await clearTasks()
     await clearImages()
   })
@@ -2826,6 +2858,41 @@ describe('reused task API profile', () => {
     }))
     expect(state.showSettings).toBe(false)
   })
+
+  it('复用配置优先恢复预处理前原图，input_ratio_policy 保持', async () => {
+    await clearImages()
+    await putImage({ id: 'image-a', dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
+    await putImage({ id: 'image-b', dataUrl: imageB.dataUrl, source: 'generated', createdAt: 1 })
+
+    await reuseConfig(task({
+      apiProfileId: openaiProfile.id,
+      inputImageIds: ['image-b'],
+      originalInputImageIds: ['image-a'],
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'outpaint' },
+    }))
+
+    const state = useStore.getState()
+    // 恢复的是扩边前的原图，策略保持——再提交会对原图重新预处理而不是二次扩边
+    expect(state.inputImages.map((img) => img.id)).toEqual(['image-a'])
+    expect(state.params).toMatchObject({ size: '1024x1536', input_ratio_policy: 'outpaint' })
+  })
+
+  it('原图已被清理时回落处理图并把 input_ratio_policy 置为 off', async () => {
+    await clearImages()
+    await putImage({ id: 'image-b', dataUrl: imageB.dataUrl, source: 'generated', createdAt: 1 })
+
+    await reuseConfig(task({
+      apiProfileId: openaiProfile.id,
+      inputImageIds: ['image-b'],
+      originalInputImageIds: ['image-a'],
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+    }))
+
+    const state = useStore.getState()
+    // 原图缺失：回落已裁切的处理图，策略置 off 避免二次裁切
+    expect(state.inputImages.map((img) => img.id)).toEqual(['image-b'])
+    expect(state.params).toMatchObject({ size: '1024x1536', input_ratio_policy: 'off' })
+  })
 })
 
 describe('restoreLocalAutoSavePermissionOnUserActivation', () => {
@@ -3518,6 +3585,11 @@ describe('场景 actions 与保存链', () => {
       tasks: [],
       localAutoSaveRunningTaskIds: {},
       gallerySceneFilter: 'general',
+      // T1 场景草稿隔离：sceneDrafts 跨测试持久会串味（上一用例的草稿被下一用例当成"已有草稿"载入），
+      // 与 prompt/inputImages 一起显式重置，保证每个用例都从"首次进入"语义开始。
+      prompt: '',
+      inputImages: [],
+      sceneDrafts: {},
       showToast: vi.fn(),
     })
   })
@@ -3804,6 +3876,280 @@ describe('场景 actions 与保存链', () => {
   })
 })
 
+describe('场景草稿隔离（T1 sceneDrafts）', () => {
+  beforeEach(() => {
+    useStore.setState({
+      settings: normalizeSettings({
+        profiles: [createDefaultOpenAIProfile({ id: 'scene-draft-profile', apiKey: 'test-key' })],
+        activeProfileId: 'scene-draft-profile',
+        apiKey: 'test-key',
+        scenes: {
+          portrait: { defaults: { ratio: '3:4', tier: '2K' } },
+          sticker: { defaults: { ratio: '1:1', tier: '1K' } },
+        },
+      }),
+      params: { ...DEFAULT_PARAMS },
+      prompt: '',
+      inputImages: [],
+      galleryInputDraft: null,
+      sceneDrafts: {},
+      appMode: 'gallery',
+      gallerySceneFilter: 'general',
+      maskDraft: null,
+      maskEditorImageId: null,
+      showToast: vi.fn(),
+    })
+  })
+
+  it('切走场景保存草稿，切回整体恢复 prompt/params/输入图', () => {
+    useStore.getState().setActiveScene('portrait')
+    useStore.getState().setPrompt('人像提示词')
+    useStore.getState().addInputImage(imageA)
+    useStore.getState().setParams({ quality: 'high', n: 3 })
+
+    // 切到 sticker：portrait 草稿保存，sticker 首次进入为空白工作区（不带出 portrait 的参数）
+    useStore.getState().setActiveScene('sticker')
+    expect(useStore.getState().prompt).toBe('')
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().params.quality).toBe('auto')
+    expect(useStore.getState().params.n).toBe(1)
+    expect(useStore.getState().params.size).toBe(calculateImageSize('1K', '1:1'))
+    expect(useStore.getState().sceneDrafts.portrait).toMatchObject({
+      prompt: '人像提示词',
+      params: { quality: 'high', n: 3 },
+      inputImageIds: [imageA.id],
+    })
+
+    // 切回 portrait：prompt/params/输入图全量恢复（同会话内存 memo，dataUrl 同步可用）
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().prompt).toBe('人像提示词')
+    expect(useStore.getState().params).toMatchObject({
+      quality: 'high',
+      n: 3,
+      size: calculateImageSize('2K', '3:4'),
+    })
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it('首次进入场景：prompt/图片置空，params 以 DEFAULT_PARAMS+场景 defaults 初始化', () => {
+    useStore.setState({
+      prompt: '通用创作的提示词',
+      inputImages: [imageA],
+      params: { ...DEFAULT_PARAMS, quality: 'max', size: '1024x1024' },
+    })
+    useStore.getState().setActiveScene('portrait')
+
+    expect(useStore.getState().prompt).toBe('')
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().params).toEqual({ ...DEFAULT_PARAMS, size: calculateImageSize('2K', '3:4') })
+    // 离开的 general 场景草稿已保存，不丢用户内容
+    expect(useStore.getState().sceneDrafts.general).toMatchObject({
+      prompt: '通用创作的提示词',
+      params: { quality: 'max', size: '1024x1024' },
+      inputImageIds: [imageA.id],
+    })
+  })
+
+  it('迁移：升级后首次启动把全局草稿归属当前场景，首次切换不清空用户草稿', async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    // 模拟老版本升级：只有全局 prompt/params/inputImages，没有 sceneDrafts
+    useStore.setState({
+      prompt: '升级前的全局草稿',
+      params: { ...DEFAULT_PARAMS, quality: 'max' },
+      inputImages: [imageA],
+      sceneDrafts: {},
+    })
+
+    await initStore()
+
+    expect(useStore.getState().sceneDrafts.general).toMatchObject({
+      prompt: '升级前的全局草稿',
+      params: { quality: 'max' },
+      inputImageIds: [imageA.id],
+    })
+
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().prompt).toBe('')
+    useStore.getState().setActiveScene('general')
+    expect(useStore.getState().prompt).toBe('升级前的全局草稿')
+    expect(useStore.getState().params.quality).toBe('max')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it('init 异步间隙切换场景：旧输入不写入新场景，sceneDrafts 不被污染，切回旧场景仍可恢复', async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    // 模拟刷新后的持久化形态：输入图在库中，但 live input/galleryInputDraft 只剩 id（dataUrl 被 persist 剥空）
+    await putImage({ id: imageA.id, dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
+    // 一张超过宽限期的旧孤儿图：孤儿清扫会在「捕获持久化输入之后、回写之前」多一次可拦截的 await，
+    // 用它把 initStore 暂停在异步间隙里
+    await putImage({ id: 'orphan-old', dataUrl: 'data:image/png;base64,orphan', source: 'upload', createdAt: 1 })
+    useStore.setState({
+      prompt: 'general 刷新前草稿',
+      inputImages: [{ id: imageA.id, dataUrl: '' }],
+      galleryInputDraft: {
+        prompt: 'general 刷新前草稿',
+        inputImages: [{ id: imageA.id, dataUrl: '' }],
+        maskDraft: null,
+        maskEditorImageId: null,
+      },
+      sceneDrafts: {},
+    })
+
+    let reachGate!: () => void
+    const gateReached = new Promise<void>((resolve) => { reachGate = resolve })
+    let openGate!: () => void
+    const gateOpen = new Promise<void>((resolve) => { openGate = resolve })
+    vi.mocked(deleteDbImage).mockImplementationOnce(async (id) => {
+      reachGate()
+      await gateOpen
+      await deleteDbImageImplementation(id)
+    })
+
+    const initPromise = initStore()
+    await gateReached
+    // init 暂停中：persistedInputImages/galleryInputDraft 已捕获，此刻用户点击场景 tab
+    useStore.getState().setActiveScene('portrait')
+    openGate()
+    await initPromise
+
+    // 旧 general 输入不得写进 portrait 工作区（首次进入应为空白）
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().prompt).toBe('')
+    // galleryInputDraft 恢复同样被跳过：保持 setActiveScene 时写入的 null（portrait 空白镜像）
+    expect(useStore.getState().galleryInputDraft).toBeNull()
+    // portrait 无草稿键，init 不得替它写入
+    expect(useStore.getState().sceneDrafts.portrait).toBeUndefined()
+    // general 草稿保持刷新前归属，未被跨场景污染
+    expect(useStore.getState().sceneDrafts.general).toMatchObject({
+      prompt: 'general 刷新前草稿',
+      inputImageIds: [imageA.id],
+    })
+
+    // 跳过全局回写不丢图：切回 general 由草稿水合路径按 id 从库中补回预览
+    useStore.getState().setActiveScene('general')
+    await vi.waitFor(() => {
+      expect(useStore.getState().inputImages).toEqual([{ id: imageA.id, dataUrl: imageA.dataUrl }])
+    })
+    expect(useStore.getState().prompt).toBe('general 刷新前草稿')
+  })
+
+  it('skill 场景不保存也不载入草稿，底部输入区状态在进出时保持', () => {
+    useStore.setState({
+      prompt: '通用草稿',
+      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      inputImages: [imageA],
+    })
+
+    useStore.getState().setActiveScene('skill')
+    // skill 有独立输入区：全局输入原样保留，不存草稿键
+    expect(useStore.getState().prompt).toBe('通用草稿')
+    expect(useStore.getState().params.quality).toBe('high')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+    expect((useStore.getState().sceneDrafts as Record<string, unknown>).skill).toBeUndefined()
+
+    useStore.getState().setActiveScene('general')
+    // 离开 skill 没有保存草稿；进入 general 恢复的是离开 general 时保存的草稿
+    expect(useStore.getState().prompt).toBe('通用草稿')
+    expect(useStore.getState().params.quality).toBe('high')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+    expect(Object.keys(useStore.getState().sceneDrafts)).not.toContain('skill')
+  })
+
+  it('engine 模式下切换场景：草稿隔离照常生效，galleryInputDraft 不被改写', () => {
+    useStore.setState({
+      appMode: 'engine',
+      galleryInputDraft: { prompt: '引擎前的画廊草稿', inputImages: [], maskDraft: null, maskEditorImageId: null, updatedAt: 1 },
+    })
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().galleryInputDraft?.prompt).toBe('引擎前的画廊草稿')
+    expect(useStore.getState().prompt).toBe('')
+  })
+
+  it('刷新后切回场景：草稿图片按 id 从 IndexedDB 水合；已不存在的图片被丢弃', async () => {
+    await clearImages()
+    await putImage({ id: 'scene-hydrate-image', dataUrl: 'data:image/png;base64,hydrate', source: 'upload', createdAt: 1 })
+    // 模拟 persist 恢复后的形态：草稿只有 id 引用（无 dataUrl），当前停在 general（输入为空）
+    useStore.setState({
+      sceneDrafts: {
+        portrait: {
+          prompt: '刷新前的提示词',
+          params: { ...DEFAULT_PARAMS, quality: 'high' },
+          inputImageIds: ['scene-hydrate-image', 'scene-missing-image'],
+        },
+      },
+    })
+
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().prompt).toBe('刷新前的提示词')
+    // 同步阶段先按 id 恢复占位，dataUrl 由异步水合补齐
+    expect(useStore.getState().inputImages).toEqual([
+      { id: 'scene-hydrate-image', dataUrl: '' },
+      { id: 'scene-missing-image', dataUrl: '' },
+    ])
+
+    await vi.waitFor(() => {
+      expect(useStore.getState().inputImages).toEqual([
+        { id: 'scene-hydrate-image', dataUrl: 'data:image/png;base64,hydrate' },
+      ])
+    })
+  })
+
+  it('切换场景后遮罩目标图不在新场景输入中时清除遮罩', () => {
+    useStore.setState({
+      inputImages: [imageA],
+      maskDraft: { targetImageId: imageA.id, maskDataUrl: 'data:image/png;base64,mask', updatedAt: 1 },
+      maskEditorImageId: imageA.id,
+    })
+    useStore.getState().setActiveScene('portrait')
+    expect(useStore.getState().maskDraft).toBeNull()
+    expect(useStore.getState().maskEditorImageId).toBeNull()
+
+    // general 草稿只存了图片引用，没有遮罩
+    useStore.getState().setActiveScene('general')
+    expect(useStore.getState().inputImages.map((img) => img.id)).toEqual([imageA.id])
+    expect(useStore.getState().maskDraft).toBeNull()
+  })
+
+  it('持久化语义：sceneDrafts 跟随 persistInputOnRestart 保存（仅 id 引用，不含 skill 键）', () => {
+    useStore.setState({ prompt: '草稿', inputImages: [imageA] })
+    useStore.getState().setActiveScene('portrait')
+
+    const persisted = getPersistedState(useStore.getState())
+    expect(persisted.sceneDrafts?.general).toMatchObject({ prompt: '草稿', inputImageIds: [imageA.id] })
+    expect(persisted.sceneDrafts && 'skill' in persisted.sceneDrafts).toBe(false)
+
+    useStore.setState({ settings: { ...useStore.getState().settings, persistInputOnRestart: false } })
+    expect(getPersistedState(useStore.getState())).not.toHaveProperty('sceneDrafts')
+  })
+
+  it('持久化恢复：normalizePersistedState 校验 sceneDrafts 字段并丢弃 skill/非法场景键', () => {
+    const restored = normalizePersistedState({
+      settings: { ...DEFAULT_SETTINGS },
+      params: { ...DEFAULT_PARAMS },
+      sceneDrafts: {
+        general: {
+          prompt: '持久化草稿',
+          params: { ...DEFAULT_PARAMS, quality: 'high' },
+          inputImageIds: ['img-1', 42, null],
+        },
+        skill: { prompt: '不应恢复', params: { ...DEFAULT_PARAMS }, inputImageIds: [] },
+        bogus: { prompt: '非法场景键', params: { ...DEFAULT_PARAMS }, inputImageIds: [] },
+      },
+    }, useStore.getState())!
+
+    expect(restored.sceneDrafts.general).toEqual({
+      prompt: '持久化草稿',
+      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      inputImageIds: ['img-1'],
+    })
+    expect(Object.keys(restored.sceneDrafts)).toEqual(['general'])
+  })
+})
+
 describe('场景 provider 覆盖执行链（Fix Round 1）', () => {
   // openai 当前 + sb2api-async（内置异步自定义 provider，带 poll/taskIdPath）草稿：
   // 全局切换过服务商再切回的真实形态；场景覆盖到 sb2api-async。
@@ -4031,7 +4377,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { builtin: [], builtinLoading: false, local: [], localRootName: null, scanning: false },
       activeSkillId: null,
       skillInputDraft: '',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
     })
   })
 
@@ -4099,7 +4445,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
       showToast: vi.fn(),
     })
 
@@ -4119,7 +4465,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市拿铁',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState({ strictMode: false }),
       showToast: vi.fn(),
     })
     vi.mocked(callSkillExpansionApi).mockResolvedValueOnce('### 01\n第一条夜市提示词内容\n\n### 02\n第二条拿铁提示词内容')
@@ -4144,7 +4490,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
       showToast: vi.fn(),
     })
     vi.mocked(callSkillExpansionApi).mockRejectedValueOnce(new Error('Skill 扩写接口未返回文本内容'))
@@ -4162,11 +4508,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '   ',
-      skillExpansion: {
-        status: 'idle',
-        error: null,
-        entries: [{ id: 'entry-1', text: '已扩写的条目', enabled: true }],
-      },
+      skillExpansion: makeSkillExpansionState({ entries: [{ id: 'entry-1', text: '已扩写的条目', enabled: true }] }),
       showToast: vi.fn(),
     })
 
@@ -4187,7 +4529,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState({ strictMode: false }),
       showToast: vi.fn(),
     })
 
@@ -4199,9 +4541,9 @@ describe('Skill 工坊 store 链', () => {
     expect(useStore.getState().skillExpansion.status).toBe('running')
 
     // 第二次触发：应 abort 第一次的请求并接管「最新 run」
-    vi.mocked(callSkillExpansionApi).mockImplementationOnce(async () => '### 01\n第二次扩写条目内容')
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(async () => '### 01\n第二次扩写条目内容\n\n### 02\n第二次扩写补充条目内容')
     await useStore.getState().runSkillExpansion()
-    expect(useStore.getState().skillExpansion.entries.map((entry) => entry.text)).toEqual(['第二次扩写条目内容'])
+    expect(useStore.getState().skillExpansion.entries.map((entry) => entry.text)).toEqual(['第二次扩写条目内容', '第二次扩写补充条目内容'])
 
     // 第一次请求此时才 resolve：守卫应拦截回写，状态不得被拉乱
     resolveSlow('### 01\n第一次过期扩写条目内容')
@@ -4210,7 +4552,7 @@ describe('Skill 工坊 store 链', () => {
     const expansion = useStore.getState().skillExpansion
     expect(expansion.status).toBe('idle')
     expect(expansion.error).toBeNull()
-    expect(expansion.entries.map((entry) => entry.text)).toEqual(['第二次扩写条目内容'])
+    expect(expansion.entries.map((entry) => entry.text)).toEqual(['第二次扩写条目内容', '第二次扩写补充条目内容'])
   })
 
   it('abortSkillExpansion：中断在飞请求立即回 idle 清空条目，孤儿结果后到不回写', async () => {
@@ -4220,7 +4562,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
       showToast: vi.fn(),
     })
 
@@ -4251,7 +4593,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState(),
       showToast: vi.fn(),
     })
 
@@ -4265,7 +4607,7 @@ describe('Skill 工坊 store 链', () => {
     // 切换到另一个 skill：在飞扩写应被 abort 并重置为空状态
     useStore.getState().setActiveSkill('skill-b')
     expect(useStore.getState().activeSkillId).toBe('skill-b')
-    expect(useStore.getState().skillExpansion).toEqual({ status: 'idle', error: null, entries: [] })
+    expect(useStore.getState().skillExpansion).toEqual(makeSkillExpansionState())
     const captured = vi.mocked(callSkillExpansionApi).mock.calls[0]?.[0]
     expect(captured?.signal?.aborted).toBe(true)
 
@@ -4286,7 +4628,7 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '主题：夜市',
-      skillExpansion: { status: 'idle', error: null, entries: [] },
+      skillExpansion: makeSkillExpansionState({ strictMode: false }),
       showToast: vi.fn(),
     })
 
@@ -4303,42 +4645,38 @@ describe('Skill 工坊 store 链', () => {
     const captured = vi.mocked(callSkillExpansionApi).mock.calls[0]?.[0]
     expect(captured?.signal?.aborted).toBe(false)
 
-    resolveInFlight('### 01\n正常扩写条目内容')
+    resolveInFlight('### 01\n正常扩写条目内容\n\n### 02\n正常扩写补充条目内容')
     await inFlight
 
     const expansion = useStore.getState().skillExpansion
     expect(expansion.status).toBe('idle')
-    expect(expansion.entries.map((entry) => entry.text)).toEqual(['正常扩写条目内容'])
+    expect(expansion.entries.map((entry) => entry.text)).toEqual(['正常扩写条目内容', '正常扩写补充条目内容'])
     expect(useStore.getState().activeSkillId).toBe('builtin-skill')
   })
 
   it('setActiveSkill 切换 skill 时重置扩写条目，updateSkillEntry/removeSkillEntry 精确增改', () => {
     useStore.setState({
       activeSkillId: 'skill-a',
-      skillExpansion: {
-        status: 'idle',
-        error: null,
+      skillExpansion: makeSkillExpansionState({
         entries: [
           { id: 'entry-1', text: '第一条', enabled: true },
           { id: 'entry-2', text: '第二条', enabled: true },
         ],
-      },
+      }),
     })
 
     useStore.getState().setActiveSkill('skill-b')
     expect(useStore.getState().activeSkillId).toBe('skill-b')
-    expect(useStore.getState().skillExpansion).toEqual({ status: 'idle', error: null, entries: [] })
+    expect(useStore.getState().skillExpansion).toEqual(makeSkillExpansionState())
 
     // 切换后重建条目，验证条目级增改不受 skill 切换影响
     useStore.setState({
-      skillExpansion: {
-        status: 'idle',
-        error: null,
+      skillExpansion: makeSkillExpansionState({
         entries: [
           { id: 'entry-1', text: '第一条', enabled: true },
           { id: 'entry-2', text: '第二条', enabled: true },
         ],
-      },
+      }),
     })
     useStore.getState().updateSkillEntry('entry-1', { text: '改写后的提示词', enabled: false })
     expect(useStore.getState().skillExpansion.entries[0]).toEqual({ id: 'entry-1', text: '改写后的提示词', enabled: false })
@@ -4360,15 +4698,13 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '锚点输入原文',
-      skillExpansion: {
-        status: 'idle',
-        error: null,
+      skillExpansion: makeSkillExpansionState({
         entries: [
           { id: 'entry-1', text: '第一条生成提示词', enabled: true },
           { id: 'entry-2', text: '被禁用的提示词', enabled: false },
           { id: 'entry-3', text: '第三条生成提示词', enabled: true },
         ],
-      },
+      }),
       showToast: vi.fn(),
     })
 
@@ -4399,11 +4735,9 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '锚点输入原文',
-      skillExpansion: {
-        status: 'idle',
-        error: null,
+      skillExpansion: makeSkillExpansionState({
         entries: [{ id: 'entry-1', text: '第一条生成提示词', enabled: true }],
-      },
+      }),
       showToast: vi.fn(),
     })
 
@@ -4432,11 +4766,9 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '锚点输入原文',
-      skillExpansion: {
-        status: 'idle',
-        error: null,
+      skillExpansion: makeSkillExpansionState({
         entries: [{ id: 'entry-1', text: '被禁用的提示词', enabled: false }],
-      },
+      }),
       showToast: vi.fn(),
     })
 
@@ -4458,14 +4790,12 @@ describe('Skill 工坊 store 链', () => {
       skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
       activeSkillId: 'builtin-skill',
       skillInputDraft: '锚点输入原文',
-      skillExpansion: {
-        status: 'idle',
-        error: null,
+      skillExpansion: makeSkillExpansionState({
         entries: [
           { id: 'entry-1', text: '第一条生成提示词', enabled: true },
           { id: 'entry-2', text: '第二条生成提示词', enabled: true },
         ],
-      },
+      }),
       showToast: vi.fn(),
     })
     const dbModule = await import('./lib/db')
@@ -4560,5 +4890,574 @@ describe('Skill 工坊 store 链', () => {
     expect(clearSkillsRootDirectoryHandle).toHaveBeenCalled()
     expect(useStore.getState().skills.local).toEqual([])
     expect(useStore.getState().skills.localRootName).toBeNull()
+  })
+
+  it('runSkillExpansion 严格模式（T5）：两段式——第一轮抽变量 JSON，第二轮按 JSON 逐条成文', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({ strictMode: true, entryCount: 3 }),
+      showToast: vi.fn(),
+    })
+
+    let phaseDuringCompose: string | null = null
+    vi.mocked(callSkillExpansionApi)
+      .mockImplementationOnce(async (opts) => {
+        // 第一轮：抽取指令含 skill 与 JSON 契约，输入含锚点与条数
+        expect(opts.skillBody).toBe('SKILL 正文')
+        expect(opts.instructions).toContain('<skill>')
+        expect(opts.instructions).toContain('只输出一个 JSON 数组')
+        expect(opts.userInput).toContain('锚点要求：主题：夜市')
+        expect(opts.userInput).toContain('抽取 3 条')
+        expect(useStore.getState().skillExpansion.phase).toBe('extracting')
+        return '[{"scene":"夜市"},{"scene":"天台"},{"scene":"便利店"}]'
+      })
+      .mockImplementationOnce(async (opts) => {
+        // 第二轮：契约保留，输入=抽取 JSON + 成文要求
+        phaseDuringCompose = useStore.getState().skillExpansion.phase
+        expect(opts.skillBody).toBe('SKILL 正文')
+        expect(opts.instructions).toBe(buildExpansionInstructions('SKILL 正文', 3))
+        expect(opts.userInput).toContain('{"scene":"夜市"}')
+        expect(opts.userInput).toContain('逐条写成 3 段完整自然语言提示词')
+        return '### 01\n第一条夜市成文提示词内容\n\n### 02\n第二条天台成文提示词内容\n\n### 03\n第三条便利店成文提示词内容'
+      })
+
+    await useStore.getState().runSkillExpansion()
+
+    expect(callSkillExpansionApi).toHaveBeenCalledTimes(2)
+    expect(phaseDuringCompose).toBe('composing')
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.phase).toBeNull()
+    expect(expansion.degraded).toBe(false)
+    expect(expansion.warning).toBeNull()
+    expect(expansion.entries.map((entry) => entry.text)).toEqual([
+      '第一条夜市成文提示词内容',
+      '第二条天台成文提示词内容',
+      '第三条便利店成文提示词内容',
+    ])
+  })
+
+  it('runSkillExpansion 严格模式（T5）：抽取轮用短超时预算，成文轮保持 profile.timeout', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses', timeout: 600 })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({ strictMode: true }),
+      showToast: vi.fn(),
+    })
+
+    vi.mocked(callSkillExpansionApi)
+      .mockResolvedValueOnce('[{"scene":"夜市"}]')
+      .mockResolvedValueOnce('### 01\n第一条短预算成文条目内容\n\n### 02\n第二条短预算成文条目内容')
+
+    await useStore.getState().runSkillExpansion()
+
+    expect(callSkillExpansionApi).toHaveBeenCalledTimes(2)
+    // mock 捕获每次调用的 opts：抽取轮收敛到 120s，成文轮不覆盖（走 profile.timeout=600）
+    const [extractOpts, composeOpts] = vi.mocked(callSkillExpansionApi).mock.calls.map((call) => call[0])
+    expect(extractOpts?.timeoutSecs).toBe(120)
+    expect(composeOpts?.timeoutSecs).toBeUndefined()
+    expect(useStore.getState().skillExpansion.status).toBe('idle')
+  })
+
+  it('runSkillExpansion 严格模式：抽取轮输出非 JSON 时回落单轮并标记降级（警告级，不硬失败）', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({ strictMode: true, entryCount: 2 }),
+      showToast: vi.fn(),
+    })
+
+    vi.mocked(callSkillExpansionApi)
+      .mockImplementationOnce(async () => '抱歉，我无法以 JSON 输出。')
+      .mockImplementationOnce(async (opts) => {
+        // 回落单轮：输入即锚点原文，指令为成文契约
+        expect(opts.userInput).toBe('主题：夜市')
+        expect(opts.instructions).toBe(buildExpansionInstructions('SKILL 正文', 2))
+        return '### 01\n第一条降级扩写条目内容\n\n### 02\n第二条降级扩写条目内容'
+      })
+
+    await useStore.getState().runSkillExpansion()
+
+    expect(callSkillExpansionApi).toHaveBeenCalledTimes(2)
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.degraded).toBe(true)
+    expect(expansion.warning).toContain('已回退单轮')
+    expect(expansion.entries).toHaveLength(2)
+  })
+
+  it('runSkillExpansion（T5）：解析后校验不合格自动重试一次，重试合格则正常返回', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({ strictMode: false, entryCount: 2 }),
+      showToast: vi.fn(),
+    })
+
+    vi.mocked(callSkillExpansionApi)
+      .mockImplementationOnce(async () => '### 01\n场景：夜市的一条合格长度提示词')
+      .mockImplementationOnce(async (opts) => {
+        // 重试：指令末尾附具体不合格原因
+        expect(String(opts.instructions)).toContain('上次输出的问题：')
+        expect(String(opts.instructions)).toContain('条数不足')
+        expect(String(opts.instructions)).toContain('结构化字段标签')
+        expect(String(opts.instructions).endsWith('，必须修正。')).toBe(true)
+        return '### 01\n第一条修正后的完整提示词\n\n### 02\n第二条修正后的完整提示词'
+      })
+
+    await useStore.getState().runSkillExpansion()
+
+    expect(callSkillExpansionApi).toHaveBeenCalledTimes(2)
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('idle')
+    expect(expansion.warning).toBeNull()
+    expect(expansion.entries.map((entry) => entry.text)).toEqual(['第一条修正后的完整提示词', '第二条修正后的完整提示词'])
+  })
+
+  it('runSkillExpansion（T5）：重试仍不合格时返回重试结果并置警告级消息，不进入 error', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({ strictMode: false, entryCount: 2 }),
+      showToast: vi.fn(),
+    })
+
+    vi.mocked(callSkillExpansionApi).mockResolvedValue('### 01\n场景：始终带字段标签的一条提示词')
+
+    await useStore.getState().runSkillExpansion()
+
+    expect(callSkillExpansionApi).toHaveBeenCalledTimes(2)
+    const expansion = useStore.getState().skillExpansion
+    // 警告语义：有结果但可能不合规——status 保持 idle，消息走 warning（黄条）而非 error
+    expect(expansion.status).toBe('idle')
+    expect(expansion.error).toBeNull()
+    expect(expansion.warning).toContain('扩写可能不符合 skill 规范')
+    expect(expansion.warning).toContain('条数不足')
+    expect(expansion.warning).toContain('结构化字段标签')
+    expect(expansion.entries).toHaveLength(1)
+  })
+
+  it('setSkillExpansionPrefs：严格模式与条数立即生效且越界收口；切 skill 不丢偏好', () => {
+    useStore.setState({ skillExpansion: makeSkillExpansionState() })
+    useStore.getState().setSkillExpansionPrefs({ strictMode: false, entryCount: 99 })
+    expect(useStore.getState().skillExpansion.strictMode).toBe(false)
+    expect(useStore.getState().skillExpansion.entryCount).toBe(10)
+
+    useStore.getState().setActiveSkill('other-skill')
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.strictMode).toBe(false)
+    expect(expansion.entryCount).toBe(10)
+  })
+
+  it('rerollSkillEntry（T5）：携带替换约束单条重写，成功后原位替换且其余条目不动', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({
+        entries: [
+          { id: 'entry-1', text: '第一条生成提示词', enabled: true },
+          { id: 'entry-2', text: '第二条生成提示词', enabled: false },
+        ],
+      }),
+      showToast: vi.fn(),
+    })
+
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(async (opts) => {
+      expect(opts.skillBody).toBe('SKILL 正文')
+      expect(opts.instructions).toBe(buildExpansionInstructions('SKILL 正文', 1))
+      expect(opts.userInput).toContain('锚点要求：主题：夜市')
+      expect(opts.userInput).toContain('其余现有条目')
+      // 摘要保留原条目编号（重写第 2 条时，剩下的第 1 条仍叫「第 1 条」）
+      expect(opts.userInput).toContain('第 1 条：第一条生成提示词')
+      expect(opts.userInput).toContain('替换第 2 条')
+      expect(opts.userInput).not.toContain('第二条生成提示词')
+      return '### 01\n重写后的第二条全新提示词内容'
+    })
+
+    const rerolling = useStore.getState().rerollSkillEntry(1)
+    // 运行期间该条目处于重写中状态
+    expect(useStore.getState().skillExpansion.rerollingEntryId).toBe('entry-2')
+
+    await rerolling
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.rerollingEntryId).toBeNull()
+    expect(expansion.entries).toEqual([
+      { id: 'entry-1', text: '第一条生成提示词', enabled: true },
+      { id: 'entry-2', text: '重写后的第二条全新提示词内容', enabled: false },
+    ])
+    expect(expansion.status).toBe('idle')
+  })
+
+  it('rerollSkillEntry（T5）：切 skill 中止在飞重写，过期结果不回写（复用 run-identity 守卫）', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({ entries: [{ id: 'entry-1', text: '第一条生成提示词', enabled: true }] }),
+      showToast: vi.fn(),
+    })
+
+    let resolveReroll!: (value: string) => void
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveReroll = resolve }),
+    )
+    const rerolling = useStore.getState().rerollSkillEntry(0)
+    expect(useStore.getState().skillExpansion.rerollingEntryId).toBe('entry-1')
+
+    // 切 skill：在飞重写被 abort 且条目被重置；后到的过期结果不得写回
+    useStore.getState().setActiveSkill('skill-b')
+    const rerollCalls = vi.mocked(callSkillExpansionApi).mock.calls
+    const captured = rerollCalls[rerollCalls.length - 1]?.[0]
+    expect(captured?.signal?.aborted).toBe(true)
+
+    resolveReroll('### 01\n过期的重写结果条目内容')
+    await rerolling
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.entries).toEqual([])
+    expect(expansion.rerollingEntryId).toBeNull()
+    expect(expansion.status).toBe('idle')
+  })
+
+  it('rerollSkillEntry：整批扩写 running 时直接返回，不发起重写、不动条目', async () => {
+    useStore.setState({
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({
+        status: 'running',
+        phase: 'composing',
+        entries: [{ id: 'entry-1', text: '在跑批次的既有条目', enabled: true }],
+      }),
+      showToast: vi.fn(),
+    })
+
+    await useStore.getState().rerollSkillEntry(0)
+
+    expect(callSkillExpansionApi).not.toHaveBeenCalled()
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.status).toBe('running')
+    expect(expansion.entries).toEqual([{ id: 'entry-1', text: '在跑批次的既有条目', enabled: true }])
+    expect(expansion.rerollingEntryId).toBeNull()
+  })
+
+  it('rerollSkillEntry：成功后清掉上一批扩写残留的 warning 与 error', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '主题：夜市',
+      skillExpansion: makeSkillExpansionState({
+        entries: [{ id: 'entry-1', text: '带残留警告的既有条目', enabled: true }],
+        warning: '扩写可能不符合 skill 规范（条数不足）',
+        error: '上一批的校验错误信息',
+      }),
+      showToast: vi.fn(),
+    })
+    vi.mocked(callSkillExpansionApi).mockResolvedValueOnce('### 01\n重写成功的全新条目内容')
+
+    await useStore.getState().rerollSkillEntry(0)
+
+    const expansion = useStore.getState().skillExpansion
+    expect(expansion.warning).toBeNull()
+    expect(expansion.error).toBeNull()
+    expect(expansion.entries[0]?.text).toBe('重写成功的全新条目内容')
+  })
+
+  it('rerollSkillEntry：其余条目摘要保留原编号，与任务行「替换第 N 条」一致', async () => {
+    const textProfile = createDefaultOpenAIProfile({ id: 'text-profile', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [textProfile], activeProfileId: textProfile.id, textApiProfileId: textProfile.id }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '',
+      skillExpansion: makeSkillExpansionState({
+        entries: [
+          { id: 'entry-1', text: '第一条原编号提示词内容', enabled: true },
+          { id: 'entry-2', text: '第二条原编号提示词内容', enabled: true },
+          { id: 'entry-3', text: '第三条原编号提示词内容', enabled: true },
+        ],
+      }),
+      showToast: vi.fn(),
+    })
+
+    vi.mocked(callSkillExpansionApi).mockImplementationOnce(async (opts) => {
+      // 重写第 3 条：摘要按原编号列出第 1、2 条，不重排为 1..N-1
+      expect(opts.userInput).toContain('第 1 条：第一条原编号提示词内容')
+      expect(opts.userInput).toContain('第 2 条：第二条原编号提示词内容')
+      expect(opts.userInput).not.toContain('第 3 条：')
+      expect(opts.userInput).not.toContain('第三条原编号提示词内容')
+      expect(opts.userInput).toContain('替换第 3 条')
+      return '### 01\n重写后的第三条全新提示词内容'
+    })
+
+    await useStore.getState().rerollSkillEntry(2)
+
+    expect(useStore.getState().skillExpansion.entries[2]?.text).toBe('重写后的第三条全新提示词内容')
+  })
+})
+
+describe('编辑链路画幅三层防御（T2）', () => {
+  beforeEach(async () => {
+    __resetTasksClearedForTests()
+    await clearTasks()
+    await clearImages()
+    // db mock 的 storeImage 生成新 id；草稿图按 draft id 预注册，供 ensureImageCached 读取
+    await putImage({ id: 'image-a', dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
+    vi.mocked(callImageApi).mockReset().mockImplementation(async () => ({
+      images: [],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    }))
+    vi.mocked(preprocessInputImagesForTarget).mockClear()
+    useStore.setState({
+      settings: localAutoSaveSettings(false),
+      prompt: '',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      showToast: vi.fn(),
+    })
+  })
+
+  it('编辑任务 crop 策略：发送预处理后的输入图并记录 inputPreprocess 与原图', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-1024x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockResolvedValueOnce({
+      images: [{ dataUrl: 'data:image/png;base64,pre-1024x1536', width: 1024, height: 1536 }],
+      policy: 'crop',
+    })
+    useStore.setState({
+      prompt: '编辑提示词',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(preprocessInputImagesForTarget)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(preprocessInputImagesForTarget).mock.calls[0]?.[2]).toBe('crop')
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0]?.inputImageDataUrls).toEqual(['data:image/png;base64,pre-1024x1536'])
+
+    const record = useStore.getState().tasks[0]
+    expect(record.inputPreprocess).toMatchObject({ policy: 'crop', originalCount: 1 })
+    expect(record.originalInputImageIds).toEqual(['image-a'])
+    expect(record.inputImageIds).not.toContain('image-a')
+  })
+
+  it('auto 策略未触发处理时：原图直发，任务记录 policy=none 且不保留副本', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-941x1672'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockResolvedValueOnce({
+      images: [{ dataUrl: imageA.dataUrl, width: 941, height: 1672 }],
+      policy: 'none',
+    })
+    useStore.setState({
+      prompt: '比例已匹配',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0]?.inputImageDataUrls).toEqual([imageA.dataUrl])
+    const record = useStore.getState().tasks[0]
+    expect(record.inputPreprocess).toMatchObject({ policy: 'none', originalCount: 1 })
+    expect(record.originalInputImageIds).toBeUndefined()
+    expect(record.inputImageIds).toEqual(['image-a'])
+  })
+
+  it('outpaint 策略：扩边指令拼在请求提示词开头，任务 prompt 保持原文', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-1536x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockResolvedValueOnce({
+      images: [{ dataUrl: 'data:image/png;base64,pre-outpaint', width: 1536, height: 1536 }],
+      policy: 'outpaint',
+      promptHint: 'mock-outpaint-hint',
+    })
+    useStore.setState({
+      prompt: '扩边提示词',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'outpaint' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const sent = vi.mocked(callImageApi).mock.calls[0]?.[0]
+    expect(sent?.prompt.startsWith('mock-outpaint-hint\n')).toBe(true)
+    expect(useStore.getState().tasks[0].prompt).toBe('扩边提示词')
+  })
+
+  it('预处理失败回退：发送原图、任务记录 failed 标记并 toast 提示', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-fallback'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockRejectedValueOnce(new Error('canvas decode failed'))
+    useStore.setState({
+      prompt: '预处理炸了',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    // callImageApi 收到原图（回退），任务正常创建并执行
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0]?.inputImageDataUrls).toEqual([imageA.dataUrl])
+    const record = useStore.getState().tasks[0]
+    expect(record.inputImageIds).toEqual(['image-a'])
+    expect(record.originalInputImageIds).toBeUndefined()
+    expect(record.inputPreprocess).toMatchObject({ policy: 'none', originalCount: 1, failed: true })
+    // 中文错误 toast（在「任务已提交」之后提示）
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('输入图预处理失败，已按原图提交', 'error')
+  })
+
+  it('无输入图任务零影响：不调用预处理、不记录 inputPreprocess', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-1024x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: '纯文生图',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(preprocessInputImagesForTarget)).not.toHaveBeenCalled()
+    const record = useStore.getState().tasks[0]
+    expect(record.inputPreprocess).toBeUndefined()
+    expect(record.originalInputImageIds).toBeUndefined()
+  })
+
+  it('带遮罩的编辑任务跳过输入图预处理', async () => {
+    useStore.setState({
+      prompt: '遮罩编辑',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+      inputImages: [imageA],
+      maskDraft: {
+        targetImageId: imageA.id,
+        maskDataUrl: 'data:image/png;base64,mask',
+        updatedAt: 1,
+      },
+    })
+
+    await submitTask({ allowFullMask: true })
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(preprocessInputImagesForTarget)).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0].inputPreprocess).toBeUndefined()
+  })
+
+  it('非 exact_size 任务返回比例偏差 >5% 时本地校正并标记 ratioCorrected', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,raw-2000x1000'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: '校正测试',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const record = useStore.getState().tasks[0]
+    expect(record.ratioCorrected).toBe(true)
+    const outputId = record.outputImages[0]
+    expect(await getImage(outputId)).toMatchObject({ dataUrl: 'data:image/png;base64,resized-1024x1536' })
+    // provider 原图按 exactSizeOriginalImages 同款机制保留，可下载
+    const originalId = record.exactSizeOriginalImages?.[0]
+    expect(originalId).toBeTruthy()
+    expect(await getImage(originalId!)).toMatchObject({ dataUrl: 'data:image/png;base64,raw-2000x1000' })
+  })
+
+  it('返回比例偏差 ≤5% 时不触发校正', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,ok-1022x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: '比例微偏',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const record = useStore.getState().tasks[0]
+    expect(record.ratioCorrected).toBeUndefined()
+    expect(await getImage(record.outputImages[0])).toMatchObject({ dataUrl: 'data:image/png;base64,ok-1022x1536' })
+  })
+
+  it('设置关闭「比例自动校正」时不触发校正', async () => {
+    useStore.setState({
+      settings: { ...localAutoSaveSettings(false), ratioAutoCorrect: false },
+      prompt: '关闭校正',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,raw-2000x1000'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const record = useStore.getState().tasks[0]
+    expect(record.ratioCorrected).toBeUndefined()
+    expect(await getImage(record.outputImages[0])).toMatchObject({ dataUrl: 'data:image/png;base64,raw-2000x1000' })
   })
 })

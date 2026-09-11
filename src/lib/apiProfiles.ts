@@ -828,7 +828,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
       defaults: {
         ratio: typeof defaults.ratio === 'string' ? defaults.ratio : undefined,
         tier: defaults.tier === '1K' || defaults.tier === '2K' || defaults.tier === '4K' ? defaults.tier : undefined,
-        // 显式 false 必须原样保留：applySceneDefaults 依赖 === false 关闭 transparent_output，
+        // 显式 false 必须原样保留：buildSceneInitialParams（首次进入场景初始化参数）依赖 === false 关闭 transparent_output，
         // 折叠成 undefined 会让持久化后的显式 false 默认值失效。非法值仍回 undefined。
         transparentBackground: typeof defaults.transparentBackground === 'boolean' ? defaults.transparentBackground : undefined,
       },
@@ -861,6 +861,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     allowPromptRewrite: typeof record.allowPromptRewrite === 'boolean' ? record.allowPromptRewrite : false,
     taskCompletionNotification: typeof record.taskCompletionNotification === 'boolean' ? record.taskCompletionNotification : false,
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
+    ratioAutoCorrect: typeof record.ratioAutoCorrect === 'boolean' ? record.ratioAutoCorrect : true,
     referenceImageEditAction: normalizeReferenceImageEditAction(record.referenceImageEditAction),
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
     localAutoSave: normalizeLocalAutoSaveSettings(record.localAutoSave),
@@ -1465,6 +1466,7 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   allowPromptRewrite: false,
   taskCompletionNotification: false,
   enterSubmit: false,
+  ratioAutoCorrect: true,
   referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
   localAutoSave: DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
