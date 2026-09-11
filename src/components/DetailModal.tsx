@@ -6,7 +6,8 @@ import { useTooltip } from '../hooks/useTooltip'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useMobileSheet } from '../hooks/useMobileSheet'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
-import { formatImageRatio } from '../lib/size'
+import { getImageMetadata } from '../lib/db'
+import { formatImageRatio, parseImageSize } from '../lib/size'
 import { ActualValueBadge, DetailParamValue } from '../lib/paramDisplay'
 import { copyImageSourceToClipboard, copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
@@ -82,6 +83,8 @@ export default function DetailModal() {
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
   // 「拆分贴纸」入口门控：仅透明类型的输出图展示（详情页预览就是原图，可直接采样）
   const [splitEligible, setSplitEligible] = useState(false)
+  // 比例校正前的源输出图尺寸（读存储元数据，取不到时警告条保持泛化文案）
+  const [ratioCorrectedSourceSize, setRatioCorrectedSourceSize] = useState<{ width: number; height: number } | null>(null)
 
   // 移动端：全屏 sheet + 下滑关闭（仅 <640px 生效，桌面完全不变）
   const isMobile = useIsMobile()
@@ -238,7 +241,33 @@ export default function DetailModal() {
   const currentOriginalOutputImageId = currentOutputImageIndex >= 0 ? task?.transparentOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentExactSizeSourceImageId = currentOutputImageIndex >= 0 ? task?.exactSizeOriginalImages?.[currentOutputImageIndex] || '' : ''
   const currentExactSizeTransform = currentOutputImageId ? task?.exactSizeTransforms?.[currentOutputImageId] : undefined
+  // 比例校正目标 = 请求的具体尺寸（校正本身即 resize 到该像素尺寸）
+  const ratioCorrectionTargetSize = task?.ratioCorrected && task.params.size !== 'auto'
+    ? parseImageSize(task.params.size)
+    : null
   const currentOutputPreviewSrc = currentOutputImageId ? outputPreviewSrcs[currentOutputImageId] || '' : ''
+
+  useEffect(() => {
+    const sourceId = task?.ratioCorrected && currentOutputImageIndex >= 0 ? currentExactSizeSourceImageId : ''
+    if (!sourceId) {
+      setRatioCorrectedSourceSize(null)
+      return
+    }
+    let cancelled = false
+    getImageMetadata(sourceId)
+      .then((metadata) => {
+        if (cancelled) return
+        setRatioCorrectedSourceSize(metadata?.width && metadata?.height
+          ? { width: metadata.width, height: metadata.height }
+          : null)
+      })
+      .catch(() => {
+        if (!cancelled) setRatioCorrectedSourceSize(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [task?.id, task?.ratioCorrected, currentOutputImageIndex, currentExactSizeSourceImageId])
 
   useEffect(() => {
     const imageId = currentOutputImageId
@@ -1323,7 +1352,9 @@ export default function DetailModal() {
             )}
             {task.ratioCorrected && (
               <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-                返回比例偏差过大，已自动校正到目标比例。
+                {ratioCorrectedSourceSize && ratioCorrectionTargetSize
+                  ? `返回比例偏差过大，已从 ${ratioCorrectedSourceSize.width}x${ratioCorrectedSourceSize.height} 校正为 ${ratioCorrectionTargetSize.width}x${ratioCorrectionTargetSize.height}。`
+                  : '返回比例偏差过大，已自动校正到目标比例。'}
               </div>
             )}
             {currentActualParams?.quality != null && task.params.quality !== 'auto' && currentActualParams.quality !== task.params.quality && (

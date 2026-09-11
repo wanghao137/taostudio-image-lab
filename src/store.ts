@@ -1997,9 +1997,22 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const preprocessTarget = orderedInputImages.length > 0 && !maskDraft && taskParams.size !== 'auto'
     ? parseImageSize(taskParams.size)
     : null
-  const preprocessResult = preprocessTarget
-    ? await preprocessInputImagesForTarget(orderedInputImages, preprocessTarget, taskParams.input_ratio_policy)
-    : null
+  let preprocessResult: Awaited<ReturnType<typeof preprocessInputImagesForTarget>> | null = null
+  let preprocessFailed = false
+  if (preprocessTarget) {
+    try {
+      preprocessResult = await preprocessInputImagesForTarget(orderedInputImages, preprocessTarget, taskParams.input_ratio_policy)
+    } catch (err) {
+      // 预处理失败（解码/canvas/toBlob 等本地环节）不阻断提交：回退发送原图，
+      // 任务记录 policy='none' + failed 标记，并在任务提交后 toast 提示。
+      console.warn('输入图预处理失败，已按原图提交', err)
+      preprocessFailed = true
+      preprocessResult = {
+        images: orderedInputImages.map((img) => ({ dataUrl: img.dataUrl, width: img.width ?? 0, height: img.height ?? 0 })),
+        policy: 'none',
+      }
+    }
+  }
   let inputImageIds = orderedInputImages.map((i) => i.id)
   let originalInputImageIds: string[] | undefined
   let inputPreprocess: TaskRecord['inputPreprocess']
@@ -2019,6 +2032,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       policy: preprocessResult.policy,
       originalCount: orderedInputImages.length,
       promptHint: preprocessResult.promptHint,
+      ...(preprocessFailed ? { failed: true } : {}),
     }
   }
 
@@ -2068,6 +2082,10 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   useStore.getState().setTasks([task, ...latestTasks])
   await putTask(task)
   useStore.getState().showToast('任务已提交', 'success')
+  // 预处理失败的提示放在「任务已提交」之后，避免被后者立刻覆盖
+  if (preprocessFailed) {
+    useStore.getState().showToast('输入图预处理失败，已按原图提交', 'error')
+  }
 
   if (settings.clearInputAfterSubmit) {
     useStore.getState().setPrompt('')
@@ -3209,20 +3227,45 @@ export async function reuseConfig(task: TaskRecord) {
   )
   clearMaskDraft()
 
-  // 恢复输入图片
-  const imgs: InputImage[] = []
-  for (const imgId of task.inputImageIds) {
-    const storedImage = await getImage(imgId)
-    const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
-    if (dataUrl) {
-      imgs.push({
-        id: imgId,
-        dataUrl,
-        ...(storedImage?.width ? { width: storedImage.width } : {}),
-        ...(storedImage?.height ? { height: storedImage.height } : {}),
-      })
+  // 恢复输入图片：任务记录了预处理前原图（originalInputImageIds）时优先恢复原图，
+  // input_ratio_policy 保持——用户再提交会对原图重新走一遍预处理，不会叠加处理；
+  // 原图已被清理时回落到处理图，并把策略置为 off（对已扩边/裁切过的图再套同一策略
+  // 会二次扩边/二次裁切，画幅防御应只作用于原生输入）。
+  const loadInputImagesByIds = async (ids: string[]) => {
+    const loaded: InputImage[] = []
+    for (const imgId of ids) {
+      const storedImage = await getImage(imgId)
+      const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
+      if (dataUrl) {
+        loaded.push({
+          id: imgId,
+          dataUrl,
+          ...(storedImage?.width ? { width: storedImage.width } : {}),
+          ...(storedImage?.height ? { height: storedImage.height } : {}),
+        })
+      }
+    }
+    return loaded
+  }
+  let imgs: InputImage[] = []
+  let restoredParams = task.params
+  const canRestoreOriginalInputs = Boolean(task.originalInputImageIds?.length) && !task.maskImageId
+  if (canRestoreOriginalInputs) {
+    const originals = await loadInputImagesByIds(task.originalInputImageIds || [])
+    if (originals.length === task.originalInputImageIds?.length) {
+      imgs = originals
+    } else {
+      restoredParams = { ...task.params, input_ratio_policy: 'off' }
     }
   }
+  if (!imgs.length) {
+    imgs = await loadInputImagesByIds(task.inputImageIds)
+  }
+
+  setParams(normalizeParamsForSettings(restoredParams, paramsSettings, {
+    hasInputImages: imgs.length > 0,
+    preserveExactSizeIntent: true,
+  }))
   setInputImages(imgs)
   setPrompt(task.prompt)
   const maskTargetImageId = task.maskTargetImageId ?? (task.maskImageId ? task.inputImageIds[0] : null)

@@ -192,7 +192,7 @@ async function createWorkingCanvas(dataUrl: string, rawWidth: number, rawHeight:
   return canvas
 }
 
-interface BandFillRect {
+export interface BandFillRect {
   sx: number
   sy: number
   sWidth: number
@@ -206,11 +206,16 @@ interface BandFillRect {
 /**
  * 过渡带填充：镜像翻转 + 线性羽化。
  * - 底层：把紧邻原图边界的 1px 边缘条拉伸铺满过渡带（保证带外侧颜色自然延续）；
- * - 上层：把原图贴边的条带镜像翻转画进过渡带，再用线性渐变 alpha
- *   （接缝处不透明 → 外侧全透明）做羽化，消除镜像接缝的硬边。
+ * - 上层：把原图贴边的条带镜像翻转画进独立的 bandCanvas，用线性渐变 alpha
+ *   （接缝处不透明 → 外侧全透明）做羽化后，再整体叠在拉伸底色之上，
+ *   消除镜像接缝的硬边。
  * 镜像源条带超出原图尺寸时按原图尺寸截断（超出部分只保留拉伸底色）。
+ *
+ * 合成顺序要点：镜像条带只能先在 bandCanvas 内完成渐变、再叠上主画布。
+ * 若先把镜像画上主画布、再从主画布取同区域内容做渐变，同内容 alpha=g 叠在
+ * alpha=1 的同内容上合成恒为原色，羽化会成为视觉空操作（T2 审查 Critical 1）。
  */
-function fillMirrorBand(
+export function fillMirrorBand(
   ctx: CanvasRenderingContext2D,
   source: HTMLCanvasElement,
   seamSide: 'left' | 'right' | 'top' | 'bottom',
@@ -227,7 +232,7 @@ function fillMirrorBand(
   const edgeSy = seamSide === 'bottom' ? rect.sy + rect.sHeight - 1 : rect.sy
   ctx.drawImage(source, edgeSx, edgeSy, edgeSourceWidth, edgeSourceHeight, rect.dx, rect.dy, rect.dWidth, rect.dHeight)
 
-  // 上层：镜像条带 + 线性羽化（截断到原图范围内）
+  // 上层：镜像条带（截断到原图范围内）
   const mirrorLength = Math.min(bandLength, horizontal ? rect.sWidth : rect.sHeight)
   if (mirrorLength <= 0) return
   const mirror: BandFillRect = horizontal
@@ -252,11 +257,18 @@ function fillMirrorBand(
         dHeight: mirrorLength,
       }
 
-  ctx.save()
-  ctx.translate(mirror.dx + mirror.dWidth / 2, mirror.dy + mirror.dHeight / 2)
-  if (horizontal) ctx.scale(-1, 1)
-  else ctx.scale(1, -1)
-  ctx.drawImage(
+  // 镜像条带只画进 bandCanvas（bandCanvas 原点对应主画布 (rect.dx, rect.dy)），
+  // 不先画主画布——否则后续渐变叠加会被同内容的全不透明底色吞掉。
+  const bandCanvas = createCanvas(rect.dWidth, rect.dHeight)
+  const bandCtx = bandCanvas.getContext('2d')!
+  bandCtx.save()
+  bandCtx.translate(
+    mirror.dx - rect.dx + mirror.dWidth / 2,
+    mirror.dy - rect.dy + mirror.dHeight / 2,
+  )
+  if (horizontal) bandCtx.scale(-1, 1)
+  else bandCtx.scale(1, -1)
+  bandCtx.drawImage(
     source,
     mirror.sx,
     mirror.sy,
@@ -267,22 +279,9 @@ function fillMirrorBand(
     mirror.dWidth,
     mirror.dHeight,
   )
-  ctx.restore()
+  bandCtx.restore()
 
-  // 羽化：以「贴原图的一侧」为不透明端向带外渐隐
-  const bandCanvas = createCanvas(rect.dWidth, rect.dHeight)
-  const bandCtx = bandCanvas.getContext('2d')!
-  bandCtx.drawImage(
-    ctx.canvas,
-    rect.dx,
-    rect.dy,
-    rect.dWidth,
-    rect.dHeight,
-    0,
-    0,
-    rect.dWidth,
-    rect.dHeight,
-  )
+  // 羽化：以「贴原图的一侧」为不透明端向带外渐隐（destination-in 只作用于镜像副本）
   bandCtx.globalCompositeOperation = 'destination-in'
   const gradient = horizontal
     ? bandCtx.createLinearGradient(seamSide === 'left' ? rect.dWidth : 0, 0, seamSide === 'left' ? 0 : rect.dWidth, 0)
@@ -292,6 +291,7 @@ function fillMirrorBand(
   bandCtx.fillStyle = gradient
   bandCtx.fillRect(0, 0, rect.dWidth, rect.dHeight)
 
+  // 带渐变 alpha 的镜像叠在 1px 拉伸底色之上
   ctx.drawImage(bandCanvas, rect.dx, rect.dy)
 }
 

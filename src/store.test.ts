@@ -2857,6 +2857,41 @@ describe('reused task API profile', () => {
     }))
     expect(state.showSettings).toBe(false)
   })
+
+  it('复用配置优先恢复预处理前原图，input_ratio_policy 保持', async () => {
+    await clearImages()
+    await putImage({ id: 'image-a', dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
+    await putImage({ id: 'image-b', dataUrl: imageB.dataUrl, source: 'generated', createdAt: 1 })
+
+    await reuseConfig(task({
+      apiProfileId: openaiProfile.id,
+      inputImageIds: ['image-b'],
+      originalInputImageIds: ['image-a'],
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'outpaint' },
+    }))
+
+    const state = useStore.getState()
+    // 恢复的是扩边前的原图，策略保持——再提交会对原图重新预处理而不是二次扩边
+    expect(state.inputImages.map((img) => img.id)).toEqual(['image-a'])
+    expect(state.params).toMatchObject({ size: '1024x1536', input_ratio_policy: 'outpaint' })
+  })
+
+  it('原图已被清理时回落处理图并把 input_ratio_policy 置为 off', async () => {
+    await clearImages()
+    await putImage({ id: 'image-b', dataUrl: imageB.dataUrl, source: 'generated', createdAt: 1 })
+
+    await reuseConfig(task({
+      apiProfileId: openaiProfile.id,
+      inputImageIds: ['image-b'],
+      originalInputImageIds: ['image-a'],
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+    }))
+
+    const state = useStore.getState()
+    // 原图缺失：回落已裁切的处理图，策略置 off 避免二次裁切
+    expect(state.inputImages.map((img) => img.id)).toEqual(['image-b'])
+    expect(state.params).toMatchObject({ size: '1024x1536', input_ratio_policy: 'off' })
+  })
 })
 
 describe('restoreLocalAutoSavePermissionOnUserActivation', () => {
@@ -4979,6 +5014,33 @@ describe('编辑链路画幅三层防御（T2）', () => {
     const sent = vi.mocked(callImageApi).mock.calls[0]?.[0]
     expect(sent?.prompt.startsWith('mock-outpaint-hint\n')).toBe(true)
     expect(useStore.getState().tasks[0].prompt).toBe('扩边提示词')
+  })
+
+  it('预处理失败回退：发送原图、任务记录 failed 标记并 toast 提示', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-fallback'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockRejectedValueOnce(new Error('canvas decode failed'))
+    useStore.setState({
+      prompt: '预处理炸了',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    // callImageApi 收到原图（回退），任务正常创建并执行
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0]?.inputImageDataUrls).toEqual([imageA.dataUrl])
+    const record = useStore.getState().tasks[0]
+    expect(record.inputImageIds).toEqual(['image-a'])
+    expect(record.originalInputImageIds).toBeUndefined()
+    expect(record.inputPreprocess).toMatchObject({ policy: 'none', originalCount: 1, failed: true })
+    // 中文错误 toast（在「任务已提交」之后提示）
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('输入图预处理失败，已按原图提交', 'error')
   })
 
   it('无输入图任务零影响：不调用预处理、不记录 inputPreprocess', async () => {

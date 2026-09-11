@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   computeInputCoverCropLayout,
   computeOutpaintLayout,
+  fillMirrorBand,
   getInputRatioDeviation,
   resolveInputRatioPolicy,
+  type BandFillRect,
 } from './inputPreprocess'
 
 describe('getInputRatioDeviation', () => {
@@ -123,5 +125,155 @@ describe('computeOutpaintLayout', () => {
       bandTop: 0,
       bandBottom: 0,
     })
+  })
+})
+
+describe('fillMirrorBand（outpaint 羽化合成顺序回归）', () => {
+  interface RecordedOp {
+    kind: 'drawImage' | 'fillRect' | 'composite' | 'gradient-stop'
+    args: unknown[]
+    seq: number
+  }
+  interface FakeCanvas {
+    width: number
+    height: number
+    getContext: (type: string) => unknown
+  }
+
+  // 记录 draw 调用序列的 fake 2D context：不执行真实像素合成，只断言管线顺序。
+  // clock 在主画布与 bandCanvas 两个 context 之间共享，保证跨 context 的时序可比。
+  function createFakeContext(canvas: FakeCanvas, clock: { seq: number }) {
+    const ops: RecordedOp[] = []
+    const record = (kind: RecordedOp['kind'], args: unknown[]) => {
+      ops.push({ kind, args, seq: clock.seq++ })
+    }
+    let composite = 'source-over'
+    const ctx = {
+      canvas,
+      imageSmoothingEnabled: true,
+      imageSmoothingQuality: 'high',
+      fillStyle: '',
+      drawImage: (...args: unknown[]) => record('drawImage', args),
+      fillRect: (...args: unknown[]) => record('fillRect', args),
+      save: () => {},
+      restore: () => {},
+      translate: () => {},
+      scale: () => {},
+      createLinearGradient: (...args: unknown[]) => {
+        record('gradient-stop', args) // 渐变创建本身也占序号，保证先建渐变后填充
+        return {
+          addColorStop: (...stopArgs: unknown[]) => record('gradient-stop', stopArgs),
+        }
+      },
+    }
+    Object.defineProperty(ctx, 'globalCompositeOperation', {
+      get: () => composite,
+      set: (value: string) => {
+        composite = value
+        record('composite', [value])
+      },
+    })
+    return { ctx, ops }
+  }
+
+  // fake document：fillMirrorBand 内部经 createCanvas → document.createElement('canvas')，
+  // createElement 返回的 canvas 在 getContext 时接上指定的 fake context
+  function stubFakeDocument(onCreateContext: (canvas: FakeCanvas) => unknown) {
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => {
+        expect(tag).toBe('canvas')
+        const canvas: FakeCanvas = { width: 0, height: 0, getContext: () => onCreateContext(canvas) }
+        return canvas
+      },
+    })
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('document', {
+      createElement: () => {
+        throw new Error('unexpected canvas creation')
+      },
+    })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('镜像条带只在 bandCanvas 内 ramp，最后带渐变叠于拉伸底色之上', () => {
+    // 左侧过渡带 40px 宽：底色为 1px 边缘条拉伸，镜像条带渐变后叠上
+    const rect: BandFillRect = { sx: 0, sy: 0, sWidth: 40, sHeight: 80, dx: 0, dy: 10, dWidth: 40, dHeight: 80 }
+    const source = { width: 80, height: 80 } as HTMLCanvasElement
+    const clock = { seq: 0 }
+    const main = createFakeContext({ width: 120, height: 100, getContext: () => undefined }, clock)
+    const band = createFakeContext({ width: 0, height: 0, getContext: () => undefined }, clock)
+    let bandCanvas: FakeCanvas | undefined
+    stubFakeDocument((canvas) => {
+      bandCanvas = canvas
+      return band.ctx
+    })
+
+    fillMirrorBand(main.ctx as unknown as CanvasRenderingContext2D, source, 'left', rect)
+
+    // bandCanvas 尺寸 = 过渡带尺寸
+    expect(bandCanvas).toMatchObject({ width: rect.dWidth, height: rect.dHeight })
+
+    // 主画布只允许 2 次 drawImage：第一次 = 1px 边缘条拉伸底色，最后一次 = 叠 bandCanvas
+    // （这两条精确断言同时排除了「镜像条带直接画上主画布」的旧实现）
+    const mainDraws = main.ops.filter((op) => op.kind === 'drawImage')
+    expect(mainDraws).toHaveLength(2)
+    expect(mainDraws[0]!.args).toEqual([source, 0, 0, 1, 80, 0, 10, 40, 80])
+    const finalComposite = mainDraws[1]!
+    expect(finalComposite.args).toEqual([bandCanvas, rect.dx, rect.dy])
+
+    // bandCanvas 内顺序：先画镜像源，后 destination-in 渐变、fillRect
+    const bandDraw = band.ops.find((op) => op.kind === 'drawImage')
+    expect(bandDraw).toBeDefined()
+    expect(bandDraw!.args[0]).toBe(source)
+    // 羽化渐变方向：左带在贴缝一侧（x=dWidth）不透明、外缘（x=0）透明
+    expect(bandDraw!.args).toEqual([source, 0, 0, 40, 80, -20, -40, 40, 80])
+    const gradientCreate = band.ops.find((op) => op.kind === 'gradient-stop')
+    expect(gradientCreate!.args).toEqual([40, 0, 0, 0])
+    const stops = band.ops.filter((op) => op.kind === 'gradient-stop').slice(1)
+    expect(stops.map((op) => op.args)).toEqual([[0, 'rgba(0, 0, 0, 1)'], [1, 'rgba(0, 0, 0, 0)']])
+    const composite = band.ops.find((op) => op.kind === 'composite')
+    expect(composite!.args).toEqual(['destination-in'])
+    const bandFillRect = band.ops.find((op) => op.kind === 'fillRect')
+    expect(bandFillRect!.args).toEqual([0, 0, 40, 80])
+    expect(bandDraw!.seq).toBeLessThan(composite!.seq)
+    expect(composite!.seq).toBeLessThan(bandFillRect!.seq)
+
+    // 主画布上的最终叠放必须发生在 band 内容 ramp（fillRect）之后
+    expect(bandFillRect!.seq).toBeLessThan(finalComposite.seq)
+  })
+
+  it('上侧过渡带同样先 ramp 后叠放，且渐变在贴缝一侧不透明', () => {
+    const rect: BandFillRect = { sx: 0, sy: 0, sWidth: 60, sHeight: 30, dx: 5, dy: 0, dWidth: 60, dHeight: 30 }
+    const source = { width: 60, height: 90 } as HTMLCanvasElement
+    const clock = { seq: 0 }
+    const main = createFakeContext({ width: 70, height: 120, getContext: () => undefined }, clock)
+    const band = createFakeContext({ width: 0, height: 0, getContext: () => undefined }, clock)
+    let bandCanvas: FakeCanvas | undefined
+    stubFakeDocument((canvas) => {
+      bandCanvas = canvas
+      return band.ctx
+    })
+
+    fillMirrorBand(main.ctx as unknown as CanvasRenderingContext2D, source, 'top', rect)
+
+    expect(bandCanvas).toMatchObject({ width: rect.dWidth, height: rect.dHeight })
+    const mainDraws = main.ops.filter((op) => op.kind === 'drawImage')
+    expect(mainDraws).toHaveLength(2)
+    // 底色：垂直带用 1px 高的边缘条拉伸
+    expect(mainDraws[0]!.args).toEqual([source, 0, 0, 60, 1, 5, 0, 60, 30])
+    expect(mainDraws[1]!.args[0]).toBe(bandCanvas)
+
+    const bandDraw = band.ops.find((op) => op.kind === 'drawImage')!
+    // 上带镜像条带垂直翻转后画进 bandCanvas
+    expect(bandDraw.args).toEqual([source, 0, 0, 60, 30, -30, -15, 60, 30])
+    // 上带：贴缝在 y=dHeight 一侧不透明
+    const gradientCreate = band.ops.find((op) => op.kind === 'gradient-stop')!
+    expect(gradientCreate.args).toEqual([0, 30, 0, 0])
+    const bandFillRect = band.ops.find((op) => op.kind === 'fillRect')!
+    expect(bandFillRect.seq).toBeLessThan(mainDraws[1]!.seq)
   })
 })

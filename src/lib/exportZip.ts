@@ -291,6 +291,7 @@ function getImageFileNameBases(tasks: TaskRecord[]) {
   for (const task of tasks) addImageFileNameBases(bases, task.outputImages || [], `task-${task.id}`)
   for (const task of tasks) addImageFileNameBases(bases, task.transparentOriginalImages || [], `task-${task.id}-orig`)
   for (const task of tasks) addImageFileNameBases(bases, task.exactSizeOriginalImages || [], `task-${task.id}-source`)
+  for (const task of tasks) addImageFileNameBases(bases, task.originalInputImageIds || [], `task-${task.id}-input-source`)
   for (const task of tasks) addImageFileNameBases(bases, task.streamPartialImageIds || [], `task-${task.id}-partial`)
   for (const task of tasks) addImageFileNameBases(bases, task.inputImageIds || [], `task-${task.id}-input`)
   for (const task of tasks) {

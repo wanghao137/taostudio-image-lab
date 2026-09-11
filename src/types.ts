@@ -393,6 +393,8 @@ export interface TaskRecord {
     originalCount: number
     /** outpaint 策略拼在提示词开头的功能性扩边指令（请求侧使用，不写入 prompt） */
     promptHint?: string
+    /** 预处理执行失败（解码/canvas 编码等），已回退按原图提交 */
+    failed?: boolean
   }
   /** 输入图预处理前的原始输入图 id 列表（与提交时输入图顺序一致），供下载原图 */
   originalInputImageIds?: string[]
