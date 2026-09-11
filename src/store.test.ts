@@ -1214,7 +1214,7 @@ describe('mask draft lifecycle in store actions', () => {
     await submitTask()
     for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(vi.mocked(callImageApi).mock.calls[0]?.[0].prompt).toContain('Target frame: vertical 9:16 composition')
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0].prompt).not.toContain('Target frame')
     expect(vi.mocked(callImageApi).mock.calls[0]?.[0].params.size).toBe('720x1280')
     expect(resizeImageDataUrlToExactSize).toHaveBeenCalledWith(
       'data:image/png;base64,actual-1254x1254',

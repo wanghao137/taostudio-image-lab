@@ -14,7 +14,6 @@ import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from '../lib/downloadImages'
 import { isTransparentImageCached } from '../lib/stickerSplit/transparency'
 import { replaceImageMentionsForApi } from '../lib/promptImageMentions'
-import { appendTargetAspectPromptHint } from '../lib/targetAspectPrompt'
 import { getApiProviderLabel } from '../lib/apiProfiles'
 import { CloseIcon, CodeIcon, CopyIcon, DownloadIcon, EditIcon, LinkIcon, TrashIcon } from './icons'
 
@@ -325,10 +324,7 @@ export default function DetailModal() {
   const requestPrompt = task.transparentOutput && task.transparentPrompt
     ? task.transparentPrompt
     : task.prompt
-  const promptSentToApi = appendTargetAspectPromptHint(
-    replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length),
-    task.params.size,
-  ).trim()
+  const promptSentToApi = replaceImageMentionsForApi(requestPrompt, task.inputImageIds.length).trim()
   const showRevisedPrompt = Boolean(currentRevisedPrompt && currentRevisedPrompt !== promptSentToApi)
   const codexCliPromptKey = getCodexCliPromptKey(settings)
   const hasHandledPromptWarning = settings.codexCli || dismissedCodexCliPrompts.includes(codexCliPromptKey)
