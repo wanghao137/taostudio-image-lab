@@ -78,7 +78,6 @@ import { hasActiveDataOperations } from './lib/dataOperations'
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 import { storeTaskOutputImages } from './lib/taskOutputPersistence'
-import { appendTargetAspectPromptHint, createTargetAspectPromptHint } from './lib/targetAspectPrompt'
 import { calculateImageSize } from './lib/size'
 import {
   buildLocalAutoSaveFolderName,
@@ -1938,7 +1937,6 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     storageGeneration: taskStorageGeneration,
     prompt: prompt.trim(),
     params: taskParams,
-    targetAspectPromptHint: createTargetAspectPromptHint(taskParams.size) ?? undefined,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
@@ -2119,10 +2117,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     const requestPrompt = nativeTransparentRequested
       ? buildNativeTransparentPrompt(baseRequestPrompt)
       : baseRequestPrompt
-    const promptSentToApi = appendTargetAspectPromptHint(
-      replaceImageMentionsForApi(requestPrompt, inputDataUrls.length),
-      task.params.size,
-    )
+    const promptSentToApi = replaceImageMentionsForApi(requestPrompt, inputDataUrls.length)
     const providerParams = normalizeParamsForSettings(task.params, requestSettings, {
       hasInputImages: inputDataUrls.length > 0,
       // 4K 资产请求侧收口：网关原生能力 ~1.5MP（2026-08-14 探针实测），
@@ -2973,7 +2968,6 @@ export async function retryTask(task: TaskRecord) {
     storageGeneration: taskStorageGeneration,
     prompt: task.prompt,
     params: taskParams,
-    targetAspectPromptHint: createTargetAspectPromptHint(taskParams.size) ?? undefined,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,

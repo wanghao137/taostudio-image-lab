@@ -363,7 +363,7 @@ export interface TaskRecord {
   exactSizeOriginalImages?: string[]
   /** 精确尺寸本地后处理几何信息，key 为 outputImages 中的图片 id */
   exactSizeTransforms?: Record<string, ExactSizeTransformRecord>
-  /** 本地追加给 API 的目标画幅提示 */
+  // 历史任务记录专用（2026-09-11 前注入过画幅提示）；新任务不再写入
   targetAspectPromptHint?: string
   /** 输入图片的 image store id 列表 */
   inputImageIds: string[]
