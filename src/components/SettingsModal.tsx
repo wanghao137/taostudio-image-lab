@@ -1728,6 +1728,9 @@ export default function SettingsModal() {
                   <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
                     开启后应用 Codex CLI 实际支持的参数。支持查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">codexCli=true</code>。
                   </div>
+                  <div data-selectable-text className="mt-1 text-xs text-gray-500 dark:text-gray-500">
+                    开启后 responses 工具的 size/quality 参数不发送（Codex CLI 兼容行为）。
+                  </div>
                 </div>
               )}
 
