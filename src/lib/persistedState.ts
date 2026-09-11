@@ -113,6 +113,9 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
     moderation: value.moderation === 'auto' || value.moderation === 'low' ? value.moderation : fallback.moderation,
     n: typeof value.n === 'number' && Number.isFinite(value.n) ? value.n : fallback.n,
     transparent_output: typeof value.transparent_output === 'boolean' ? value.transparent_output : fallback.transparent_output,
+    input_ratio_policy: value.input_ratio_policy === 'auto' || value.input_ratio_policy === 'crop' || value.input_ratio_policy === 'outpaint' || value.input_ratio_policy === 'off'
+      ? value.input_ratio_policy
+      : fallback.input_ratio_policy,
   }
 }
 

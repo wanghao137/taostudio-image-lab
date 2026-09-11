@@ -80,7 +80,8 @@ import { hasActiveDataOperations } from './lib/dataOperations'
 import { formatExportFileTime } from './lib/exportFileName'
 import { buildExportZip, createExportBlob, getExportImageEstimatedBytes, getExportZipPlan, MAX_EXPORT_ZIP_BYTES, readExportZip, readExportZipFileAsDataUrl, readExportZipManifest } from './lib/exportZip'
 import { storeTaskOutputImages } from './lib/taskOutputPersistence'
-import { calculateImageSize } from './lib/size'
+import { preprocessInputImagesForTarget } from './lib/inputPreprocess'
+import { calculateImageSize, parseImageSize } from './lib/size'
 import {
   buildLocalAutoSaveFolderName,
   buildLocalAutoSaveMetadata,
@@ -528,6 +529,7 @@ function isImageReferencedByState(state: AppState, imageId: string) {
     task.outputImages.includes(imageId) ||
     task.transparentOriginalImages?.includes(imageId) ||
     task.exactSizeOriginalImages?.includes(imageId) ||
+    task.originalInputImageIds?.includes(imageId) ||
     task.streamPartialImageIds?.includes(imageId) ||
     task.maskTargetImageId === imageId ||
     task.maskImageId === imageId
@@ -1639,7 +1641,9 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
   if (!latest || latest.status === 'done') return
   if (latest.status !== 'running' && !latest.falRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+    ratioAutoCorrect: useStore.getState().settings.ratioAutoCorrect,
+  })
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, result.actualParamsList, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -1655,6 +1659,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
     exactSizeTransforms,
+    ratioCorrected: ratioCorrected || undefined,
     outputPersistWarning: persistFailedCount > 0 || undefined,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),
@@ -1972,6 +1977,38 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
     : { ...normalizedParams, transparent_output: false }
+
+  // 编辑链路画幅防御第一层：输入图比例预处理（网关编辑输出画幅=输入图原尺寸，
+  // 预处理输入图是控画幅的主力，详见 docs/portrait-general-skill-optimization-plan-2026-09-11.md T2）。
+  // 仅「有输入图 + size 为具体尺寸」时执行；带遮罩的任务跳过（遮罩坐标绑定原图像素）。
+  const preprocessTarget = orderedInputImages.length > 0 && !maskDraft && taskParams.size !== 'auto'
+    ? parseImageSize(taskParams.size)
+    : null
+  const preprocessResult = preprocessTarget
+    ? await preprocessInputImagesForTarget(orderedInputImages, preprocessTarget, taskParams.input_ratio_policy)
+    : null
+  let inputImageIds = orderedInputImages.map((i) => i.id)
+  let originalInputImageIds: string[] | undefined
+  let inputPreprocess: TaskRecord['inputPreprocess']
+  if (preprocessResult) {
+    if (preprocessResult.policy !== 'none') {
+      const processedIds: string[] = []
+      for (const img of preprocessResult.images) {
+        const id = await storeImage(img.dataUrl)
+        cacheImage(id, img.dataUrl)
+        processedIds.push(id)
+      }
+      inputImageIds = processedIds
+      // 原图（草稿 id）已在上面的循环里持久化，记录到任务供下载原图
+      originalInputImageIds = orderedInputImages.map((i) => i.id)
+    }
+    inputPreprocess = {
+      policy: preprocessResult.policy,
+      originalCount: orderedInputImages.length,
+      promptHint: preprocessResult.promptHint,
+    }
+  }
+
   const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
     ? createTransparentOutputMeta(prompt.trim())
     : null
@@ -1996,9 +2033,11 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     apiProfileName: activeProfile.name,
     apiMode: activeProfile.apiMode,
     apiModel: activeProfile.model,
-    inputImageIds: orderedInputImages.map((i) => i.id),
+    inputImageIds,
     maskTargetImageId,
     maskImageId,
+    inputPreprocess,
+    originalInputImageIds,
     transparentOutput: transparentMeta?.transparentOutput,
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
@@ -2035,6 +2074,9 @@ function addInputDraftReferencedImageIds(target: Set<string>, draft: AgentInputD
 function addTaskReferencedImageIds(target: Set<string>, task: TaskRecord) {
   for (const id of task.inputImageIds || []) target.add(id)
   if (task.maskImageId) target.add(task.maskImageId)
+  for (const id of task.originalInputImageIds || []) {
+    if (id) target.add(id)
+  }
   for (const id of task.outputImages || []) target.add(id)
   for (const id of task.transparentOriginalImages || []) {
     if (id) target.add(id)
@@ -2166,9 +2208,14 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     // 原生透明：background 参数照发（官方后端按参数出 alpha）；部分后端不读
     // 该参数但遵循提示词意图，因此叠加透明指令，两类后端都能直出真透明。
     const nativeTransparentRequested = Boolean(task.params.transparent_output) && !task.transparentOutput
-    const baseRequestPrompt = task.transparentOutput && task.transparentPrompt
+    // outpaint 预处理的功能性扩边指令拼在提示词开头（与用户提示词换行分隔）；
+    // task.prompt 保持用户原文，画廊历史/复用不受影响。
+    const rawBasePrompt = task.transparentOutput && task.transparentPrompt
       ? task.transparentPrompt
       : task.prompt
+    const baseRequestPrompt = task.inputPreprocess?.promptHint
+      ? `${task.inputPreprocess.promptHint}\n${rawBasePrompt}`
+      : rawBasePrompt
     const requestPrompt = nativeTransparentRequested
       ? buildNativeTransparentPrompt(baseRequestPrompt)
       : baseRequestPrompt
@@ -2219,7 +2266,9 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds)
+    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+      ratioAutoCorrect: settings.ratioAutoCorrect,
+    })
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const resolvedActualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,
@@ -2274,6 +2323,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       transparentOriginalImages: transparentOriginalImageIds,
       exactSizeOriginalImages: exactSizeOriginalImageIds,
       exactSizeTransforms,
+      ratioCorrected: ratioCorrected || undefined,
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       outputPersistWarning: persistFailedCount > 0 || undefined,
       streamPartialImageIds: undefined,
@@ -3103,6 +3153,8 @@ export async function retryTask(task: TaskRecord) {
     inputImageIds: [...task.inputImageIds],
     maskTargetImageId: task.maskTargetImageId ?? null,
     maskImageId: task.maskImageId ?? null,
+    inputPreprocess: task.inputPreprocess,
+    originalInputImageIds: task.originalInputImageIds ? [...task.originalInputImageIds] : undefined,
     transparentOutput: transparentMeta?.transparentOutput,
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
@@ -3482,6 +3534,12 @@ export function getCleanupPlan(tasks: TaskRecord[], now = Date.now()): CleanupPl
           relatedTaskIds.add(task.id)
         }
       }
+      for (const id of task.originalInputImageIds ?? []) {
+        if (id) {
+          staleCopyIds.add(id)
+          relatedTaskIds.add(task.id)
+        }
+      }
     }
   }
 
@@ -3528,6 +3586,12 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
           patch.exactSizeOriginalImages = keep.length ? keep : undefined
         }
       }
+      if (task.originalInputImageIds?.length) {
+        const keep = task.originalInputImageIds.filter((id) => !id || protectedIds.has(id))
+        if (keep.length !== task.originalInputImageIds.length) {
+          patch.originalInputImageIds = keep.length ? keep : undefined
+        }
+      }
     }
     if (Object.keys(patch).length) taskPatches.push({ taskId: task.id, patch })
   }
@@ -3543,6 +3607,7 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
     for (const id of task.streamPartialImageIds ?? []) stillReferenced.add(id)
     for (const id of task.transparentOriginalImages ?? []) stillReferenced.add(id)
     for (const id of task.exactSizeOriginalImages ?? []) stillReferenced.add(id)
+    for (const id of task.originalInputImageIds ?? []) stillReferenced.add(id)
   }
 
   // 候选 = 清理前引用集 - 清理后引用集（真正孤立的图）
@@ -3551,6 +3616,7 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
     for (const id of task.streamPartialImageIds ?? []) if (id) before.add(id)
     for (const id of task.transparentOriginalImages ?? []) if (id) before.add(id)
     for (const id of task.exactSizeOriginalImages ?? []) if (id) before.add(id)
+    for (const id of task.originalInputImageIds ?? []) if (id) before.add(id)
   }
   const candidateIds = new Set<string>()
   for (const id of before) {
@@ -3589,6 +3655,11 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
       const keep = original.exactSizeOriginalImages.filter((id) => patch.exactSizeOriginalImages?.includes(id) || !deletedIds.has(id))
       const next = keep.length ? keep : undefined
       if (keep.length !== original.exactSizeOriginalImages.length) applied.exactSizeOriginalImages = next
+    }
+    if (original.originalInputImageIds?.length) {
+      const keep = original.originalInputImageIds.filter((id) => patch.originalInputImageIds?.includes(id) || !deletedIds.has(id))
+      const next = keep.length ? keep : undefined
+      if (keep.length !== original.originalInputImageIds.length) applied.originalInputImageIds = next
     }
     if (Object.keys(applied).length) appliedPatches.push({ taskId, patch: applied })
   }
@@ -3632,7 +3703,9 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
   if (!latest || latest.status === 'done') return
   if (latest.status !== 'running' && !latest.customRecoverable) return
 
-  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds)
+  const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+    ratioAutoCorrect: useStore.getState().settings.ratioAutoCorrect,
+  })
   const resolvedActualParamsList = await resolveImageSizeParamsList(outputDataUrls, undefined, outputImageSizes)
   const actualParamsList = resolvedActualParamsList.map((params, index) =>
     resolveFinalActualParams(params, outputImageSizes[index], task.params),
@@ -3648,6 +3721,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     transparentOriginalImages: transparentOriginalImageIds,
     exactSizeOriginalImages: exactSizeOriginalImageIds,
     exactSizeTransforms,
+    ratioCorrected: ratioCorrected || undefined,
     outputPersistWarning: persistFailedCount > 0 || undefined,
     actualParams: firstActualParams(actualParamsList),
     actualParamsByImage: mapActualParamsByImage(outputIds, actualParamsList),

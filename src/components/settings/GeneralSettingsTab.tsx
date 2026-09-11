@@ -75,6 +75,24 @@ export default function GeneralSettingsTab({
         </div>
       </div>
       <div className="block">
+        <div className="mb-1 flex items-center justify-between">
+          <span className="block text-sm text-gray-600 dark:text-gray-300">比例自动校正</span>
+          <button
+            type="button"
+            onClick={() => commitSettings({ ...draft, ratioAutoCorrect: !draft.ratioAutoCorrect })}
+            className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${draft.ratioAutoCorrect ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+            role="switch"
+            aria-checked={draft.ratioAutoCorrect}
+            aria-label="比例自动校正"
+          >
+            <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${draft.ratioAutoCorrect ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
+          </button>
+        </div>
+        <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
+          返回图片比例与请求尺寸偏差超过 5% 时，自动本地裁切到目标比例（精确尺寸任务不受此开关影响）。
+        </div>
+      </div>
+      <div className="block">
         <div className="mb-1 flex items-center justify-between gap-3">
           <span className="block text-sm text-gray-600 dark:text-gray-300">使用压缩包进行的批量下载途径</span>
           <button

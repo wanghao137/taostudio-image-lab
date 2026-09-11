@@ -278,9 +278,8 @@ vi.mock('./lib/exactImageSize', () => ({
           : target
     return {
       dataUrl: `data:image/png;base64,resized-${target.width}x${target.height}`,
-      sourceDataUrl: ratioMatches
-        ? dataUrl
-        : `data:image/png;base64,source-${canonicalSource.width}x${canonicalSource.height}`,
+      // 与真实 resizeImageDataUrlToExactSize 语义一致：sourceDataUrl 保留 provider 原始输出
+      sourceDataUrl: dataUrl,
       width: target.width,
       height: target.height,
       sourceWidth: canonicalSource.width,
@@ -305,10 +304,42 @@ vi.mock('./lib/exactImageSize', () => ({
     }
   }),
 }))
+vi.mock('./lib/canvasImage', () => ({
+  // store.ts 仅用 validateMaskMatchesImage（浏览器 canvas 校验，node 环境不可用）；
+  // mock 为 partial 让遮罩提交链在测试中可走通。
+  validateMaskMatchesImage: vi.fn(async () => 'partial'),
+}))
+vi.mock('./lib/inputPreprocess', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/inputPreprocess')>()
+  return {
+    ...actual,
+    preprocessInputImagesForTarget: vi.fn(async (
+      images: Array<{ dataUrl: string; width?: number; height?: number }>,
+      _target: { width: number; height: number },
+      policy?: string,
+    ) => {
+      // 默认实现：显式 crop/outpaint 时返回可辨识的处理图；auto/off 不处理
+      if (policy !== 'crop' && policy !== 'outpaint') {
+        return { images: images.map((img) => ({ dataUrl: img.dataUrl, width: img.width ?? 0, height: img.height ?? 0 })), policy: 'none' }
+      }
+      const longEdge = 1536
+      return {
+        images: images.map((img, index) => ({
+          dataUrl: `data:image/png;base64,pre-${policy}-${index + 1}`,
+          width: policy === 'crop' ? 1024 : longEdge,
+          height: policy === 'crop' ? 1536 : longEdge,
+        })),
+        policy,
+        ...(policy === 'outpaint' ? { promptHint: 'mock-outpaint-hint' } : {}),
+      }
+    }),
+  }
+})
 import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearSceneDirectoryHandle, clearSkillsRootDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getEngineDeliveryDirectoryHandle, getImage, getLocalAutoSaveDirectoryHandle, getSceneDirectoryHandle, getSkillsRootDirectoryHandle, getStoredFreshImageThumbnail, listSceneDirectoryHandles, putAgentConversation, putEngineDeliveryDirectoryHandle, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putSceneDirectoryHandle, putSkillsRootDirectoryHandle, putTask as putDbTask, SCENE_DIRECTORY_KEY_PREFIX } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
 import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
+import { preprocessInputImagesForTarget } from './lib/inputPreprocess'
 import { formatExportFileTime } from './lib/exportFileName'
 import { calculateImageSize } from './lib/size'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
@@ -1241,12 +1272,12 @@ describe('mask draft lifecycle in store actions', () => {
     const outputImage = await getImage(task.outputImages[0])
     const sourceImage = await getImage(task.exactSizeOriginalImages![0])
     expect(outputImage?.dataUrl).toBe('data:image/png;base64,resized-2160x3840')
+    // sourceDataUrl 语义 = provider 原始输出（方图），最终输出为 cover 裁切到目标比例
     expect(sourceImage).toMatchObject({
-      dataUrl: 'data:image/png;base64,source-720x1280',
-      width: 720,
-      height: 1280,
+      dataUrl: 'data:image/png;base64,actual-1254x1254',
+      width: 1254,
+      height: 1254,
     })
-    expect(sourceImage!.width! * outputImage!.height!).toBe(outputImage!.width! * sourceImage!.height!)
     await clearTasks()
     await clearImages()
   })
@@ -4780,5 +4811,220 @@ describe('Skill 工坊 store 链', () => {
     expect(clearSkillsRootDirectoryHandle).toHaveBeenCalled()
     expect(useStore.getState().skills.local).toEqual([])
     expect(useStore.getState().skills.localRootName).toBeNull()
+  })
+})
+
+describe('编辑链路画幅三层防御（T2）', () => {
+  beforeEach(async () => {
+    __resetTasksClearedForTests()
+    await clearTasks()
+    await clearImages()
+    // db mock 的 storeImage 生成新 id；草稿图按 draft id 预注册，供 ensureImageCached 读取
+    await putImage({ id: 'image-a', dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
+    vi.mocked(callImageApi).mockReset().mockImplementation(async () => ({
+      images: [],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    }))
+    vi.mocked(preprocessInputImagesForTarget).mockClear()
+    useStore.setState({
+      settings: localAutoSaveSettings(false),
+      prompt: '',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      showToast: vi.fn(),
+    })
+  })
+
+  it('编辑任务 crop 策略：发送预处理后的输入图并记录 inputPreprocess 与原图', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-1024x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockResolvedValueOnce({
+      images: [{ dataUrl: 'data:image/png;base64,pre-1024x1536', width: 1024, height: 1536 }],
+      policy: 'crop',
+    })
+    useStore.setState({
+      prompt: '编辑提示词',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(preprocessInputImagesForTarget)).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(preprocessInputImagesForTarget).mock.calls[0]?.[2]).toBe('crop')
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0]?.inputImageDataUrls).toEqual(['data:image/png;base64,pre-1024x1536'])
+
+    const record = useStore.getState().tasks[0]
+    expect(record.inputPreprocess).toMatchObject({ policy: 'crop', originalCount: 1 })
+    expect(record.originalInputImageIds).toEqual(['image-a'])
+    expect(record.inputImageIds).not.toContain('image-a')
+  })
+
+  it('auto 策略未触发处理时：原图直发，任务记录 policy=none 且不保留副本', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-941x1672'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockResolvedValueOnce({
+      images: [{ dataUrl: imageA.dataUrl, width: 941, height: 1672 }],
+      policy: 'none',
+    })
+    useStore.setState({
+      prompt: '比例已匹配',
+      params: { ...DEFAULT_PARAMS, size: '2160x3840' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(callImageApi).mock.calls[0]?.[0]?.inputImageDataUrls).toEqual([imageA.dataUrl])
+    const record = useStore.getState().tasks[0]
+    expect(record.inputPreprocess).toMatchObject({ policy: 'none', originalCount: 1 })
+    expect(record.originalInputImageIds).toBeUndefined()
+    expect(record.inputImageIds).toEqual(['image-a'])
+  })
+
+  it('outpaint 策略：扩边指令拼在请求提示词开头，任务 prompt 保持原文', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-1536x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    vi.mocked(preprocessInputImagesForTarget).mockResolvedValueOnce({
+      images: [{ dataUrl: 'data:image/png;base64,pre-outpaint', width: 1536, height: 1536 }],
+      policy: 'outpaint',
+      promptHint: 'mock-outpaint-hint',
+    })
+    useStore.setState({
+      prompt: '扩边提示词',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'outpaint' },
+      inputImages: [imageA],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const sent = vi.mocked(callImageApi).mock.calls[0]?.[0]
+    expect(sent?.prompt.startsWith('mock-outpaint-hint\n')).toBe(true)
+    expect(useStore.getState().tasks[0].prompt).toBe('扩边提示词')
+  })
+
+  it('无输入图任务零影响：不调用预处理、不记录 inputPreprocess', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,done-1024x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: '纯文生图',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(preprocessInputImagesForTarget)).not.toHaveBeenCalled()
+    const record = useStore.getState().tasks[0]
+    expect(record.inputPreprocess).toBeUndefined()
+    expect(record.originalInputImageIds).toBeUndefined()
+  })
+
+  it('带遮罩的编辑任务跳过输入图预处理', async () => {
+    useStore.setState({
+      prompt: '遮罩编辑',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536', input_ratio_policy: 'crop' },
+      inputImages: [imageA],
+      maskDraft: {
+        targetImageId: imageA.id,
+        maskDataUrl: 'data:image/png;base64,mask',
+        updatedAt: 1,
+      },
+    })
+
+    await submitTask({ allowFullMask: true })
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    expect(vi.mocked(preprocessInputImagesForTarget)).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0].inputPreprocess).toBeUndefined()
+  })
+
+  it('非 exact_size 任务返回比例偏差 >5% 时本地校正并标记 ratioCorrected', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,raw-2000x1000'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: '校正测试',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const record = useStore.getState().tasks[0]
+    expect(record.ratioCorrected).toBe(true)
+    const outputId = record.outputImages[0]
+    expect(await getImage(outputId)).toMatchObject({ dataUrl: 'data:image/png;base64,resized-1024x1536' })
+    // provider 原图按 exactSizeOriginalImages 同款机制保留，可下载
+    const originalId = record.exactSizeOriginalImages?.[0]
+    expect(originalId).toBeTruthy()
+    expect(await getImage(originalId!)).toMatchObject({ dataUrl: 'data:image/png;base64,raw-2000x1000' })
+  })
+
+  it('返回比例偏差 ≤5% 时不触发校正', async () => {
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,ok-1022x1536'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      prompt: '比例微偏',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const record = useStore.getState().tasks[0]
+    expect(record.ratioCorrected).toBeUndefined()
+    expect(await getImage(record.outputImages[0])).toMatchObject({ dataUrl: 'data:image/png;base64,ok-1022x1536' })
+  })
+
+  it('设置关闭「比例自动校正」时不触发校正', async () => {
+    useStore.setState({
+      settings: { ...localAutoSaveSettings(false), ratioAutoCorrect: false },
+      prompt: '关闭校正',
+      params: { ...DEFAULT_PARAMS, size: '1024x1536' },
+    })
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,raw-2000x1000'],
+      actualParams: {},
+      actualParamsList: [],
+      revisedPrompts: [],
+    })
+
+    await submitTask()
+    await waitForAssertion(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const record = useStore.getState().tasks[0]
+    expect(record.ratioCorrected).toBeUndefined()
+    expect(await getImage(record.outputImages[0])).toMatchObject({ dataUrl: 'data:image/png;base64,raw-2000x1000' })
   })
 })

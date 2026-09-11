@@ -2,7 +2,7 @@ import { lazy, Suspense, useRef, useEffect, useCallback, useState, useLayoutEffe
 import { createPortal } from 'react-dom'
 import { ImageUp, Maximize2, SlidersHorizontal } from 'lucide-react'
 import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks } from '../store'
-import { type TaskRecord } from '../types'
+import { type TaskParams, type TaskRecord } from '../types'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState } from '../lib/favoriteState'
 import { filterAndSortTasks } from '../lib/taskFilters'
 import {
@@ -554,6 +554,7 @@ export default function InputBar() {
   const moderationHint = useHintTooltip({ enabled: () => moderationDisabled })
   const sizeHint = useHintTooltip({ enabled: () => isFalTextToImage || activeProfile.codexCli })
   const exactSizeHint = useHintTooltip({ enabled: () => exactSizeDisabled })
+  const inputRatioHint = useHintTooltip({ enabled: () => inputImages.length > 0 && params.size === 'auto' })
   const qualityHint = useHintTooltip({ enabled: () => settings.codexCli || isFalProvider })
   const cursorPosition = cursorPos
   const visiblePrompt = stripImageMentionMarkers(prompt)
@@ -1562,6 +1563,40 @@ export default function InputBar() {
           text="auto 尺寸下不执行本地尺寸兜底"
         />
       </label>
+      {inputImages.length > 0 && (
+        <label
+          className="relative flex flex-col gap-0.5"
+          onMouseEnter={inputRatioHint.show}
+          onMouseLeave={inputRatioHint.hide}
+          onTouchStart={inputRatioHint.startTouch}
+          onTouchEnd={inputRatioHint.clearTimer}
+          onTouchCancel={inputRatioHint.hide}
+          onClick={inputRatioHint.show}
+        >
+          <span className="text-gray-400 dark:text-gray-500 ml-1">输入图比例</span>
+          <Select
+            value={params.input_ratio_policy ?? 'auto'}
+            onChange={(val) => {
+              setParams({ input_ratio_policy: val as TaskParams['input_ratio_policy'] })
+            }}
+            options={[
+              { label: '自动（偏差大时裁切）', value: 'auto' },
+              { label: '裁切到目标比例', value: 'crop' },
+              { label: '智能扩边（补全边缘）', value: 'outpaint' },
+              { label: '关闭（保持原图）', value: 'off' },
+            ]}
+            disabled={params.size === 'auto'}
+            showValueTooltips={false}
+            className={params.size === 'auto'
+              ? 'px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-gray-100/50 dark:bg-white/[0.05] opacity-50 cursor-not-allowed text-xs transition-all duration-200 shadow-sm'
+              : selectClass}
+          />
+          <ButtonTooltip
+            visible={params.size === 'auto' && inputRatioHint.visible}
+            text="编辑前先把输入图处理到目标比例（网关按输入图出图）；auto 尺寸下不生效"
+          />
+        </label>
+      )}
       <label
         className="relative flex flex-col gap-0.5"
         onMouseEnter={qualityHint.show}

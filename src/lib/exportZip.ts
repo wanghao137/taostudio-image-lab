@@ -273,6 +273,7 @@ function getImageCreatedAtFallback(tasks: TaskRecord[]) {
       ...(task.outputImages || []),
       ...(task.transparentOriginalImages || []),
       ...(task.exactSizeOriginalImages || []),
+      ...(task.originalInputImageIds || []),
       ...(task.streamPartialImageIds || []),
     ]) {
       if (!id) continue

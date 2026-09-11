@@ -9,6 +9,7 @@ import { useMobileSheet } from '../hooks/useMobileSheet'
 export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const {
     params, setParams,
+    inputImages,
     transparentOutputEnabled, showTransparentOutputControl,
     exactSizeEnabled, exactSizeDisabled,
     moderationDisabled,
@@ -16,6 +17,15 @@ export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean
   const sheet = useMobileSheet({ open, onClose })
 
   if (!open) return null
+
+  const inputRatioPolicy = params.input_ratio_policy ?? 'auto'
+  const showInputRatioPolicy = inputImages.length > 0 && params.size !== 'auto'
+  const inputRatioDescriptions: Record<string, string> = {
+    auto: '输入图比例与目标偏差大于 2% 时自动裁切，否则保持原图。',
+    crop: '提交前把输入图裁切到目标比例（网关编辑按输入图尺寸出图）。',
+    outpaint: '把输入图放到目标画布中央，镜像补边并让模型补全画面边缘。',
+    off: '不做预处理，保持原图提交。',
+  }
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end sm:hidden" onClick={onClose}>
@@ -60,6 +70,21 @@ export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean
           <Row label="精确尺寸">
             <Toggle on={exactSizeEnabled} onClick={() => setParams({ exact_size: !exactSizeEnabled })} />
           </Row>
+        )}
+
+        {showInputRatioPolicy && (
+          <div>
+            <Row label="输入图比例">
+              <Seg
+                value={inputRatioPolicy}
+                options={[['auto', '自动'], ['crop', '裁切'], ['outpaint', '扩边'], ['off', '关闭']]}
+                onChange={(v) => setParams({ input_ratio_policy: v as typeof params.input_ratio_policy })}
+              />
+            </Row>
+            <div className="pt-2 text-xs leading-relaxed text-stone-500 dark:text-stone-400">
+              {inputRatioDescriptions[inputRatioPolicy]}
+            </div>
+          </div>
         )}
       </div>
     </div>
