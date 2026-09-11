@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
@@ -8,9 +8,11 @@ import { CloseIcon } from './icons'
 import { SCENE_TABS } from './Header'
 import { isLocalAutoSaveSupported } from '../lib/localAutoSave'
 import {
+  DEFAULT_IMAGES_MODEL,
   DEFAULT_RESPONSES_MODEL,
   getActiveApiProfile,
   getApiProviderLabel,
+  getSceneImageApiProfile,
   getSceneTextApiProfileResolution,
   isTextCapableApiProfile,
 } from '../lib/apiProfiles'
@@ -36,9 +38,37 @@ const TEXT_RESOLVED_BY_LABELS: Record<string, string> = {
 }
 
 const SELECT_CLASS_NAME = 'w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50'
+const INPUT_CLASS_NAME = 'w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50'
 const SECTION_CARD_CLASS_NAME = 'rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/[0.06] dark:bg-white/[0.02] space-y-3 shadow-sm'
 const SECTION_TITLE_CLASS_NAME = 'text-sm font-bold text-gray-800 dark:text-gray-100'
 const SECTION_HINT_CLASS_NAME = 'text-xs leading-relaxed text-gray-400 dark:text-gray-500'
+const SUMMARY_CLASS_NAME = 'text-xs leading-relaxed text-stone-500 dark:text-stone-400'
+
+/** 场景覆盖文本输入：本地草稿态，onBlur 提交（trim，空→null 回跟随），store 值外部变化时回同步 */
+function SceneOverrideTextInput({ id, value, placeholder, onCommit }: {
+  id?: string
+  value: string | null
+  placeholder: string
+  onCommit: (next: string | null) => void
+}) {
+  const [draft, setDraft] = useState(value ?? '')
+  useEffect(() => { setDraft(value ?? '') }, [value])
+  return (
+    <input
+      id={id}
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const trimmed = draft.trim()
+        if (trimmed === (value?.trim() ?? '')) return
+        onCommit(trimmed || null)
+      }}
+      placeholder={placeholder}
+      className={INPUT_CLASS_NAME}
+    />
+  )
+}
 
 function SectionCard({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -57,6 +87,7 @@ export function SceneSettingsDrawer({ scene, onClose }: { scene: SceneId; onClos
   const settings = useStore((s) => s.settings)
   const setSettings = useStore((s) => s.setSettings)
   const setSceneImageProfileId = useStore((s) => s.setSceneImageProfileId)
+  const setSceneImageOverrides = useStore((s) => s.setSceneImageOverrides)
   const setSceneTextProfileId = useStore((s) => s.setSceneTextProfileId)
   const setSceneDefaults = useStore((s) => s.setSceneDefaults)
   const selectSceneSaveDirectory = useStore((s) => s.selectSceneSaveDirectory)
@@ -70,6 +101,26 @@ export function SceneSettingsDrawer({ scene, onClose }: { scene: SceneId; onClos
   const activeProfile = getActiveApiProfile(settings)
   const localAutoSaveSupported = isLocalAutoSaveSupported()
   const localAutoSaveEnabled = settings.localAutoSave.enabled
+
+  // 场景引用的具体配置：覆盖控件（服务商/模型）只对具体配置有意义
+  const referencedProfile = sceneSettings.imageProfileId
+    ? settings.profiles.find((profile) => profile.id === sceneSettings.imageProfileId) ?? null
+    : null
+  // 解析链（getSceneImageApiProfile 显式传 scene，非 activeScene 场景也能预览）：
+  // 引用 profile → 服务商草稿切换 → 模型覆盖，与提交任务时完全同链
+  const resolvedImageProfile = getSceneImageApiProfile(settings, scene)
+
+  // 服务商选项只列该配置 providerDrafts 已有草稿的 provider（排除当前 provider）；
+  // 绝不列无草稿 provider：首切新 provider 显空会被误认为配置丢失。
+  const providerDraftIds = referencedProfile
+    ? Object.keys(referencedProfile.providerDrafts ?? {}).filter((id) => id !== referencedProfile.provider)
+    : []
+  const providerOptions = [
+    { label: `跟随该配置当前（${getApiProviderLabel(settings, referencedProfile?.provider ?? 'openai')}）`, value: '' },
+    ...providerDraftIds.map((id) => ({ label: getApiProviderLabel(settings, id), value: id })),
+  ]
+  const resolvedSummary = `实际生效：${getApiProviderLabel(settings, resolvedImageProfile.provider)} · ${resolvedImageProfile.apiMode} · 模型 ${resolvedImageProfile.model}` +
+    (resolvedImageProfile.apiMode === 'responses' ? ` · 生图 ${resolvedImageProfile.imageGenerationModel || '默认'}` : '')
 
   const imageProfileOptions = [
     { label: `跟随全局（当前：${activeProfile.name}）`, value: '' },
@@ -136,12 +187,56 @@ export function SceneSettingsDrawer({ scene, onClose }: { scene: SceneId; onClos
               <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">场景生图配置</span>
               <Select
                 value={sceneSettings.imageProfileId ?? ''}
-                onChange={(value: string) => setSceneImageProfileId(scene, value || null)}
+                onChange={(value: string) => {
+                  setSceneImageProfileId(scene, value || null)
+                  // 切换/清除引用配置时同步清空三项覆盖：旧 provider 草稿与模型覆盖对另一配置无意义，
+                  // 与持久化归一化（imageProfileId 为 null 时三字段折叠 null）语义保持一致。
+                  setSceneImageOverrides(scene, { imageProviderId: null, imageModelOverride: null, imageGenerationModelOverride: null })
+                }}
                 options={imageProfileOptions}
                 className={SELECT_CLASS_NAME}
               />
               <p className={SECTION_HINT_CLASS_NAME}>本场景提交生图任务时优先使用此配置；选择跟随全局时使用全局激活配置。</p>
             </div>
+            {referencedProfile ? (
+              <>
+                <div className="block">
+                  <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">服务商</span>
+                  <Select
+                    value={sceneSettings.imageProviderId ?? ''}
+                    onChange={(value: string) => setSceneImageOverrides(scene, { imageProviderId: value || null })}
+                    options={providerOptions}
+                    className={SELECT_CLASS_NAME}
+                  />
+                  <p className={SECTION_HINT_CLASS_NAME}>可选项来自该配置内已保存的服务商草稿（在设置 → API 中切换过服务商即产生草稿）。</p>
+                </div>
+                <div className="block">
+                  <label htmlFor={`scene-model-override-${scene}`} className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">模型 ID</label>
+                  <SceneOverrideTextInput
+                    id={`scene-model-override-${scene}`}
+                    value={sceneSettings.imageModelOverride ?? null}
+                    placeholder={resolvedImageProfile.model}
+                    onCommit={(next) => setSceneImageOverrides(scene, { imageModelOverride: next })}
+                  />
+                  <p className={SECTION_HINT_CLASS_NAME}>覆盖本场景提交时使用的模型 ID；留空跟随该配置当前值。</p>
+                </div>
+                {resolvedImageProfile.apiMode === 'responses' && (
+                  <div className="block">
+                    <label htmlFor={`scene-igm-override-${scene}`} className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">图像生成模型</label>
+                    <SceneOverrideTextInput
+                      id={`scene-igm-override-${scene}`}
+                      value={sceneSettings.imageGenerationModelOverride ?? null}
+                      placeholder={resolvedImageProfile.imageGenerationModel || DEFAULT_IMAGES_MODEL}
+                      onCommit={(next) => setSceneImageOverrides(scene, { imageGenerationModelOverride: next })}
+                    />
+                    <p className={SECTION_HINT_CLASS_NAME}>Responses 模式下 image_generation 工具使用的图像模型；留空跟随该配置当前值。</p>
+                  </div>
+                )}
+                <p className={SUMMARY_CLASS_NAME}>{resolvedSummary}</p>
+              </>
+            ) : (
+              <p className={SECTION_HINT_CLASS_NAME}>选择具体配置后可覆盖服务商与模型。</p>
+            )}
           </SectionCard>
 
           {/* 二、保存目录 */}

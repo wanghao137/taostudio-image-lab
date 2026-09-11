@@ -422,6 +422,7 @@ interface AppState {
   // 场景
   setActiveScene: (scene: SceneId) => void
   setSceneImageProfileId: (scene: SceneId, profileId: string | null) => void
+  setSceneImageOverrides: (scene: SceneId, patch: { imageProviderId?: string | null; imageModelOverride?: string | null; imageGenerationModelOverride?: string | null }) => void
   setSceneTextProfileId: (scene: SceneId, profileId: string | null) => void
   setSceneDefaults: (scene: SceneId, defaults: Partial<SceneDefaults>) => void
   selectSceneSaveDirectory: (scene: SceneId) => Promise<void>
@@ -935,6 +936,9 @@ export const useStore = create<AppState>()(
       },
       setSceneImageProfileId: (scene, profileId) => {
         patchSceneSettings(scene, { imageProfileId: profileId })
+      },
+      setSceneImageOverrides: (scene, patch) => {
+        patchSceneSettings(scene, patch)
       },
       setSceneTextProfileId: (scene, profileId) => {
         patchSceneSettings(scene, { textProfileId: profileId })

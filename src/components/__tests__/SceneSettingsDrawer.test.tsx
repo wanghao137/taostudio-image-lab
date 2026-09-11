@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SceneSettingsDrawer } from '../SceneSettingsDrawer'
 import { useStore } from '../../store'
-import { DEFAULT_SETTINGS, createDefaultOpenAIProfile, normalizeSettings } from '../../lib/apiProfiles'
+import { DEFAULT_SETTINGS, createDefaultOpenAIProfile, importCustomProviderDefinitionFromJson, normalizeSettings, switchApiProfileProvider } from '../../lib/apiProfiles'
 
 const IMAGE_PROFILE_A = createDefaultOpenAIProfile({ id: 'image-a', name: '生图配置A' })
 const IMAGE_PROFILE_B = createDefaultOpenAIProfile({ id: 'image-b', name: '生图配置B' })
@@ -113,5 +113,135 @@ describe('SceneSettingsDrawer', () => {
     render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
 
     expect(screen.getByText('未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加')).toBeTruthy()
+  })
+})
+
+describe('SceneSettingsDrawer 生图模型覆盖（Fix C）', () => {
+  const CHATGPT2API_PROVIDER = importCustomProviderDefinitionFromJson(JSON.stringify({
+    id: 'custom-chatgpt2api',
+    name: 'chatgpt2api 网关',
+    submit: { path: 'images/generations' },
+  }))
+
+  /** openai 当前 + chatgpt2api 草稿（全局切换过的真实形态） */
+  function buildProfileWithDraft() {
+    let onCustom = switchApiProfileProvider(IMAGE_PROFILE_A, CHATGPT2API_PROVIDER.id, CHATGPT2API_PROVIDER)
+    onCustom = { ...onCustom, baseUrl: 'https://chatgpt2api.example.com/v1', apiKey: 'cg-key', model: 'cg-model' }
+    return switchApiProfileProvider(onCustom, 'openai')
+  }
+
+  function buildSceneReferencingSettings(profiles: typeof IMAGE_PROFILE_A[], scenePatch: Record<string, unknown> = {}) {
+    return normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles,
+      activeProfileId: profiles[0].id,
+      activeScene: 'general',
+      scenes: { general: { imageProfileId: profiles[0].id, ...scenePatch } },
+    })
+  }
+
+  afterEach(cleanup)
+
+  it('未选具体配置时显示覆盖引导 hint，不渲染服务商/模型覆盖控件', () => {
+    useStore.setState({ settings: buildSettings([IMAGE_PROFILE_A]) })
+
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    expect(screen.getByText('选择具体配置后可覆盖服务商与模型。')).toBeTruthy()
+    expect(screen.queryByText('服务商')).toBeNull()
+    expect(screen.queryByLabelText('模型 ID')).toBeNull()
+  })
+
+  it('服务商 Select 只列草稿 provider（排除当前 provider 与无草稿项），选择后写入 imageProviderId，摘要行显示实际生效', () => {
+    const profile = buildProfileWithDraft()
+    useStore.setState({ settings: buildSceneReferencingSettings([profile]) })
+
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    // 跟随选项显示该配置当前 provider 标签
+    const providerTrigger = screen.getByText('跟随该配置当前（OpenAI）')
+    fireEvent.click(providerTrigger)
+
+    // 只列 chatgpt2api 草稿；不列当前 provider（openai）、不列无草稿的 fal / 别的 profile
+    expect(document.querySelector('[data-option-value="custom-chatgpt2api"]')).toBeTruthy()
+    expect(document.querySelector('[data-option-value="openai"]')).toBeNull()
+    expect(document.querySelector('[data-option-value="fal"]')).toBeNull()
+    expect(document.querySelector('[data-option-value="sb2api-async"]')).toBeNull()
+
+    clickSelectOption('custom-chatgpt2api')
+    expect(useStore.getState().settings.scenes.general.imageProviderId).toBe('custom-chatgpt2api')
+
+    // 摘要行：provider 标签 · apiMode · 模型（来自 provider 草稿叠加后的解析链）
+    expect(screen.getByText('实际生效：chatgpt2api 网关 · images · 模型 cg-model')).toBeTruthy()
+  })
+
+  it('images 模式不显示图像生成模型输入；responses 解析时显示并可提交覆盖', () => {
+    const imagesProfile = buildProfileWithDraft()
+    useStore.setState({ settings: buildSceneReferencingSettings([imagesProfile]) })
+    const { unmount } = render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+    expect(screen.queryByLabelText('图像生成模型')).toBeNull()
+    unmount()
+
+    const responsesProfile = {
+      ...createDefaultOpenAIProfile({
+        id: 'image-resp', name: '生图Responses',
+        apiMode: 'responses', model: 'gpt-5.6-sol', imageGenerationModel: 'gpt-image-2.5',
+      }),
+    }
+    useStore.setState({ settings: buildSceneReferencingSettings([responsesProfile]) })
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    expect(screen.getByText('实际生效：OpenAI · responses · 模型 gpt-5.6-sol · 生图 gpt-image-2.5')).toBeTruthy()
+
+    const igmInput = screen.getByLabelText('图像生成模型') as HTMLInputElement
+    expect(igmInput.placeholder).toBe('gpt-image-2.5')
+    fireEvent.change(igmInput, { target: { value: '  scene-igm  ' } })
+    fireEvent.blur(igmInput)
+    expect(useStore.getState().settings.scenes.general.imageGenerationModelOverride).toBe('scene-igm')
+    // 摘要行反映覆盖后的解析值
+    expect(screen.getByText('实际生效：OpenAI · responses · 模型 gpt-5.6-sol · 生图 scene-igm')).toBeTruthy()
+  })
+
+  it('模型 ID 输入 onBlur 提交（trim，空→null），placeholder 为当前解析值', () => {
+    const profile = buildProfileWithDraft()
+    useStore.setState({ settings: buildSceneReferencingSettings([profile]) })
+
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    const modelInput = screen.getByLabelText('模型 ID') as HTMLInputElement
+    expect(modelInput.placeholder).toBe(IMAGE_PROFILE_A.model)
+    fireEvent.change(modelInput, { target: { value: '  scene-model  ' } })
+    fireEvent.blur(modelInput)
+    expect(useStore.getState().settings.scenes.general.imageModelOverride).toBe('scene-model')
+    expect((screen.getByLabelText('模型 ID') as HTMLInputElement).placeholder).toBe('scene-model')
+
+    // 清空 → null（跟随）
+    const input = screen.getByLabelText('模型 ID') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '   ' } })
+    fireEvent.blur(input)
+    expect(useStore.getState().settings.scenes.general.imageModelOverride).toBeNull()
+  })
+
+  it('切换场景生图配置时清除三项覆盖（避免旧 provider 引用漂移到新配置）', () => {
+    const profile = buildProfileWithDraft()
+    useStore.setState({
+      settings: buildSceneReferencingSettings([profile, IMAGE_PROFILE_B], {
+        imageProviderId: CHATGPT2API_PROVIDER.id,
+        imageModelOverride: 'stale-model',
+        imageGenerationModelOverride: 'stale-igm',
+      }),
+    })
+
+    render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
+
+    fireEvent.click(screen.getByText(/生图配置A/))
+    clickSelectOption('image-b')
+
+    const scene = useStore.getState().settings.scenes.general
+    expect(scene.imageProfileId).toBe('image-b')
+    expect(scene.imageProviderId).toBeNull()
+    expect(scene.imageModelOverride).toBeNull()
+    expect(scene.imageGenerationModelOverride).toBeNull()
   })
 })

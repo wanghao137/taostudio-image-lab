@@ -3609,6 +3609,47 @@ describe('场景 actions 与保存链', () => {
     expect(scenes.general.defaults.ratio).toBeUndefined()
   })
 
+  it('setSceneImageOverrides merge 进目标场景，不动其他字段与其他场景', () => {
+    const profile = createDefaultOpenAIProfile({ id: 'scene-override-profile', apiKey: 'test-key' })
+    useStore.setState({
+      settings: normalizeSettings({
+        profiles: [profile],
+        activeProfileId: profile.id,
+        scenes: {
+          portrait: {
+            imageProfileId: profile.id,
+            imageProviderId: 'openai',
+            imageModelOverride: 'old-model',
+            imageGenerationModelOverride: 'old-igm',
+            saveDirectoryName: null,
+            defaults: { ratio: '3:4' },
+          },
+        },
+      }),
+    })
+
+    useStore.getState().setSceneImageOverrides('portrait', { imageProviderId: 'custom-x' })
+
+    const portrait = useStore.getState().settings.scenes.portrait
+    // 未出现在 patch 中的字段原样保留
+    expect(portrait.imageProfileId).toBe('scene-override-profile')
+    expect(portrait.imageModelOverride).toBe('old-model')
+    expect(portrait.imageGenerationModelOverride).toBe('old-igm')
+    expect(portrait.defaults).toEqual({ ratio: '3:4' })
+    expect(portrait.saveDirectoryName).toBeNull()
+    // patch 字段被覆盖
+    expect(portrait.imageProviderId).toBe('custom-x')
+
+    // 支持清空单个字段，其余不动
+    useStore.getState().setSceneImageOverrides('portrait', { imageModelOverride: null })
+    expect(useStore.getState().settings.scenes.portrait.imageModelOverride).toBeNull()
+    expect(useStore.getState().settings.scenes.portrait.imageProviderId).toBe('custom-x')
+
+    // 其他场景不受影响
+    expect(useStore.getState().settings.scenes.general.imageProviderId).toBeNull()
+    expect(useStore.getState().settings.scenes.general.imageModelOverride).toBeNull()
+  })
+
   it('setGallerySceneFilter 支持 all 与具体场景', () => {
     useStore.getState().setGallerySceneFilter('all')
     expect(useStore.getState().gallerySceneFilter).toBe('all')
