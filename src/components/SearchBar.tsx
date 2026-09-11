@@ -23,7 +23,7 @@ export default function SearchBar() {
   }
 
   return (
-    <div data-no-drag-select className="my-3 rounded-xl border border-stone-200/80 bg-white/65 p-2 shadow-sm backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.035]">
+    <div data-no-drag-select className="relative z-30 my-3 rounded-xl border border-stone-200/80 bg-white/65 p-2 shadow-sm backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.035]">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative z-10 min-w-0 flex-1">
           <svg

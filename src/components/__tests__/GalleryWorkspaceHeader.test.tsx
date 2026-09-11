@@ -17,25 +17,25 @@ describe('GalleryWorkspaceHeader 一键全部切换 chip', () => {
 
   afterEach(() => cleanup())
 
-  it('过滤跟随当前场景时显示「全部」，点击切换到 all 并翻转为「仅人像写真」，再点切回', () => {
+  it('过滤跟随当前场景时显示「全部场景」，点击切换到 all 并翻转为「仅人像写真」，再点切回', () => {
     render(<GalleryWorkspaceHeader onOpenSceneSettings={() => {}} />)
 
-    // filter === activeScene（portrait）→ 显示「全部」
-    fireEvent.click(screen.getByRole('button', { name: '全部' }))
+    // filter === activeScene（portrait）→ 显示「全部场景」
+    fireEvent.click(screen.getByRole('button', { name: '全部场景' }))
     expect(useStore.getState().gallerySceneFilter).toBe('all')
     expect(screen.getByRole('button', { name: '仅人像写真' })).toBeTruthy()
 
     // filter === 'all' → 显示「仅人像写真」，点击切回当前场景
     fireEvent.click(screen.getByRole('button', { name: '仅人像写真' }))
     expect(useStore.getState().gallerySceneFilter).toBe('portrait')
-    expect(screen.getByRole('button', { name: '全部' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '全部场景' })).toBeTruthy()
   })
 
-  it('过滤漂移到其他场景时也提供「全部」出口（不锁死在 all/activeScene 两态）', () => {
+  it('过滤漂移到其他场景时也提供「全部场景」出口（不锁死在 all/activeScene 两态）', () => {
     useStore.setState({ gallerySceneFilter: 'sticker' })
     render(<GalleryWorkspaceHeader onOpenSceneSettings={() => {}} />)
 
-    fireEvent.click(screen.getByRole('button', { name: '全部' }))
+    fireEvent.click(screen.getByRole('button', { name: '全部场景' }))
     expect(useStore.getState().gallerySceneFilter).toBe('all')
   })
 })
