@@ -134,6 +134,12 @@ export interface SceneDefaults {
 export interface SceneSettings {
   /** 场景生图配置引用：null = 跟随全局 activeProfileId */
   imageProfileId: string | null
+  /** 场景服务商覆盖：必须是所引用 profile 的当前 provider 或其 providerDrafts 已有草稿的 provider；null=跟随该配置当前 */
+  imageProviderId?: string | null
+  /** 场景模型 ID 覆盖（trim 非空生效）；null=跟随 */
+  imageModelOverride?: string | null
+  /** 场景图像生成模型覆盖（responses 模式生效）；null=跟随 */
+  imageGenerationModelOverride?: string | null
   /** 场景文本模型引用：null = 走全局 textApiProfileId 自动链 */
   textProfileId: string | null
   /** 场景独立保存目录名（句柄存 IndexedDB sceneDirectory:<id>）；null = 跟随全局目录 */

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ApiProfile } from '../types'
 import {
   DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
   DEFAULT_FAL_BASE_URL,
@@ -1998,7 +1999,15 @@ describe('场景配置归一化与解析', () => {
   it('旧 settings 无 scenes 时补全四个场景默认值，activeScene 默认 general', () => {
     const s = normalizeSettings({ profiles: [createDefaultOpenAIProfile()] })
     expect(Object.keys(s.scenes).sort()).toEqual(['general', 'portrait', 'skill', 'sticker'])
-    expect(s.scenes.general).toEqual({ imageProfileId: null, textProfileId: null, saveDirectoryName: null, defaults: {} })
+    expect(s.scenes.general).toEqual({
+      imageProfileId: null,
+      textProfileId: null,
+      saveDirectoryName: null,
+      defaults: {},
+      imageProviderId: null,
+      imageModelOverride: null,
+      imageGenerationModelOverride: null,
+    })
     expect(s.activeScene).toBe('general')
   })
 
@@ -2084,5 +2093,308 @@ describe('场景配置归一化与解析', () => {
     expect(resolved.profile?.baseUrl).toBe('https://legacy.example.com/v1')
     expect(resolved.profile?.apiKey).toBe('legacy-key')
     expect(resolved.profile?.model).toBe('legacy-model')
+  })
+})
+
+describe('场景生图服务商/模型覆盖（Fix C）', () => {
+  const CHATGPT2API_PROVIDER = importCustomProviderDefinitionFromJson(JSON.stringify({
+    id: 'custom-chatgpt2api',
+    name: 'chatgpt2api 网关',
+    submit: { path: 'images/generations' },
+  }))
+
+  /** 构造「openai 当前 + chatgpt2api 草稿」的 profile：全局切换到自定义服务商、改值、切回 openai（草稿即落） */
+  function buildOpenAIProfileWithCustomDraft() {
+    let onCustom = switchApiProfileProvider(
+      createDefaultOpenAIProfile({
+        id: 'scene-eq-openai',
+        name: '场景等价-openai',
+        apiMode: 'responses',
+        model: DEFAULT_RESPONSES_MODEL,
+        imageGenerationModel: 'gpt-image-2.5',
+        baseUrl: 'https://openai.example.com/v1',
+        apiKey: 'openai-key',
+        reasoningEffort: 'high',
+      }),
+      CHATGPT2API_PROVIDER.id,
+      CHATGPT2API_PROVIDER,
+    )
+    onCustom = { ...onCustom, baseUrl: 'https://chatgpt2api.example.com/v1', apiKey: 'cg2api-key', model: 'cg2api-model' }
+    return switchApiProfileProvider(onCustom, 'openai')
+  }
+
+  /** 逐字段断言场景覆盖解析结果与全局 switchApiProfileProvider 完全等价 */
+  function expectProviderSwitchEquivalence(resolved: ApiProfileLike, direct: ApiProfileLike) {
+    expect(resolved.provider).toBe(direct.provider)
+    expect(resolved.baseUrl).toBe(direct.baseUrl)
+    expect(resolved.apiKey).toBe(direct.apiKey)
+    expect(resolved.model).toBe(direct.model)
+    expect(resolved.imageGenerationModel).toBe(direct.imageGenerationModel)
+    expect(resolved.apiMode).toBe(direct.apiMode)
+    expect(resolved.reasoningEffort).toBe(direct.reasoningEffort)
+    expect(resolved.codexCli).toBe(direct.codexCli)
+    expect(resolved.apiProxy).toBe(direct.apiProxy)
+    expect(resolved.streamImages).toBe(direct.streamImages)
+    expect(resolved.streamPartialImages).toBe(direct.streamPartialImages)
+    expect(resolved.transparentBackgroundMethod).toBe(direct.transparentBackgroundMethod)
+  }
+
+  type ApiProfileLike = Pick<ApiProfile,
+    'provider' | 'baseUrl' | 'apiKey' | 'model' | 'imageGenerationModel' | 'apiMode' | 'reasoningEffort' |
+    'codexCli' | 'apiProxy' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>
+
+  it('等价性：openai（responses）覆盖到自定义 provider 草稿，与全局切换逐字段一致', () => {
+    const base = buildOpenAIProfileWithCustomDraft()
+    const s = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      activeProfileId: base.id,
+      activeScene: 'sticker',
+      scenes: { sticker: { imageProfileId: base.id, imageProviderId: CHATGPT2API_PROVIDER.id } },
+    })
+    expect(s.scenes.sticker.imageProviderId).toBe(CHATGPT2API_PROVIDER.id)
+
+    const resolved = getSceneImageApiProfile(s)
+    const direct = switchApiProfileProvider(
+      s.profiles.find((p) => p.id === base.id)!,
+      CHATGPT2API_PROVIDER.id,
+      getCustomProviderDefinition(s, CHATGPT2API_PROVIDER.id) ?? undefined,
+    )
+    expectProviderSwitchEquivalence(resolved, direct)
+    expect(resolved.baseUrl).toBe('https://chatgpt2api.example.com/v1')
+    expect(resolved.model).toBe('cg2api-model')
+    expect(resolved.apiMode).toBe('images')
+  })
+
+  it('等价性：自定义 provider 当前覆盖回 openai 草稿，与全局切换逐字段一致', () => {
+    const otherProvider = importCustomProviderDefinitionFromJson(JSON.stringify({
+      id: 'custom-gateway',
+      name: '通用网关',
+      submit: { path: 'images/generations' },
+    }))
+    // 从 openai（带显式值）切到自定义 provider：openai 字段落草稿，当前 provider = custom-gateway
+    const onCustom = switchApiProfileProvider(
+      createDefaultOpenAIProfile({
+        id: 'scene-eq-custom',
+        name: '场景等价-custom',
+        baseUrl: 'https://gw.example.com/v1',
+        apiKey: 'openai-draft-key',
+        model: 'openai-draft-model',
+      }),
+      otherProvider.id,
+      otherProvider,
+    )
+    expect(onCustom.provider).toBe(otherProvider.id)
+    const s = normalizeSettings({
+      customProviders: [otherProvider],
+      profiles: [onCustom],
+      activeProfileId: onCustom.id,
+      activeScene: 'portrait',
+      scenes: { portrait: { imageProfileId: onCustom.id, imageProviderId: 'openai' } },
+    })
+
+    const resolved = getSceneImageApiProfile(s)
+    const direct = switchApiProfileProvider(s.profiles.find((p) => p.id === onCustom.id)!, 'openai')
+    expectProviderSwitchEquivalence(resolved, direct)
+    expect(resolved.provider).toBe('openai')
+    expect(resolved.apiKey).toBe('openai-draft-key')
+    expect(resolved.model).toBe('openai-draft-model')
+  })
+
+  it('等价性：openai 当前覆盖到 fal 草稿，与全局切换逐字段一致', () => {
+    let onFal = switchApiProfileProvider(
+      createDefaultOpenAIProfile({ id: 'scene-eq-fal', name: '场景等价-fal' }),
+      'fal',
+    )
+    onFal = { ...onFal, apiKey: 'fal-draft-key', model: 'fal/gpt-image-x' }
+    const withFalDraft = switchApiProfileProvider(onFal, 'openai')
+    const s = normalizeSettings({
+      profiles: [withFalDraft],
+      activeProfileId: withFalDraft.id,
+      activeScene: 'skill',
+      scenes: { skill: { imageProfileId: withFalDraft.id, imageProviderId: 'fal' } },
+    })
+
+    const resolved = getSceneImageApiProfile(s)
+    const direct = switchApiProfileProvider(s.profiles.find((p) => p.id === withFalDraft.id)!, 'fal')
+    expectProviderSwitchEquivalence(resolved, direct)
+    expect(resolved.provider).toBe('fal')
+    expect(resolved.apiKey).toBe('fal-draft-key')
+    expect(resolved.model).toBe('fal/gpt-image-x')
+  })
+
+  it('叠加顺序：provider 草稿的 model/imageGenerationModel 被场景覆盖压过；覆盖缺省时草稿值透传', () => {
+    const base = buildOpenAIProfileWithCustomDraft()
+    const withOverrides = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      activeProfileId: base.id,
+      activeScene: 'sticker',
+      scenes: {
+        sticker: {
+          imageProfileId: base.id,
+          imageProviderId: CHATGPT2API_PROVIDER.id,
+          imageModelOverride: 'scene-model',
+          imageGenerationModelOverride: 'scene-igm',
+        },
+      },
+    })
+
+    const resolved = getSceneImageApiProfile(withOverrides)
+    expect(resolved.provider).toBe(CHATGPT2API_PROVIDER.id)
+    // provider 草稿值（cg2api-model）被 imageModelOverride 覆盖
+    expect(resolved.model).toBe('scene-model')
+    expect(resolved.imageGenerationModel).toBe('scene-igm')
+
+    // 覆盖缺省：草稿值原样透传
+    const withoutOverrides = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      activeProfileId: base.id,
+      activeScene: 'sticker',
+      scenes: { sticker: { imageProfileId: base.id, imageProviderId: CHATGPT2API_PROVIDER.id } },
+    })
+    const passthrough = getSceneImageApiProfile(withoutOverrides)
+    expect(passthrough.model).toBe('cg2api-model')
+    expect(passthrough.baseUrl).toBe('https://chatgpt2api.example.com/v1')
+  })
+
+  it('叠加顺序：无 provider 覆盖时模型覆盖直接作用于引用 profile 本体', () => {
+    const base = createDefaultOpenAIProfile({
+      id: 'scene-plain', name: '纯覆盖', apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL, imageGenerationModel: 'gpt-image-2.5',
+    })
+    const s = normalizeSettings({
+      profiles: [base],
+      activeProfileId: base.id,
+      activeScene: 'general',
+      scenes: {
+        general: {
+          imageProfileId: base.id,
+          imageModelOverride: 'plain-model',
+          imageGenerationModelOverride: 'plain-igm',
+        },
+      },
+    })
+    const resolved = getSceneImageApiProfile(s)
+    expect(resolved.provider).toBe('openai')
+    expect(resolved.model).toBe('plain-model')
+    expect(resolved.imageGenerationModel).toBe('plain-igm')
+    expect(resolved.apiMode).toBe('responses')
+  })
+
+  it('归一化：无效 provider 引用回 null（未知类型 / 无草稿 / 非字符串）', () => {
+    const base = buildOpenAIProfileWithCustomDraft()
+    const unknownProvider = importCustomProviderDefinitionFromJson(JSON.stringify({
+      id: 'custom-unknown', name: '未挂载网关', submit: { path: 'images/generations' },
+    }))
+    expect(unknownProvider.id).toBe('custom-unknown')
+    const s = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      activeScene: 'general',
+      scenes: {
+        general: { imageProfileId: base.id, imageProviderId: unknownProvider.id },
+        portrait: { imageProfileId: base.id, imageProviderId: 'fal' },
+        sticker: { imageProfileId: base.id, imageProviderId: 123 as unknown as string },
+      },
+    })
+    expect(s.scenes.general.imageProviderId).toBeNull()
+    expect(s.scenes.portrait.imageProviderId).toBeNull()
+    expect(s.scenes.sticker.imageProviderId).toBeNull()
+  })
+
+  it('归一化：imageProfileId 为 null 时三个覆盖字段一律 null', () => {
+    const s = normalizeSettings({
+      scenes: {
+        general: {
+          imageProfileId: 'missing-profile',
+          imageProviderId: 'openai',
+          imageModelOverride: 'leftover-model',
+          imageGenerationModelOverride: 'leftover-igm',
+        },
+      },
+    })
+    expect(s.scenes.general.imageProfileId).toBeNull()
+    expect(s.scenes.general.imageProviderId).toBeNull()
+    expect(s.scenes.general.imageModelOverride).toBeNull()
+    expect(s.scenes.general.imageGenerationModelOverride).toBeNull()
+  })
+
+  it('归一化：空串/空白 override 折叠 null，显式值 trim 后保留', () => {
+    const base = buildOpenAIProfileWithCustomDraft()
+    const s = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      scenes: {
+        general: {
+          imageProfileId: base.id,
+          imageModelOverride: '  kept-model  ',
+          imageGenerationModelOverride: '   ',
+        },
+        portrait: { imageProfileId: base.id, imageModelOverride: '' },
+      },
+    })
+    expect(s.scenes.general.imageModelOverride).toBe('kept-model')
+    expect(s.scenes.general.imageGenerationModelOverride).toBeNull()
+    expect(s.scenes.portrait.imageModelOverride).toBeNull()
+  })
+
+  it('归一化：provider 等于引用 profile 当前 provider 时折叠 null（等价无覆盖）', () => {
+    const base = buildOpenAIProfileWithCustomDraft()
+    const s = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      scenes: { general: { imageProfileId: base.id, imageProviderId: base.provider } },
+    })
+    expect(base.provider).toBe('openai')
+    expect(s.scenes.general.imageProviderId).toBeNull()
+  })
+
+  it('回归：无新字段时 getSceneImageApiProfile 输出与改动前一致（往返快照）', () => {
+    const a = { ...createDefaultOpenAIProfile(), id: 'reg-a', name: 'A', model: 'model-a' }
+    const b = { ...createDefaultOpenAIProfile(), id: 'reg-b', name: 'B', model: 'model-b', apiMode: 'responses' as const, imageGenerationModel: 'igm-b' }
+    const once = normalizeSettings({
+      profiles: [a, b],
+      activeProfileId: 'reg-a',
+      activeScene: 'sticker',
+      scenes: { sticker: { imageProfileId: 'reg-b' } },
+    })
+    // 往返归一化稳定：新字段全 null，既有字段不变
+    const twice = normalizeSettings(once)
+    expect(twice.scenes).toEqual(once.scenes)
+    expect(once.scenes.sticker.imageProviderId).toBeNull()
+    expect(once.scenes.sticker.imageModelOverride).toBeNull()
+    expect(once.scenes.sticker.imageGenerationModelOverride).toBeNull()
+
+    const resolved = getSceneImageApiProfile(once)
+    expect(resolved.id).toBe('reg-b')
+    expect(resolved.model).toBe('model-b')
+    expect(resolved.apiMode).toBe('responses')
+    expect(resolved.imageGenerationModel).toBe('igm-b')
+  })
+
+  it('显式 sceneId 与 activeScene 等价，缺省 sceneId 走 activeScene', () => {
+    const base = buildOpenAIProfileWithCustomDraft()
+    const s = normalizeSettings({
+      customProviders: [CHATGPT2API_PROVIDER],
+      profiles: [base],
+      activeProfileId: base.id,
+      activeScene: 'general',
+      scenes: {
+        sticker: { imageProfileId: base.id, imageProviderId: CHATGPT2API_PROVIDER.id, imageModelOverride: 'sticker-model' },
+        general: { imageProfileId: base.id },
+      },
+    })
+    const explicit = getSceneImageApiProfile(s, 'sticker')
+    const viaActiveScene = getSceneImageApiProfile({ ...s, activeScene: 'sticker' })
+    expect(explicit.model).toBe('sticker-model')
+    expect(explicit.provider).toBe(CHATGPT2API_PROVIDER.id)
+    expect(viaActiveScene.model).toBe('sticker-model')
+    expect(viaActiveScene.provider).toBe(CHATGPT2API_PROVIDER.id)
+
+    // 缺省 sceneId 用 activeScene（general：无覆盖 → 引用 profile 本体）
+    expect(getSceneImageApiProfile(s).provider).toBe('openai')
+    expect(getSceneImageApiProfile(s).model).toBe(DEFAULT_RESPONSES_MODEL)
   })
 })

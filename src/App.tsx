@@ -123,7 +123,7 @@ export function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSet
                 title={gallerySceneFilter === 'all' ? `只看「${getSceneLabel(activeScene)}」场景的任务` : '查看全部场景的任务'}
                 className="shrink-0 rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 transition-colors hover:border-stone-300 hover:bg-stone-100 hover:text-stone-700 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300 dark:hover:bg-white/[0.1] dark:hover:text-stone-100"
               >
-                {gallerySceneFilter === 'all' ? `仅${getSceneLabel(activeScene)}` : '全部'}
+                {gallerySceneFilter === 'all' ? `仅${getSceneLabel(activeScene)}` : '全部场景'}
               </button>
               <span className="rounded-md border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] font-medium text-stone-500 dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-stone-300">
                 {statusLabel}

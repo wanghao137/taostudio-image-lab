@@ -805,8 +805,24 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
   const normalizeSceneSettings = (raw: unknown): SceneSettings => {
     const rec = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
     const defaults = rec.defaults && typeof rec.defaults === 'object' ? rec.defaults as Record<string, unknown> : {}
+    const imageProfileId = typeof rec.imageProfileId === 'string' && sceneProfileIds.has(rec.imageProfileId) ? rec.imageProfileId : null
+    // 场景服务商/模型覆盖：离开具体配置（imageProfileId 为 null）无意义，三字段一律折叠 null。
+    const referencedProfile = imageProfileId ? profiles.find((p) => p.id === imageProfileId) : undefined
+    const rawProviderId = typeof rec.imageProviderId === 'string' ? rec.imageProviderId : ''
+    // 有效 = 引用 profile 当前 provider（等价无覆盖，折叠 null）或其 providerDrafts 已有草稿的已知 provider；
+    // 与解析端 switchApiProfileProvider 的草稿消费语义严格对齐，无效值不报错、静默回到跟随。
+    const imageProviderId = imageProfileId && referencedProfile && rawProviderId && rawProviderId !== referencedProfile.provider &&
+      (BUILT_IN_PROVIDER_IDS.has(rawProviderId) || customProviderIds.has(rawProviderId)) &&
+      referencedProfile.providerDrafts?.[rawProviderId]
+      ? rawProviderId
+      : null
+    const normalizeSceneOverride = (value: unknown): string | null =>
+      imageProfileId && typeof value === 'string' && value.trim() ? value.trim() : null
     return {
-      imageProfileId: typeof rec.imageProfileId === 'string' && sceneProfileIds.has(rec.imageProfileId) ? rec.imageProfileId : null,
+      imageProfileId,
+      imageProviderId,
+      imageModelOverride: normalizeSceneOverride(rec.imageModelOverride),
+      imageGenerationModelOverride: normalizeSceneOverride(rec.imageGenerationModelOverride),
       textProfileId: typeof rec.textProfileId === 'string' && textCapableIds.has(rec.textProfileId) ? rec.textProfileId : null,
       saveDirectoryName: typeof rec.saveDirectoryName === 'string' && rec.saveDirectoryName ? rec.saveDirectoryName : null,
       defaults: {
@@ -899,17 +915,31 @@ export function getTextApiProfile(settings: Partial<AppSettings> | unknown): Api
 }
 
 /**
- * 场景生图解析：场景显式引用优先，干净返回该 profile 本体（不套 getActiveApiProfile
+ * 场景生图解析：场景显式引用优先，干净返回该 profile 本体（不套 GetActiveApiProfile
  * 的旧版顶层镜像字段覆盖——顶层 baseUrl/apiKey/model 只描述全局激活配置，对场景引用
  * 无意义）；无引用或引用失效时回落全局激活链（传入原始 settings，保留旧版顶层镜像
  * 覆盖，语义与直接调用 getActiveApiProfile 完全一致）。
+ * 场景引用之上再叠加三层覆盖：服务商（复用 switchApiProfileProvider，与全局切服务商
+ * 逐字段等价，含 providerDrafts 草稿存取——纯对象计算，不落 store）→ 模型 ID → 图像
+ * 生成模型。sceneId 缺省 = settings.activeScene（既有调用点零改动）。
  */
-export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
+export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown, sceneId?: SceneId): ApiProfile {
   const normalized = normalizeSettings(settings)
-  const sceneProfileId = normalized.scenes[normalized.activeScene].imageProfileId
+  const sceneSettings = normalized.scenes[sceneId ?? normalized.activeScene]
+  const sceneProfileId = sceneSettings.imageProfileId
   if (sceneProfileId) {
     const profile = normalized.profiles.find((p) => p.id === sceneProfileId)
-    if (profile) return profile
+    if (profile) {
+      const providerId = sceneSettings.imageProviderId
+      let resolved = providerId && providerId !== profile.provider
+        ? switchApiProfileProvider(profile, providerId, getCustomProviderDefinition(normalized, providerId) ?? undefined)
+        : profile
+      const modelOverride = sceneSettings.imageModelOverride?.trim()
+      if (modelOverride) resolved = { ...resolved, model: modelOverride }
+      const imageGenerationModelOverride = sceneSettings.imageGenerationModelOverride?.trim()
+      if (imageGenerationModelOverride) resolved = { ...resolved, imageGenerationModel: imageGenerationModelOverride }
+      return resolved
+    }
   }
   return getActiveApiProfile(settings)
 }
