@@ -1721,6 +1721,9 @@ export async function initStore() {
   // 页面加载/刷新：重置数据清除标志，允许从（已清空后的）IndexedDB 正常加载，
   // 并允许后续生成正常写入。
   tasksCleared = false
+  // 场景切换守卫基准：init 无 ready 门，下方多个 await 间隙 UI 可交互，用户可能切换
+  // 场景；此后的全局输入回写只服务启动时的 activeScene（见下方两处守卫）。
+  const initActiveScene = useStore.getState().settings.activeScene
   // 场景草稿迁移 + 刷新恢复：persist 恢复完成后，把全局输入归属到当前场景草稿键
   syncActiveSceneDraftFromGlobalInput()
   await refreshTaskStorageGeneration()
@@ -1834,7 +1837,13 @@ export async function initStore() {
     }
   }
   if (restoredInputImages.length !== persistedInputImages.length || restoredInputImages.some((img, index) => img.dataUrl !== persistedInputImages[index]?.dataUrl)) {
-    useStore.getState().setInputImages(restoredInputImages)
+    // init 期间已切换场景时跳过：live input 已归属新场景，把旧场景图写进来会被随后的
+    // 离场快照粘进新场景草稿。被跳过场景的图片不丢：init 开头 syncActiveSceneDraftFromGlobalInput
+    // 已把这些图的 id 归入其场景草稿，切回时 resolveSceneDraftImages 占位 +
+    // hydrateSceneDraftImages 按 id 从 IndexedDB 补回。
+    if (useStore.getState().settings.activeScene === initActiveScene) {
+      useStore.getState().setInputImages(restoredInputImages)
+    }
   }
 
   if (galleryInputDraft) {
@@ -1860,7 +1869,11 @@ export async function initStore() {
       restoredGalleryImages.length !== galleryInputDraft.inputImages.length ||
       restoredGalleryImages.some((img, index) => img.dataUrl !== galleryInputDraft.inputImages[index]?.dataUrl) ||
       shouldClearMask
-    if (galleryDraftsChanged) {
+    // 与上方 inputImages 回写同一守卫：galleryInputDraft 并非特定场景专属——它在 gallery
+    // 模式下经 syncActiveInputDraft 始终镜像 live input（persist 恢复时 prompt/inputImages
+    // 也由它派生），因此刷新后它属于启动时的 activeScene。场景已切换时新场景草稿图由
+    // setActiveScene → hydrateSceneDraftImages 恢复，此时回写旧草稿会覆盖新场景工作区。
+    if (galleryDraftsChanged && useStore.getState().settings.activeScene === initActiveScene) {
       const latestState = useStore.getState()
       const nextGalleryInputDraft = isEmptyAgentInputDraft(restoredGalleryDraft) ? null : restoredGalleryDraft
       useStore.setState({

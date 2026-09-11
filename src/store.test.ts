@@ -3942,6 +3942,65 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
     expect(useStore.getState().inputImages).toEqual([imageA])
   })
 
+  it('init 异步间隙切换场景：旧输入不写入新场景，sceneDrafts 不被污染，切回旧场景仍可恢复', async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    // 模拟刷新后的持久化形态：输入图在库中，但 live input/galleryInputDraft 只剩 id（dataUrl 被 persist 剥空）
+    await putImage({ id: imageA.id, dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
+    // 一张超过宽限期的旧孤儿图：孤儿清扫会在「捕获持久化输入之后、回写之前」多一次可拦截的 await，
+    // 用它把 initStore 暂停在异步间隙里
+    await putImage({ id: 'orphan-old', dataUrl: 'data:image/png;base64,orphan', source: 'upload', createdAt: 1 })
+    useStore.setState({
+      prompt: 'general 刷新前草稿',
+      inputImages: [{ id: imageA.id, dataUrl: '' }],
+      galleryInputDraft: {
+        prompt: 'general 刷新前草稿',
+        inputImages: [{ id: imageA.id, dataUrl: '' }],
+        maskDraft: null,
+        maskEditorImageId: null,
+      },
+      sceneDrafts: {},
+    })
+
+    let reachGate!: () => void
+    const gateReached = new Promise<void>((resolve) => { reachGate = resolve })
+    let openGate!: () => void
+    const gateOpen = new Promise<void>((resolve) => { openGate = resolve })
+    vi.mocked(deleteDbImage).mockImplementationOnce(async (id) => {
+      reachGate()
+      await gateOpen
+      await deleteDbImageImplementation(id)
+    })
+
+    const initPromise = initStore()
+    await gateReached
+    // init 暂停中：persistedInputImages/galleryInputDraft 已捕获，此刻用户点击场景 tab
+    useStore.getState().setActiveScene('portrait')
+    openGate()
+    await initPromise
+
+    // 旧 general 输入不得写进 portrait 工作区（首次进入应为空白）
+    expect(useStore.getState().inputImages).toEqual([])
+    expect(useStore.getState().prompt).toBe('')
+    // galleryInputDraft 恢复同样被跳过：保持 setActiveScene 时写入的 null（portrait 空白镜像）
+    expect(useStore.getState().galleryInputDraft).toBeNull()
+    // portrait 无草稿键，init 不得替它写入
+    expect(useStore.getState().sceneDrafts.portrait).toBeUndefined()
+    // general 草稿保持刷新前归属，未被跨场景污染
+    expect(useStore.getState().sceneDrafts.general).toMatchObject({
+      prompt: 'general 刷新前草稿',
+      inputImageIds: [imageA.id],
+    })
+
+    // 跳过全局回写不丢图：切回 general 由草稿水合路径按 id 从库中补回预览
+    useStore.getState().setActiveScene('general')
+    await vi.waitFor(() => {
+      expect(useStore.getState().inputImages).toEqual([{ id: imageA.id, dataUrl: imageA.dataUrl }])
+    })
+    expect(useStore.getState().prompt).toBe('general 刷新前草稿')
+  })
+
   it('skill 场景不保存也不载入草稿，底部输入区状态在进出时保持', () => {
     useStore.setState({
       prompt: '通用草稿',
