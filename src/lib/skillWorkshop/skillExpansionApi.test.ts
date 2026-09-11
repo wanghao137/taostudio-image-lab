@@ -129,6 +129,15 @@ describe('callSkillExpansionApi', () => {
     ).rejects.toThrow(/Skill 扩写请求超时（0\.2 秒）/)
   })
 
+  it('timeoutSecs 覆盖 profile.timeout：按覆盖值计时与报错（两段式抽取轮短预算）', async () => {
+    mockFetchAbortable()
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses', timeout: 600 })
+
+    await expect(
+      callSkillExpansionApi({ settings: DEFAULT_SETTINGS, profile, skillBody: SKILL_BODY, userInput: USER_INPUT, timeoutSecs: 0.2 }),
+    ).rejects.toThrow(/Skill 扩写请求超时（0\.2 秒）/)
+  })
+
   it('外部 abort 传递为 AbortError 而非超时文案', async () => {
     mockFetchAbortable()
     const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses', timeout: 30 })

@@ -1,5 +1,6 @@
 import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PromptHistoryEntry, SceneDraft, SceneDraftSceneId, SceneDrafts, TaskParams } from '../types'
 import { normalizeSettings } from './apiProfiles'
+import { clampSkillEntryCount, SKILL_ENTRY_COUNT_DEFAULT } from './skillWorkshop/expansion'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
 import { getPersistableInputImage, isEmptyAgentInputDraft, normalizeAgentInputDraft, saveGalleryInputDraft } from './inputDraftState'
 
@@ -130,13 +131,12 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
   }
 }
 
-/** Skill 扩写偏好归一：非法值回落默认（严格模式开、5 条），条数收口 1-10 */
+/** Skill 扩写偏好归一：非法值回落默认（严格模式开、SKILL_ENTRY_COUNT_DEFAULT 条），
+ *  条数收口复用 expansion.ts 的 SKILL_ENTRY_COUNT_MIN/MAX（clampSkillEntryCount），
+ *  与运行态/UI 输入共用同一常量出口，避免多处硬编码漂移 */
 export function normalizeSkillExpansionPrefs(value: unknown): SkillExpansionPrefs {
-  if (!isRecord(value)) return { strictMode: true, entryCount: 5 }
-  const entryCount = typeof value.entryCount === 'number' && Number.isFinite(value.entryCount)
-    ? Math.min(10, Math.max(1, Math.round(value.entryCount)))
-    : 5
-  return { strictMode: value.strictMode !== false, entryCount }
+  if (!isRecord(value)) return { strictMode: true, entryCount: SKILL_ENTRY_COUNT_DEFAULT }
+  return { strictMode: value.strictMode !== false, entryCount: clampSkillEntryCount(value.entryCount) }
 }
 
 export function normalizePromptHistory(value: unknown): PromptHistoryEntry[] {

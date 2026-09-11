@@ -133,6 +133,10 @@ let taskStorageGeneration = 0
 // customRecoveryAbortControllers 同为模块级 AbortController 既有模式。
 let skillExpansionAbortController: AbortController | null = null
 
+// 严格模式抽取轮的单次超时上限（秒）：抽取是短任务，若复用 profile.timeout（默认 600s），
+// 两段式最坏 2×600s、加校验重试 3×600s=30 分钟。成文轮/单轮/重试/reroll 仍走 profile.timeout。
+const SKILL_EXTRACTION_TIMEOUT_SECS_MAX = 120
+
 // ===== 生成并发队列 =====
 // 浏览器同源约 6 个 HTTP 连接：>6 个长耗时图像任务并发时，排队任务的超时
 // 时钟已在走但请求发不出去，最终团灭。信号量限制同时在飞的 executeTask。
@@ -1137,6 +1141,8 @@ export const useStore = create<AppState>()(
               skillBody: activeSkill.body,
               userInput: buildExtractionUserInput(userInput, entryCount),
               instructions: buildExtractionInstructions(activeSkill.body),
+              // 抽取是短任务：短预算压缩两段式+重试的最坏总时长（成文轮仍走 profile.timeout）
+              timeoutSecs: Math.min(resolution.profile.timeout, SKILL_EXTRACTION_TIMEOUT_SECS_MAX),
               signal: controller.signal,
             })
             // 仅最新一次扩写允许继续：被 abort/替换的孤儿请求后到不得再推进
@@ -1217,6 +1223,8 @@ export const useStore = create<AppState>()(
       },
       rerollSkillEntry: async (index) => {
         const state = get()
+        // 整批扩写进行中不接受单条重写：reroll 与 run 共用同一中止器，放行会互相 abort 打架
+        if (state.skillExpansion.status === 'running') return
         const entries = state.skillExpansion.entries
         if (index < 0 || index >= entries.length) return
         const activeSkill = findSkillSummary(state.skills, state.activeSkillId)
@@ -1239,9 +1247,11 @@ export const useStore = create<AppState>()(
         set((prev) => ({ skillExpansion: { ...prev.skillExpansion, rerollingEntryId: target.id } }))
         try {
           const anchorInput = state.skillInputDraft.trim()
+          // 其余条目摘要保留原编号（第 {原始下标+1} 条），与任务行「替换第 N 条」的 N 一致，
+          // 模型不因摘要重排而错位理解替换目标
           const othersSummary = entries
-            .filter((_, i) => i !== index)
-            .map((entry, i) => `${i + 1}. ${entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text}`)
+            .map((entry, i) => (i === index ? null : `第 ${i + 1} 条：${entry.text.length > 60 ? `${entry.text.slice(0, 60)}…` : entry.text}`))
+            .filter((line): line is string => line !== null)
             .join('\n')
           const rerollInput = [
             anchorInput ? `锚点要求：${anchorInput}` : null,
@@ -1259,11 +1269,14 @@ export const useStore = create<AppState>()(
           if (skillExpansionAbortController !== controller) return
           const text = parseExpansionEntries(raw)[0]?.text.trim()
           if (!text) throw new Error('重写未返回有效内容')
-          // 原位替换该条：其余条目、勾选状态与偏好均不动
+          // 原位替换该条：其余条目、勾选状态与偏好均不动；
+          // 单条成功说明扩写链路可用，一并清掉上一批残留的 warning/error
           set((prev) => ({
             skillExpansion: {
               ...prev.skillExpansion,
               rerollingEntryId: null,
+              warning: null,
+              error: null,
               entries: prev.skillExpansion.entries.map((entry) => (entry.id === target.id ? { ...entry, text } : entry)),
             },
           }))

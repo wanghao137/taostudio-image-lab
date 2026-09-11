@@ -16,6 +16,15 @@ function stripCodeFence(text: string): string {
   return (m ? m[1] : t).trim()
 }
 
+/** skill 正文里可能混入字面 `</skill>` 行（skill 文档自带示例或 prompt 注入），
+ *  包裹前进整行剔除，防止标签被提前闭合导致契约指令逃逸出 <skill> 包裹。 */
+function stripClosingSkillTagLines(skillBody: string): string {
+  return skillBody
+    .split('\n')
+    .filter((line) => !line.includes('</skill>'))
+    .join('\n')
+}
+
 function cleanParts(parts: string[]): string[] {
   return parts.map((p) => p.trim()).filter((p) => p.length >= MIN_ENTRY_LENGTH)
 }
@@ -53,7 +62,7 @@ export function buildExpansionInstructions(skillBody: string, entryCount: number
     '用户输入是对本次生成的锚点要求，优先级高于 skill 中的默认值，但不得违反 skill 的禁止事项。',
     '',
     '<skill>',
-    skillBody.trim(),
+    stripClosingSkillTagLines(skillBody).trim(),
     '</skill>',
     '',
   ]
@@ -77,7 +86,7 @@ export function buildExtractionInstructions(skillBody: string): string {
     '你是专业的图片生成提示词工程师。下面给出一份 SKILL 规范，本步骤只做变量抽取：你必须遵守 skill 的随机变量表与禁止事项，但不要输出提示词正文。',
     '',
     '<skill>',
-    skillBody.trim(),
+    stripClosingSkillTagLines(skillBody).trim(),
     '</skill>',
     '',
     '抽取契约（必须满足）：',
