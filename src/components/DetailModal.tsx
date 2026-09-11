@@ -1273,7 +1273,7 @@ export default function DetailModal() {
                 API 返回比例与目标比例不同，已保持几何比例后处理。
               </div>
             )}
-            {currentActualParams?.quality != null && currentActualParams.quality !== task.params.quality && (
+            {currentActualParams?.quality != null && task.params.quality !== 'auto' && currentActualParams.quality !== task.params.quality && (
               <div className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
                 质量档已被服务端改写为「{currentActualParams.quality}」（部分网关/通道会改写质量档，详见服务行为说明）。
               </div>
