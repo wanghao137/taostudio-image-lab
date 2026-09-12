@@ -8,6 +8,7 @@ import { hasActiveDataOperations } from './lib/dataOperations'
 import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
 import { migratePersistedState } from './lib/persistedState'
+import { BUILTIN_SKILL_IDS } from './lib/skillWorkshop/builtinSkills'
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -4417,7 +4418,10 @@ describe('Skill 工坊 store 链', () => {
 
     await useStore.getState().loadBuiltinSkills()
 
-    expect(useStore.getState().skills.builtin.map((skill) => skill.id)).toEqual([BUILTIN_SKILL_B])
+    // A 失败被静默跳过，清单中其余 skill（含后续新增内置）全部照常加载且保持清单顺序
+    expect(useStore.getState().skills.builtin.map((skill) => skill.id)).toEqual(
+      BUILTIN_SKILL_IDS.filter((id) => id !== BUILTIN_SKILL_A),
+    )
     expect(useStore.getState().skills.builtinLoading).toBe(false)
   })
 

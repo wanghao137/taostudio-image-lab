@@ -7,7 +7,14 @@
 
 import { parseSkillMarkdown, type ParsedSkillMarkdown } from './skillMarkdown'
 
-export const BUILTIN_SKILL_IDS = ['vibeshot-candid-photography', 'voyeur-style-photographer'] as const
+export const BUILTIN_SKILL_IDS = [
+  'vibeshot-candid-photography',
+  'voyeur-style-photographer',
+  'character-candid-photography',
+  'summer-boyfriend-pov',
+  'shan-ze-school',
+  'rare-style-explorer',
+] as const
 
 export async function loadBuiltinSkill(id: string): Promise<ParsedSkillMarkdown | null> {
   try {

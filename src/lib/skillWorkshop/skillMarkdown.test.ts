@@ -29,6 +29,29 @@ describe('parseSkillMarkdown', () => {
     expect(r.title).toBeUndefined()
     expect(r.name).toBe('my-skill')
   })
+  it('嵌套 metadata 块：未知键与缩进子键被忽略，不影响 name/title/description', () => {
+    // vsc-skills 源文件的 frontmatter 带 metadata 嵌套块，解析器必须原样容错（安装诚实性依赖）
+    const md = [
+      '---',
+      'name: rare-style-explorer',
+      'title: 稀有风格探索',
+      'description: 探索稀有风格。',
+      'metadata:',
+      '  vsc-category: "风格探索"',
+      '  vsc-deliverables: "prompt"',
+      '---',
+      '',
+      '# 标题',
+      '',
+      '正文',
+    ].join('\n')
+    const r = parseSkillMarkdown(md, 'fallback')!
+    expect(r.name).toBe('rare-style-explorer')
+    expect(r.title).toBe('稀有风格探索')
+    expect(r.description).toBe('探索稀有风格。')
+    expect(r.body).toContain('# 标题')
+    expect(r.body).toContain('正文')
+  })
   it('无 frontmatter：name=fallback，body=全文', () => {
     const r = parseSkillMarkdown('就是一段提示词体系', 'my-skill')!
     expect(r.name).toBe('my-skill')
