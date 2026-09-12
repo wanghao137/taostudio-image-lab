@@ -51,8 +51,8 @@ try {
 
   // 检查点2: Skill 工坊 lazy 视图在位 + 工坊内场景设置抽屉四分区
   // 工坊视图是 lazy chunk、内置 skill 列表也要异步 fetch：轮询最多 5s，
-  // 缺失只 fail 不抛异常，避免中断后续检查点。扩写入口两种形态都容忍：
-  // 有文本 profile → 「扩写提示词」按钮；无 profile → noProfile 引导文案。
+  // 缺失只 fail 不抛异常，避免中断后续检查点。生成入口两种形态都容忍：
+  // 有文本 profile → 「一键生成图片」主按钮；无 profile → noProfile 引导文案。
   await page.getByRole('button', { name: 'Skill 工坊', exact: true }).first().click()
   let bodyWorkshop = ''
   for (let i = 0; i < 20; i++) {
@@ -61,7 +61,7 @@ try {
     if ((await page.getByRole('heading', { name: 'Skill 工坊' }).count()) && bodyWorkshop.includes('vibeshot-candid-photography')) break
   }
   if (!(await page.getByRole('heading', { name: 'Skill 工坊' }).count())) fail('工坊 lazy 视图未加载（「Skill 工坊」标题缺失）')
-  if (!(bodyWorkshop.includes('扩写提示词') || bodyWorkshop.includes('未找到可用的文本模型配置'))) fail('工坊扩写入口缺失（既无「扩写提示词」也无 noProfile 引导文案）')
+  if (!(bodyWorkshop.includes('一键生成图片') || bodyWorkshop.includes('未找到可用的文本模型配置'))) fail('工坊生成入口缺失（既无「一键生成图片」也无 noProfile 引导文案）')
   if (!bodyWorkshop.includes('vibeshot-candid-photography')) fail('内置 skill 名缺失: vibeshot-candid-photography')
   await page.screenshot({ path: `${screenshotDir}/scene-smoke-skill-workshop.png` })
   const workshopGear = page.getByRole('button', { name: '场景设置' }).first()
