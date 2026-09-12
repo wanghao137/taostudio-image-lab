@@ -8,6 +8,7 @@ import { hasActiveDataOperations } from './lib/dataOperations'
 import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
 import { migratePersistedState } from './lib/persistedState'
+import { BUILTIN_SKILL_IDS } from './lib/skillWorkshop/builtinSkills'
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -4378,6 +4379,7 @@ describe('Skill 工坊 store 链', () => {
       activeSkillId: null,
       skillInputDraft: '',
       skillExpansion: makeSkillExpansionState(),
+      oneClickPhase: 'idle',
     })
   })
 
@@ -4417,7 +4419,10 @@ describe('Skill 工坊 store 链', () => {
 
     await useStore.getState().loadBuiltinSkills()
 
-    expect(useStore.getState().skills.builtin.map((skill) => skill.id)).toEqual([BUILTIN_SKILL_B])
+    // A 失败被静默跳过，清单中其余 skill（含后续新增内置）全部照常加载且保持清单顺序
+    expect(useStore.getState().skills.builtin.map((skill) => skill.id)).toEqual(
+      BUILTIN_SKILL_IDS.filter((id) => id !== BUILTIN_SKILL_A),
+    )
     expect(useStore.getState().skills.builtinLoading).toBe(false)
   })
 
@@ -4809,6 +4814,98 @@ describe('Skill 工坊 store 链', () => {
     expect(tasks[0].prompt).toBe('第一条生成提示词')
     expect(useStore.getState().showToast).toHaveBeenCalledWith('已提交 0 个生成任务（第 1 条提交失败）', 'error')
     expect(useStore.getState().showToast).not.toHaveBeenCalledWith('已提交 2 个生成任务', 'success')
+  })
+
+  it('oneClickGenerateFromSkill：成功路径 = 扩写 → 全部启用 → 逐条生成，阶段结束回 idle', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'p', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, textApiProfileId: profile.id, activeScene: 'skill' }),
+      prompt: '',
+      params: { ...DEFAULT_PARAMS },
+      inputImages: [],
+      maskDraft: null,
+      tasks: [],
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '锚点输入原文',
+      skillExpansion: makeSkillExpansionState({ strictMode: false, entries: [{ id: 'stale', text: '上一批残留', enabled: false }] }),
+      showToast: vi.fn(),
+    })
+    vi.mocked(callSkillExpansionApi).mockResolvedValueOnce('### 01\n一键第一条提示词\n\n### 02\n一键第二条提示词')
+
+    await useStore.getState().oneClickGenerateFromSkill()
+
+    expect(callSkillExpansionApi).toHaveBeenCalledTimes(1)
+    const tasks = useStore.getState().tasks
+    expect(tasks.map((task) => task.prompt)).toEqual(['一键第二条提示词', '一键第一条提示词'])
+    // 全部条目被启用（含扩写新产物），供用户事后查看/再生成
+    expect(useStore.getState().skillExpansion.entries.every((entry) => entry.enabled)).toBe(true)
+    expect(useStore.getState().oneClickPhase).toBe('idle')
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('已提交 2 个生成任务', 'success')
+  })
+
+  it('oneClickGenerateFromSkill：扩写失败即停止，不提交任何生成任务', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'p', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, textApiProfileId: profile.id, activeScene: 'skill' }),
+      tasks: [],
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '锚点输入原文',
+      skillExpansion: makeSkillExpansionState({ strictMode: false }),
+      showToast: vi.fn(),
+    })
+    vi.mocked(callSkillExpansionApi).mockRejectedValueOnce(new Error('Skill 扩写接口未返回文本内容'))
+
+    await useStore.getState().oneClickGenerateFromSkill()
+
+    expect(useStore.getState().tasks).toHaveLength(0)
+    expect(useStore.getState().skillExpansion.status).toBe('error')
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('生成提示词失败：Skill 扩写接口未返回文本内容', 'error')
+    expect(useStore.getState().oneClickPhase).toBe('idle')
+  })
+
+  it('oneClickGenerateFromSkill：缺输入或已在编排中时守卫返回，不调扩写', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'p', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, textApiProfileId: profile.id, activeScene: 'skill' }),
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '   ',
+      skillExpansion: makeSkillExpansionState(),
+      showToast: vi.fn(),
+    })
+
+    await useStore.getState().oneClickGenerateFromSkill()
+    expect(callSkillExpansionApi).not.toHaveBeenCalled()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('请先描述你想要的画面（可点击「试试」示例快速填入）', 'error')
+
+    // 编排进行中（expanding）：直接返回，不重复触发
+    useStore.setState({ oneClickPhase: 'expanding', skillInputDraft: '有内容' })
+    await useStore.getState().oneClickGenerateFromSkill()
+    expect(callSkillExpansionApi).not.toHaveBeenCalled()
+    expect(useStore.getState().oneClickPhase).toBe('expanding')
+  })
+
+  it('oneClickGenerateFromSkill：扩写被中止（abort）后静默停止，不提交生成', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'p', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, textApiProfileId: profile.id, activeScene: 'skill' }),
+      tasks: [],
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '锚点输入原文',
+      skillExpansion: makeSkillExpansionState({ strictMode: false }),
+      showToast: vi.fn(),
+    })
+    // 模拟用户点「停止」：扩写被 abort 后 runSkillExpansion 以 error 收场且无条目
+    vi.mocked(callSkillExpansionApi).mockRejectedValueOnce(new DOMException('The operation was aborted.', 'AbortError'))
+
+    await useStore.getState().oneClickGenerateFromSkill()
+
+    expect(useStore.getState().tasks).toHaveLength(0)
+    expect(useStore.getState().skillExpansion.entries).toHaveLength(0)
+    expect(useStore.getState().oneClickPhase).toBe('idle')
   })
 
   it('importSkillsRootDirectory：选目录后扫描一级子目录 SKILL.md 并持久化句柄', async () => {

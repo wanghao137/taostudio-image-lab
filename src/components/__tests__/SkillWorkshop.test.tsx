@@ -100,7 +100,7 @@ describe('SkillWorkshop', () => {
     expect(screen.getByText('我的本地 Skill')).toBeTruthy()
     expect(screen.getByText('导入目录')).toBeTruthy()
     expect(screen.getByText('重新扫描')).toBeTruthy()
-    const anchor = screen.getByLabelText('锚点输入') as HTMLTextAreaElement
+    const anchor = screen.getByLabelText('描述你想要的画面') as HTMLTextAreaElement
     expect(anchor.value).toBe('主题：夜市人像')
 
     // 扩写结果条目与生成按钮计数（2 条全部启用）
@@ -215,7 +215,7 @@ describe('SkillWorkshop', () => {
     seedStore({ withTextProfile: false })
     render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
 
-    expect(screen.queryByRole('button', { name: '扩写提示词' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '先看提示词' })).toBeNull()
     expect(screen.getByText('未找到可用的文本模型配置（需 Responses 类型），可在设置→API 中添加')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: '打开设置' }))
@@ -238,6 +238,35 @@ describe('SkillWorkshop', () => {
 
     fireEvent.click(screen.getByText('内置 skill 加载失败，点击重试'))
     expect(loadBuiltinSkills).toHaveBeenCalled()
+  })
+
+  it('一键生成主 CTA、示例 chips 点击填入与高级选项折叠', () => {
+    const SKILL_SHANZE: SkillSummary = {
+      id: 'shan-ze-school',
+      name: 'shan-ze-school',
+      title: '山海经水墨幻想',
+      description: '东方神怪水墨风格',
+      source: 'builtin',
+      body: '# 正文 D',
+    }
+    seedStore()
+    useStore.setState({
+      skills: { ...useStore.getState().skills, builtin: [...useStore.getState().skills.builtin, SKILL_SHANZE] },
+      activeSkillId: SKILL_SHANZE.id,
+      skillInputDraft: '',
+    })
+    const oneClick = vi.spyOn(useStore.getState(), 'oneClickGenerateFromSkill').mockResolvedValue(undefined)
+    render(<SkillWorkshop onOpenSceneSettings={() => {}} />)
+
+    // 主 CTA 与高级选项折叠 summary（默认严格模式 · 5 条）
+    expect(screen.getByRole('button', { name: '一键生成图片' })).toBeTruthy()
+    expect(screen.getByText(/高级选项（当前：严格模式 · 5 条）/)).toBeTruthy()
+
+    // 示例 chips（内置 id 才有）：点击整行填入输入框，主 CTA 随之可用
+    fireEvent.click(screen.getByRole('button', { name: '山海经毕方鸟' }))
+    expect(useStore.getState().skillInputDraft).toBe('山海经毕方鸟')
+    fireEvent.click(screen.getByRole('button', { name: '一键生成图片' }))
+    expect(oneClick).toHaveBeenCalledTimes(1)
   })
 
   it('未绑定本地目录时不显示「清除」按钮', () => {

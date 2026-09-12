@@ -511,6 +511,9 @@ interface AppState {
   updateSkillEntry: (id: string, patch: Partial<Pick<SkillExpansionEntry, 'text' | 'enabled'>>) => void
   removeSkillEntry: (id: string) => void
   generateFromSkillEntries: () => Promise<void>
+  /** 一键生成编排阶段（idle/expanding/generating）：扩写 → 全部启用 → 生成，失败即停 */
+  oneClickPhase: 'idle' | 'expanding' | 'generating'
+  oneClickGenerateFromSkill: () => Promise<void>
 
   // 搜索和筛选
   searchQuery: string
@@ -1069,6 +1072,7 @@ export const useStore = create<AppState>()(
       activeSkillId: null,
       skillInputDraft: '',
       skillExpansion: makeSkillExpansionState(),
+      oneClickPhase: 'idle',
       loadBuiltinSkills: async () => {
         set((state) => ({ skills: { ...state.skills, builtinLoading: true } }))
         const loaded = await Promise.all(BUILTIN_SKILL_IDS.map(async (id): Promise<SkillSummary | null> => {
@@ -1189,7 +1193,7 @@ export const useStore = create<AppState>()(
           }
           const warnings = [
             ...(degraded ? ['严格模式变量抽取解析失败，已回退单轮扩写'] : []),
-            ...(reasons.length ? [`扩写可能不符合 skill 规范（${reasons.join('；')}），可点击「扩写提示词」重试`] : []),
+            ...(reasons.length ? [`扩写可能不符合 skill 规范（${reasons.join('；')}），可点击「先看提示词」重试`] : []),
           ]
           set((prev) => ({
             skillExpansion: resetSkillExpansion(prev.skillExpansion, {
@@ -1345,6 +1349,43 @@ export const useStore = create<AppState>()(
         }
         const submitted = useStore.getState().tasks.length - taskCountBefore
         state.showToast(`已提交 ${submitted} 个生成任务`, submitted > 0 ? 'success' : 'error')
+      },
+
+      // 一键生成：扩写（用户偏好：严格模式/条数）→ 条目全部启用 → 复用生成链路。
+      // 编排层不绕过任何既有守卫：runSkillExpansion 本身不 toast，失败/被停止在此 toast 一次并停，
+      // 生成阶段复用 generateFromSkillEntries 自身的校验与逐条提交语义。
+      oneClickGenerateFromSkill: async () => {
+        const state = get()
+        if (state.oneClickPhase !== 'idle' || state.skillExpansion.status === 'running') return
+        if (!findSkillSummary(state.skills, state.activeSkillId)) {
+          state.showToast('请先在左侧选择一个风格技能', 'error')
+          return
+        }
+        if (!state.skillInputDraft.trim()) {
+          state.showToast('请先描述你想要的画面（可点击「试试」示例快速填入）', 'error')
+          return
+        }
+        set({ oneClickPhase: 'expanding' })
+        try {
+          await state.runSkillExpansion()
+          const afterExpand = get()
+          if (afterExpand.skillExpansion.status === 'error' || !afterExpand.skillExpansion.entries.length) {
+            if (afterExpand.skillExpansion.error) {
+              afterExpand.showToast(`生成提示词失败：${afterExpand.skillExpansion.error}`, 'error')
+            }
+            return
+          }
+          const { entries } = afterExpand.skillExpansion
+          if (entries.some((entry) => !entry.enabled)) {
+            set((prev) => ({
+              skillExpansion: { ...prev.skillExpansion, entries: prev.skillExpansion.entries.map((entry) => ({ ...entry, enabled: true })) },
+            }))
+          }
+          set({ oneClickPhase: 'generating' })
+          await get().generateFromSkillEntries()
+        } finally {
+          set({ oneClickPhase: 'idle' })
+        }
       },
 
       // Search & Filter

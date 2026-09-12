@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Loader2, RefreshCw, Settings2, Sparkles, Trash2, Upload } from 'lucide-react'
 import { useStore } from '../store'
 import { getSceneTextApiProfileResolution } from '../lib/apiProfiles'
+import { BUILTIN_SKILL_EXAMPLE_ANCHORS } from '../lib/skillWorkshop/builtinSkills'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
 import { Checkbox } from './Checkbox'
 import type { SkillSummary, TaskRecord } from '../types'
@@ -17,9 +18,9 @@ const ANCHOR_TEXTAREA_CLASS_NAME = 'mt-1.5 w-full resize-y rounded-xl border bor
 const ENTRY_TEXTAREA_CLASS_NAME = 'min-w-0 flex-1 resize-y rounded-lg border border-transparent bg-transparent px-2 py-1.5 text-[13px] leading-relaxed text-stone-700 outline-none transition focus:border-stone-300 dark:text-stone-200 dark:focus:border-white/[0.15]'
 
 /**
- * Skill 工坊（第 4 场景）：左列内置/本地 skill 列表，右列锚点输入 → 文本模型
- * 扩写 → 逐条编辑/勾选 → 批量生成，底部最近生成缩略条（sceneId=skill）。
- * 状态全部来自 store（Task 4 状态机），本组件只做展示与接线。
+ * Skill 工坊（第 4 场景）：左列内置/本地 skill 列表，右列「描述想法 → 一键生成」
+ * 主路径（扩写编排见 store.oneClickGenerateFromSkill）与「先看提示词」手动次路径，
+ * 底部最近生成缩略条（sceneId=skill）。状态全部来自 store，本组件只做展示与接线。
  */
 export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
   const skills = useStore((s) => s.skills)
@@ -41,6 +42,8 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const updateSkillEntry = useStore((s) => s.updateSkillEntry)
   const removeSkillEntry = useStore((s) => s.removeSkillEntry)
   const generateFromSkillEntries = useStore((s) => s.generateFromSkillEntries)
+  const oneClickPhase = useStore((s) => s.oneClickPhase)
+  const oneClickGenerateFromSkill = useStore((s) => s.oneClickGenerateFromSkill)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setShowSettings = useStore((s) => s.setShowSettings)
 
@@ -65,6 +68,10 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const expansionRunning = skillExpansion.status === 'running'
   const rerollingEntryId = skillExpansion.rerollingEntryId
   const enabledCount = useMemo(() => skillExpansion.entries.filter((entry) => entry.enabled).length, [skillExpansion.entries])
+  // 一键生成编排进行中（扩写/生成任一阶段）：主路径按钮统一忙态
+  const oneClickBusy = oneClickPhase !== 'idle'
+  // 内置 skill 的示例锚点（本地 skill 无示例不显示 chips）
+  const exampleAnchors = activeSkill ? BUILTIN_SKILL_EXAMPLE_ANCHORS[activeSkill.id] ?? null : null
   // 扩写链路与反推同源：场景文本覆盖 > 全局文本自动链（E. 模型透明化：展示生效档案与模型）
   const textProfile = useMemo(() => getSceneTextApiProfileResolution(settings).profile, [settings])
   const hasTextProfile = textProfile !== null
@@ -102,7 +109,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                   key={skill.id}
                   skill={skill}
                   active={skill.id === activeSkillId}
-                  disabled={expansionRunning}
+                  disabled={expansionRunning || oneClickBusy}
                   onSelect={() => setActiveSkill(skill.id)}
                 />
               ))
@@ -126,7 +133,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                     key={skill.id}
                     skill={skill}
                     active={skill.id === activeSkillId}
-                    disabled={expansionRunning}
+                    disabled={expansionRunning || oneClickBusy}
                     onSelect={() => setActiveSkill(skill.id)}
                   />
                 ))}
@@ -189,18 +196,38 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
             {activeSkill?.description && (
               <p className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">{activeSkill.description}</p>
             )}
+            {recentSkillTasks.length === 0 && !skillInputDraft.trim() && (
+              <p className={`${HINT_CLASS_NAME} mt-1.5`}>① 左侧选风格 → ② 点「试试」示例或输入想法 → ③ 点一键生成</p>
+            )}
           </div>
 
           <div>
-            <span className={SECTION_TITLE_CLASS_NAME}>锚点输入</span>
+            <span className={SECTION_TITLE_CLASS_NAME}>描述你想要的画面</span>
             <textarea
-              aria-label="锚点输入"
+              aria-label="描述你想要的画面"
               value={skillInputDraft}
               onChange={(event) => setSkillInputDraft(event.target.value)}
               rows={3}
-              placeholder="输入角色名 / 主题 / 场景设定，例如：一位穿校服的少女在夜市散步"
+              placeholder={exampleAnchors?.[0] ?? '一句话描述即可，例如：一位穿校服的少女在夜市散步'}
               className={ANCHOR_TEXTAREA_CLASS_NAME}
             />
+            <p className={`${HINT_CLASS_NAME} mt-1`}>一句话描述即可，AI 会按所选风格帮你写好完整提示词并生成图片</p>
+            {exampleAnchors && (
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <span className={HINT_CLASS_NAME}>试试：</span>
+                {exampleAnchors.map((example) => (
+                  <button
+                    key={example}
+                    type="button"
+                    onClick={() => setSkillInputDraft(example)}
+                    disabled={oneClickBusy || expansionRunning}
+                    className="rounded-full border border-stone-200/80 bg-white/60 px-2.5 py-1 text-xs text-stone-600 transition-colors hover:border-[#df7b57]/40 hover:text-[#b4552f] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-300 dark:hover:border-[#ffb096]/40 dark:hover:text-[#ffb096]"
+                  >
+                    {example}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {!hasTextProfile ? (
@@ -218,45 +245,69 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
           ) : (
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                {/* 主 CTA：一键生成（扩写 → 全部启用 → 生成，编排见 store.oneClickGenerateFromSkill） */}
                 <button
                   type="button"
-                  onClick={() => { void runSkillExpansion() }}
-                  disabled={expansionRunning || !activeSkill || !skillInputDraft.trim()}
+                  onClick={() => { void oneClickGenerateFromSkill() }}
+                  disabled={oneClickBusy || expansionRunning || !activeSkill || !skillInputDraft.trim()}
                   className={PRIMARY_BUTTON_CLASS_NAME}
                 >
-                  {expansionRunning
+                  {oneClickBusy
                     ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
                     : <Sparkles className="h-4 w-4" aria-hidden />}
-                  {expansionRunning
-                    ? (skillExpansion.phase === 'extracting' ? '抽取变量中…' : '扩写中…')
-                    : '扩写提示词'}
+                  {oneClickPhase === 'expanding'
+                    ? (skillExpansion.phase === 'extracting' ? '抽取变量中…' : '正在生成提示词…')
+                    : oneClickPhase === 'generating' ? '正在提交生成…'
+                    : '一键生成图片'}
                 </button>
-                {expansionRunning && (
+                {oneClickPhase === 'expanding' && skillExpansion.status === 'running' && (
                   <button type="button" onClick={abortSkillExpansion} className={SECONDARY_BUTTON_CLASS_NAME}>
                     停止
                   </button>
                 )}
-                {/* 严格模式（两段式：先抽变量再逐条成文）+ 期望条数 */}
-                <Checkbox
-                  checked={skillExpansion.strictMode}
-                  onChange={(checked) => setSkillExpansionPrefs({ strictMode: checked })}
-                  label="严格模式"
-                  aria-label="严格模式"
-                  className="ml-auto"
-                />
-                <select
-                  value={skillExpansion.entryCount}
-                  onChange={(event) => setSkillExpansionPrefs({ entryCount: Number(event.target.value) })}
-                  disabled={expansionRunning}
-                  aria-label="扩写条数"
-                  title="扩写条数"
-                  className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
+                {/* 次路径：只扩写出条目，先看/先编辑再手动生成 */}
+                <button
+                  type="button"
+                  onClick={() => { void runSkillExpansion() }}
+                  disabled={oneClickBusy || expansionRunning || !activeSkill || !skillInputDraft.trim()}
+                  className={SECONDARY_BUTTON_CLASS_NAME}
                 >
-                  {Array.from({ length: 10 }, (_, i) => i + 1).map((count) => (
-                    <option key={count} value={count}>{count} 条</option>
-                  ))}
-                </select>
+                  {expansionRunning && oneClickPhase === 'idle'
+                    ? (skillExpansion.phase === 'extracting' ? '抽取变量中…' : '扩写中…')
+                    : '先看提示词'}
+                </button>
+                {expansionRunning && oneClickPhase === 'idle' && (
+                  <button type="button" onClick={abortSkillExpansion} className={SECONDARY_BUTTON_CLASS_NAME}>
+                    停止
+                  </button>
+                )}
               </div>
+              {/* 高级选项（默认收起）：严格模式（两段式：先抽变量再逐条成文）+ 期望条数 */}
+              <details className="group">
+                <summary className="inline-flex cursor-pointer select-none items-center gap-1 text-xs text-stone-500 transition-colors hover:text-stone-700 dark:text-stone-400 dark:hover:text-stone-200 [&::-webkit-details-marker]:hidden">
+                  高级选项（当前：{skillExpansion.strictMode ? '严格模式' : '普通模式'} · {skillExpansion.entryCount} 条）
+                </summary>
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <Checkbox
+                    checked={skillExpansion.strictMode}
+                    onChange={(checked) => setSkillExpansionPrefs({ strictMode: checked })}
+                    label="严格模式"
+                    aria-label="严格模式"
+                  />
+                  <select
+                    value={skillExpansion.entryCount}
+                    onChange={(event) => setSkillExpansionPrefs({ entryCount: Number(event.target.value) })}
+                    disabled={expansionRunning || oneClickBusy}
+                    aria-label="扩写条数"
+                    title="扩写条数"
+                    className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
+                  >
+                    {Array.from({ length: 10 }, (_, i) => i + 1).map((count) => (
+                      <option key={count} value={count}>{count} 条</option>
+                    ))}
+                  </select>
+                </div>
+              </details>
               {/* E. 扩写模型透明化：显示当前生效的文本档案与模型（场景覆盖优先，其次全局文本链） */}
               {textProfile && (
                 <p className={HINT_CLASS_NAME}>
@@ -304,7 +355,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                   <button
                     type="button"
                     onClick={() => { void rerollSkillEntry(index) }}
-                    disabled={expansionRunning || rerollingEntryId !== null}
+                    disabled={oneClickBusy || expansionRunning || rerollingEntryId !== null}
                     aria-label={`重写条目 ${index + 1}`}
                     title={rerollingEntryId === entry.id ? '重写中…' : '重写：重新生成这一条'}
                     className="mt-1 shrink-0 rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/[0.08] dark:hover:text-stone-200"
@@ -328,11 +379,12 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
           )}
 
           <div>
+            {/* 次路径的生成入口（「先看提示词」后手动勾选/编辑再用）；一键路径见上方主 CTA */}
             <button
               type="button"
               onClick={() => { void generateFromSkillEntries() }}
-              disabled={enabledCount === 0}
-              className={PRIMARY_BUTTON_CLASS_NAME}
+              disabled={enabledCount === 0 || oneClickBusy}
+              className={SECONDARY_BUTTON_CLASS_NAME}
             >
               <Sparkles className="h-4 w-4" aria-hidden />
               生成 {enabledCount} 张图片
