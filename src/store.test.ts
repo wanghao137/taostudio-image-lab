@@ -4379,6 +4379,7 @@ describe('Skill 工坊 store 链', () => {
       activeSkillId: null,
       skillInputDraft: '',
       skillExpansion: makeSkillExpansionState(),
+      oneClickPhase: 'idle',
     })
   })
 
@@ -4884,6 +4885,27 @@ describe('Skill 工坊 store 链', () => {
     await useStore.getState().oneClickGenerateFromSkill()
     expect(callSkillExpansionApi).not.toHaveBeenCalled()
     expect(useStore.getState().oneClickPhase).toBe('expanding')
+  })
+
+  it('oneClickGenerateFromSkill：扩写被中止（abort）后静默停止，不提交生成', async () => {
+    const profile = createDefaultOpenAIProfile({ id: 'p', apiKey: 'test-key', apiMode: 'responses' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, textApiProfileId: profile.id, activeScene: 'skill' }),
+      tasks: [],
+      skills: { ...useStore.getState().skills, builtin: [skillSummary()] },
+      activeSkillId: 'builtin-skill',
+      skillInputDraft: '锚点输入原文',
+      skillExpansion: makeSkillExpansionState({ strictMode: false }),
+      showToast: vi.fn(),
+    })
+    // 模拟用户点「停止」：扩写被 abort 后 runSkillExpansion 以 error 收场且无条目
+    vi.mocked(callSkillExpansionApi).mockRejectedValueOnce(new DOMException('The operation was aborted.', 'AbortError'))
+
+    await useStore.getState().oneClickGenerateFromSkill()
+
+    expect(useStore.getState().tasks).toHaveLength(0)
+    expect(useStore.getState().skillExpansion.entries).toHaveLength(0)
+    expect(useStore.getState().oneClickPhase).toBe('idle')
   })
 
   it('importSkillsRootDirectory：选目录后扫描一级子目录 SKILL.md 并持久化句柄', async () => {

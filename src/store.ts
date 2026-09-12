@@ -1193,7 +1193,7 @@ export const useStore = create<AppState>()(
           }
           const warnings = [
             ...(degraded ? ['严格模式变量抽取解析失败，已回退单轮扩写'] : []),
-            ...(reasons.length ? [`扩写可能不符合 skill 规范（${reasons.join('；')}），可点击「扩写提示词」重试`] : []),
+            ...(reasons.length ? [`扩写可能不符合 skill 规范（${reasons.join('；')}），可点击「先看提示词」重试`] : []),
           ]
           set((prev) => ({
             skillExpansion: resetSkillExpansion(prev.skillExpansion, {
@@ -1352,7 +1352,7 @@ export const useStore = create<AppState>()(
       },
 
       // 一键生成：扩写（用户偏好：严格模式/条数）→ 条目全部启用 → 复用生成链路。
-      // 编排层不绕过任何既有守卫：扩写失败/被停止即停（错误已在 skillExpansion.error 展示并 toast），
+      // 编排层不绕过任何既有守卫：runSkillExpansion 本身不 toast，失败/被停止在此 toast 一次并停，
       // 生成阶段复用 generateFromSkillEntries 自身的校验与逐条提交语义。
       oneClickGenerateFromSkill: async () => {
         const state = get()

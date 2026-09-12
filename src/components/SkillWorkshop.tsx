@@ -109,7 +109,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                   key={skill.id}
                   skill={skill}
                   active={skill.id === activeSkillId}
-                  disabled={expansionRunning}
+                  disabled={expansionRunning || oneClickBusy}
                   onSelect={() => setActiveSkill(skill.id)}
                 />
               ))
@@ -133,7 +133,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                     key={skill.id}
                     skill={skill}
                     active={skill.id === activeSkillId}
-                    disabled={expansionRunning}
+                    disabled={expansionRunning || oneClickBusy}
                     onSelect={() => setActiveSkill(skill.id)}
                   />
                 ))}
@@ -249,7 +249,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                 <button
                   type="button"
                   onClick={() => { void oneClickGenerateFromSkill() }}
-                  disabled={oneClickBusy || !activeSkill || !skillInputDraft.trim()}
+                  disabled={oneClickBusy || expansionRunning || !activeSkill || !skillInputDraft.trim()}
                   className={PRIMARY_BUTTON_CLASS_NAME}
                 >
                   {oneClickBusy
@@ -355,7 +355,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                   <button
                     type="button"
                     onClick={() => { void rerollSkillEntry(index) }}
-                    disabled={expansionRunning || rerollingEntryId !== null}
+                    disabled={oneClickBusy || expansionRunning || rerollingEntryId !== null}
                     aria-label={`重写条目 ${index + 1}`}
                     title={rerollingEntryId === entry.id ? '重写中…' : '重写：重新生成这一条'}
                     className="mt-1 shrink-0 rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/[0.08] dark:hover:text-stone-200"
