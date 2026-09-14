@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { calculateImageSize, normalizeCodexCliImageSize, prependCodexCliSizePrompt, stripInjectedCodexCliSizePrompt } from './size'
+import {
+  calculateImageSize,
+  normalizeCodexCliImageSize,
+  normalizeImageSize,
+  prependCodexCliSizePrompt,
+  resolveExactDeliverySize,
+  stripInjectedCodexCliSizePrompt,
+} from './size'
 
 describe('calculateImageSize', () => {
   it('uses common 16:9 display resolutions for the built-in tiers', () => {
@@ -55,5 +62,38 @@ describe('Codex CLI size compatibility', () => {
     expect(stripInjectedCodexCliSizePrompt('Generate at 2048x2048 resolution. Draw a cat.', 'Draw a cat.', '1024x1024')).toBe('Generate at 2048x2048 resolution. Draw a cat.')
     expect(stripInjectedCodexCliSizePrompt('Generate at 1024x1024 resolution. Draw a cat.', 'Generate at 1024x1024 resolution. Draw a cat.', '1024x1024')).toBe('Generate at 1024x1024 resolution. Draw a cat.')
     expect(stripInjectedCodexCliSizePrompt('Generate at 1024x1024 resolution. Draw a cat.', 'Draw a cat.', 'auto')).toBe('Generate at 1024x1024 resolution. Draw a cat.')
+  })
+})
+
+describe('resolveExactDeliverySize (Provider Request Size ≠ Production Target)', () => {
+  it('maps the normalized 4:5 form back to the exact preset target 2400x3000', () => {
+    // 尺寸弹窗归一化把 4:5 4K 变成 2400x3008（16 倍数是 Provider 约束）；
+    // 交付目标必须严格回到预设原始值 2400x3000
+    expect(normalizeImageSize('2400x3000')).toBe('2400x3008')
+    expect(resolveExactDeliverySize('2400x3008')).toEqual({ width: 2400, height: 3000 })
+    expect(resolveExactDeliverySize('2400x3000')).toEqual({ width: 2400, height: 3000 })
+  })
+
+  it('maps the normalized 21:9 forms back to their exact preset targets across tiers', () => {
+    expect(normalizeImageSize('3840x1646')).toBe('3840x1648')
+    expect(resolveExactDeliverySize('3840x1648')).toEqual({ width: 3840, height: 1646 })
+    expect(normalizeImageSize('2560x1097')).toBe('2560x1104')
+    expect(resolveExactDeliverySize('2560x1104')).toEqual({ width: 2560, height: 1097 })
+  })
+
+  it('passes through preset sizes that are already 16-multiples unchanged', () => {
+    expect(resolveExactDeliverySize('3840x2160')).toEqual({ width: 3840, height: 2160 })
+    expect(resolveExactDeliverySize('3456x2304')).toEqual({ width: 3456, height: 2304 })
+    expect(resolveExactDeliverySize('2400x3200')).toEqual({ width: 2400, height: 3200 })
+    expect(resolveExactDeliverySize('2160x3840')).toEqual({ width: 2160, height: 3840 })
+  })
+
+  it('keeps custom sizes that do not match any preset as-is', () => {
+    expect(resolveExactDeliverySize('2000x3008')).toEqual({ width: 2000, height: 3008 })
+  })
+
+  it('returns null for auto or unparseable sizes', () => {
+    expect(resolveExactDeliverySize('auto')).toBeNull()
+    expect(resolveExactDeliverySize('garbage')).toBeNull()
   })
 })

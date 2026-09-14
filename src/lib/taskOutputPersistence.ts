@@ -10,7 +10,7 @@ import { cacheImage, cacheThumbnail, pinQuotaImage, deleteImageCacheEntry } from
 import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './exactImageSize'
 import { removeKeyedBackgroundFromDataUrl } from './transparentImage'
 import { getInputRatioDeviation } from './inputPreprocess'
-import { parseImageSize } from './size'
+import { resolveExactDeliverySize } from './size'
 import type { ExactSizeTransformRecord } from '../types'
 
 /** 第二层兜底：非 exact_size 任务返回图比例与请求比例的相对偏差阈值 */
@@ -35,8 +35,9 @@ export async function storeGeneratedOutputImage(
   const targetSize = getExactImageSizeTarget(params)
   // exact_size 走既有无条件重采样管线；非 exact_size 且请求了具体尺寸时，
   // 仅当返回比例偏差 >5% 才做本地 cover 校正（比例已匹配的返回不动）。
+  // 校正目标同样经 resolveExactDeliverySize 解析到预设精确比例（P0-B）。
   const ratioCorrectionTarget = !targetSize && options.ratioAutoCorrect && params.size !== 'auto'
-    ? parseImageSize(params.size)
+    ? resolveExactDeliverySize(params.size)
     : null
 
   // 先落盘原始输出：既拿到真实像素尺寸用于比例判定，也天然保留 provider 原图
@@ -80,6 +81,9 @@ export async function storeGeneratedOutputImage(
           drawWidth: resized.drawPlan.drawWidth,
           drawHeight: resized.drawPlan.drawHeight,
           aspectMismatch: resized.drawPlan.aspectMismatch,
+          resizerBackend: resized.resizerBackend,
+          ...(resized.resizerFallbackReason ? { resizerFallbackReason: resized.resizerFallbackReason } : {}),
+          ...(resized.encoderFallbackReason ? { encoderFallbackReason: resized.encoderFallbackReason } : {}),
         }
       }
     }
@@ -120,6 +124,9 @@ export async function storeGeneratedOutputImage(
     id: storedOutput.id,
     dataUrl: outputDataUrl,
     size: storedOutput,
+    // provider 原始输出像素（exact_size 本地放大/比例校正之前）——能力观测的
+    // 数据源；注意 `size` 是后处理后的交付尺寸，二者在 exact_size 任务上不同
+    rawSize: { width: stored.width, height: stored.height },
     exactSizeOriginalImageId,
     exactSizeTransform,
     ratioCorrected,
@@ -136,6 +143,7 @@ export async function storeTaskOutputImages(
   const outputIds: string[] = []
   const outputDataUrls: string[] = []
   const outputImageSizes: Array<{ width?: number; height?: number }> = []
+  const outputRawImageSizes: Array<{ width?: number; height?: number }> = []
   const transparentOriginalImageIds: string[] = []
   const exactSizeOriginalImageIds: string[] = []
   const exactSizeTransforms: Record<string, ExactSizeTransformRecord> = {}
@@ -180,6 +188,7 @@ export async function storeTaskOutputImages(
           outputIds.push(originalId)
           outputDataUrls.push(dataUrl)
           outputImageSizes.push(originalSize)
+          outputRawImageSizes.push(originalSize)
           transparentOriginalImageIds.push('')
           continue
         }
@@ -191,6 +200,7 @@ export async function storeTaskOutputImages(
       outputIds.push(stored.id)
       outputDataUrls.push(stored.dataUrl)
       outputImageSizes.push(stored.size)
+      outputRawImageSizes.push(stored.rawSize)
       if (trackExactSizeOriginalImages) {
         exactSizeOriginalImageIds.push(stored.exactSizeOriginalImageId)
       }
@@ -203,6 +213,7 @@ export async function storeTaskOutputImages(
       outputIds,
       outputDataUrls,
       outputImageSizes,
+      outputRawImageSizes,
       transparentOriginalImageIds: transparentOriginalImageIds.length ? transparentOriginalImageIds : undefined,
       exactSizeOriginalImageIds: exactSizeOriginalImageIds.some(Boolean) ? exactSizeOriginalImageIds : undefined,
       exactSizeTransforms: Object.keys(exactSizeTransforms).length ? exactSizeTransforms : undefined,

@@ -53,6 +53,7 @@ import {
   validateImageJobRequest,
   verifySourceFinalInvariant,
 } from '../../packages/image-job-core/index.mjs'
+import { resizeProductionAsset, resolveImageMagick } from './resampler/index.mjs'
 import {
   buildQaRevisionPrompt,
   classifyQaVerdict,
@@ -2599,16 +2600,34 @@ export class TaskWorkerPool {
       if (!target || !ratioMatchesExactly(sourceDimensions, target)) {
         throw Object.assign(new Error('inherit ratio conflict'), { retryable: false })
       }
-      const finalBuffer = await sharp(sourceBuffer)
-        .resize(target.width, target.height, { fit: 'cover', position: 'centre', kernel: sharp.kernel.lanczos3 })
-        .png()
-        .toBuffer()
+      // Production 4K v2：final 资产升级到统一 Production Resampler——
+      // ImageMagick EWA（pinned sidecar）优先，sharp 确定性回退；transform 记录
+      // backend/filter/crop/fallback 与 pixelSha256，任何降级不再静默。
+      // resize 期间注册 AbortController：cancel during resize 可即时中止子进程。
+      const resizeController = new AbortController()
+      this.controllers.set(jobId, resizeController)
+      let resamplerResult
+      try {
+        resamplerResult = await resizeProductionAsset({
+          sourceBuffer,
+          source: sourceDimensions,
+          target,
+          contentClass: request.output.contentClass ?? 'photo',
+          profile: 'auto',
+          tmpRoot: join(this.assetRoot, 'tmp'),
+          signal: resizeController.signal,
+        })
+      } finally {
+        this.controllers.delete(jobId)
+      }
 
       this.repository.transition(jobId, 'finalizing')
       stage = 'finalizing'
-      const finalManifest = await this.createStoredAsset(jobId, 'final', finalBuffer, sourceManifest.assetId, {
+      const finalManifest = await this.createStoredAsset(jobId, 'final', resamplerResult.buffer, sourceManifest.assetId, {
         geometry: 'inherit', exactPixels: target, requestedEnhancement: request.output.enhancement,
         appliedEnhancement: policy.selected === 'lanczos3' ? 'lanczos3' : 'lanczos3-fallback',
+        resampler: resamplerResult.transform,
+        pixelSha256: resamplerResult.pixelSha256,
       })
       const invariant = verifySourceFinalInvariant(sourceManifest, finalManifest)
       if (!invariant.valid) throw Object.assign(new Error(invariant.errors.join('; ')), { retryable: false })
@@ -3059,7 +3078,17 @@ export async function createTaskApi(options = {}) {
         return
       }
       if (request.method === 'GET' && url.pathname === '/v1/capabilities') {
-        return void json(response, 200, taskApiCapabilities(options.providerConfig))
+        const payload = taskApiCapabilities(options.providerConfig)
+        const imageMagick = await resolveImageMagick()
+        payload.capabilities.output.resampler = {
+          productionBackend: imageMagick ? 'imagemagick-ewa' : 'sharp',
+          fallbackBackend: 'sharp',
+          deterministic: true,
+          imageMagick: imageMagick
+            ? { available: true, version: imageMagick.version, source: imageMagick.source ?? 'pinned-sidecar' }
+            : { available: false },
+        }
+        return void json(response, 200, payload)
       }
       if (request.method === 'GET' && url.pathname === '/v1/image-jobs') {
         const state = url.searchParams.get('state')

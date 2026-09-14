@@ -1273,6 +1273,24 @@ export default function DetailModal() {
                       </span>
                     </div>
                   </div>
+                  {currentExactSizeTransform.resizerBackend && (
+                    <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2 min-w-0 overflow-hidden">
+                      <span className="text-gray-400 dark:text-gray-500">处理器</span>
+                      <br />
+                      <div
+                        className="mt-0.5 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2"
+                        title={[currentExactSizeTransform.resizerFallbackReason, currentExactSizeTransform.encoderFallbackReason].filter(Boolean).join('\n') || undefined}
+                      >
+                        {currentExactSizeTransform.resizerBackend === 'browser-lanczos3' && !currentExactSizeTransform.encoderFallbackReason ? (
+                          <span className="font-medium text-gray-700 dark:text-gray-300">Lanczos3 · 本地</span>
+                        ) : currentExactSizeTransform.resizerBackend === 'browser-canvas' ? (
+                          <span className="font-medium text-amber-600 dark:text-amber-400">Canvas · 兼容回退</span>
+                        ) : (
+                          <span className="font-medium text-amber-600 dark:text-amber-400">编码回退 · PNG</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
               {inputPreprocessPolicy && (

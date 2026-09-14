@@ -1,6 +1,7 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
 import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
 import { getImageGenerationModel, isGptImage25Model } from './imageModels'
+import { resolveProviderRequestSizePolicy } from './providerCapability'
 import { calculateImageSize, normalizeCodexCliImageSize, normalizeImageSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
@@ -12,11 +13,10 @@ export function getOutputImageLimitForSettings(settings: AppSettings) {
 }
 
 /**
- * 把「发给 API 的请求尺寸」帽到网关真实渲染能力（1K 档，同比例）。
- * 2026-08-14 探针实测：网关对 4K 提示词/2K size 参数均只返回 1536x1024 原生图——
- * 请求大尺寸买不到额外像素，只换来更大 payload 与超时风险。exact_size 的
- * 4K 目标仍由 task.params.size 保留，本地放大（resizeImageDataUrlToExactSize）
- * 负责到达；这里只收口请求侧。比例保持不变，仅缩放请求底图。
+ * 把「发给 API 的请求尺寸」帽到 1K 档（同比例）。仅在该配置的能力档案
+ * （providerCapability）证明「强请求持续被压回 ~1K」时调用——请求大尺寸
+ * 买不到额外像素，只换来更大 payload 与超时风险。exact_size 的 4K 目标仍由
+ * task.params.size 保留，本地放大（resizeImageDataUrlToExactSize）负责到达。
  */
 function capRequestSizeToTier(size: string): string {
   const normalized = normalizeImageSize(size)
@@ -52,10 +52,16 @@ export function normalizeParamsForSettings(
     nextParams.quality = DEFAULT_PARAMS.quality
   }
 
-  // 非 codexCli 的 openai 兼容路径：exact_size（4K 资产）请求侧收到 1K 档底图。
-  // nativeLargeOutput 的服务商（真实支持大尺寸原生输出）可按 profile 跳过收口。
+  // 非 codexCli 的 openai 路径：exact_size（4K 资产）请求侧尺寸按能力档案自适应。
+  // 2026-09-11 实测 /v1/images/generations 的 size 真实生效（不同网关能力不同），
+  // 不再按 provider 一律收口 1K（2026-08-14 的全局假设已过时）；仅当该配置的
+  // 观测历史证明「强请求持续被压回 ~1K 档」时才收口（capRequestSizeToTier），
+  // nativeLargeOutput=true 仍为显式「支持大尺寸」豁免。4K 目标由 task.params.size
+  // 保留，本地放大负责到达；这里只影响请求侧底图档位。
   if (options.capRequestSize && activeProfile.provider === 'openai' && !activeProfile.codexCli && nextParams.exact_size && !activeProfile.nativeLargeOutput) {
-    nextParams.size = capRequestSizeToTier(nextParams.size)
+    if (resolveProviderRequestSizePolicy(activeProfile) === 'cap-1k') {
+      nextParams.size = capRequestSizeToTier(nextParams.size)
+    }
   }
 
   if (activeProfile.provider === 'fal') {

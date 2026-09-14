@@ -97,21 +97,53 @@ async function resizeWithCanvas(dataUrl: string, targetW: number, targetH: numbe
   }), 'image/png')
 }
 
+export type ResizeBackend = 'browser-lanczos3' | 'browser-canvas'
+
+export interface HighQualityResizeResult {
+  dataUrl: string
+  /** 实际执行重采样的后端 */
+  backend: ResizeBackend
+  /** 请求的后端（当前固定 Worker lanczos3；canvas 只是兼容回退） */
+  requestedBackend: ResizeBackend
+  /** Worker 失败/超时/不可用时回退 canvas 的原因（未回退则无此字段） */
+  fallbackReason?: string
+}
+
 /**
- * 高质量重采样入口：优先 Worker lanczos3（不阻塞 UI），失败回退 canvas。
+ * 高质量重采样入口（带后端元数据）：优先 Worker lanczos3（不阻塞 UI），
+ * 失败回退 canvas。回退不再静默——结果携带 backend 与 fallbackReason，
+ * 由调用方写入任务记录（Production 4K 禁止 silent quality downgrade）。
  * 注意：与旧实现不同，这里 cover 裁切发生在 raw 原图上（单次重采样），
  * 不再有"先规格化到 1K 再放大"的两次重采样路径。
  */
+export async function resizeImageHighQualityDetailed(
+  dataUrl: string,
+  targetW: number,
+  targetH: number,
+  fitMode: 'cover' | 'contain' = 'cover',
+): Promise<HighQualityResizeResult> {
+  try {
+    const resized = await resizeWithWorker(dataUrl, targetW, targetH, fitMode)
+    return { dataUrl: resized, backend: 'browser-lanczos3', requestedBackend: 'browser-lanczos3' }
+  } catch (error) {
+    const fallbackReason = error instanceof Error ? error.message : String(error)
+    console.warn('lanczos Worker 重采样失败，回退 canvas（backend 元数据已记录）', error)
+    const resized = await resizeWithCanvas(dataUrl, targetW, targetH, fitMode)
+    return {
+      dataUrl: resized,
+      backend: 'browser-canvas',
+      requestedBackend: 'browser-lanczos3',
+      fallbackReason,
+    }
+  }
+}
+
+/** 兼容入口：只关心像素、不关心后端元数据的调用方（如反推前规格化）。 */
 export async function resizeImageHighQuality(
   dataUrl: string,
   targetW: number,
   targetH: number,
   fitMode: 'cover' | 'contain' = 'cover',
 ): Promise<string> {
-  try {
-    return await resizeWithWorker(dataUrl, targetW, targetH, fitMode)
-  } catch (error) {
-    console.warn('lanczos Worker 重采样失败，回退 canvas', error)
-    return resizeWithCanvas(dataUrl, targetW, targetH, fitMode)
-  }
+  return (await resizeImageHighQualityDetailed(dataUrl, targetW, targetH, fitMode)).dataUrl
 }

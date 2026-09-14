@@ -1,7 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+// 全量并发下的环境慢化余量
+vi.setConfig({ testTimeout: 30_000 })
 import {
   executeImageTask,
   getImageAssetManifest,
@@ -9,6 +11,10 @@ import {
   listImageJobs,
 } from '../../src/lib/imageTaskApi.ts'
 import { createTaskApi } from './service.mjs'
+
+// 与 service.test.mjs 同策略：测试统一禁用 ImageMagick sidecar 走 sharp 毫秒级
+// 回退（真实 EWA 由 resampler.test.mjs 覆盖），避免 4K EWA 拖爆 5s 用例超时。
+process.env.TAOSTUDIO_IMAGE_MAGICK = '0'
 
 let instance
 

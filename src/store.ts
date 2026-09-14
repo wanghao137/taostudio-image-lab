@@ -73,6 +73,7 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
+import { recordProviderSizeObservation } from './lib/providerCapability'
 import { buildNativeTransparentPrompt, createTransparentOutputMeta, getTransparentRequestParams } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, getCachedImage, getUnpinnedQuotaImageIds, pinQuotaImage, scheduleThumbnailBackfill } from './lib/imageCache'
@@ -2540,9 +2541,29 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     }
 
     // 存储输出图片
-    const { outputIds, outputDataUrls, outputImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
+    const { outputIds, outputDataUrls, outputImageSizes, outputRawImageSizes, transparentOriginalImageIds, exactSizeOriginalImageIds, exactSizeTransforms, ratioCorrected, persistFailedCount } = await storeTaskOutputImages(task, result.images, deleteUnreferencedImageIds, {
       ratioAutoCorrect: settings.ratioAutoCorrect,
     })
+    // Provider 原生尺寸能力观测（P0-A）：记录「请求了多少 vs 实际返回多少」，
+    // 供 resolveProviderRequestSizePolicy 自适应决定下次请求档位。仅纯文生图
+    // + openai 非 codexCli 链路（编辑链路输出画幅锁定输入图尺寸，观测会被污染）。
+    // 必须用 rawSize：outputImageSizes 是 exact_size 本地放大/比例校正之后的
+    // 交付尺寸，用它会把「provider 压图」误判成「大尺寸生效」（对抗审查场景3）。
+    if (taskProvider === 'openai' && !executionProfile.codexCli && inputDataUrls.length === 0) {
+      const requestedSize = parseImageSize(providerParams.size)
+      const observedSize = outputRawImageSizes.find(
+        (size) => typeof size.width === 'number' && typeof size.height === 'number',
+      )
+      if (requestedSize && observedSize?.width && observedSize?.height) {
+        recordProviderSizeObservation({
+          profile: executionProfile,
+          requestedWidth: requestedSize.width,
+          requestedHeight: requestedSize.height,
+          observedWidth: observedSize.width,
+          observedHeight: observedSize.height,
+        })
+      }
+    }
     const isAsyncCustomTask = taskProvider !== 'fal' && taskProvider !== 'openai' && Boolean(customTaskInfo)
     const resolvedActualParamsList = await resolveImageSizeParamsList(
       outputDataUrls,

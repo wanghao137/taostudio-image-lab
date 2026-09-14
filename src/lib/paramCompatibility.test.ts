@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
-import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
+import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, getActiveApiProfile, normalizeSettings } from './apiProfiles'
+import { clearProviderCapabilityStore, recordProviderSizeObservation } from './providerCapability'
 import { getOutputImageLimitForSettings, normalizeParamsForSettings } from './paramCompatibility'
 
 describe('parameter compatibility', () => {
@@ -97,15 +98,20 @@ describe('capRequestSize (non-codexCli exact-size 4K asset requests)', () => {
     activeProfileId: profile.id,
   })
 
-  it('caps exact-size 4K request size to the 1K tier while keeping the ratio', () => {
-    const capped = normalizeParamsForSettings(
+  beforeEach(() => {
+    clearProviderCapabilityStore()
+  })
+
+  it('requests the full exact size by default (no blanket 1K cap without evidence)', () => {
+    const requested = normalizeParamsForSettings(
       { ...DEFAULT_PARAMS, size: '3456x2304', exact_size: true },
       settings,
       { capRequestSize: true },
     )
-    // 1K 档 3:2 预设 = 1536x1024，恰好也是探针实测的网关原生能力
-    expect(capped.size).toBe('1536x1024')
-    expect(capped.exact_size).toBe(true)
+    // 2026-09-11 实测 images 通道 size 真实生效；未观测到「压图」证据时
+    // 不再按 provider 全局假设收口到 1K 档
+    expect(requested.size).toBe('3456x2304')
+    expect(requested.exact_size).toBe(true)
   })
 
   it('does not touch request size without capRequestSize (legacy behavior)', () => {
@@ -121,19 +127,83 @@ describe('capRequestSize (non-codexCli exact-size 4K asset requests)', () => {
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: 'auto' }, settings, { capRequestSize: true }).size).toBe('auto')
   })
 
-  it('caps vertical and square 4K targets and keeps already-1K sizes unchanged', () => {
-    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2304x3456', exact_size: true }, settings, { capRequestSize: true }).size).toBe('1024x1536')
-    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2880x2880', exact_size: true }, settings, { capRequestSize: true }).size).toBe('1024x1024')
+  it('caps to the 1K tier when observations prove the provider clamps large requests', () => {
+    const active = getActiveApiProfile(settings)
+    // 两次强请求（4K 3:2）都被压回 ~1K 档（1536x1024）
+    for (let i = 0; i < 2; i += 1) {
+      recordProviderSizeObservation({
+        profile: active,
+        requestedWidth: 3456,
+        requestedHeight: 2304,
+        observedWidth: 1536,
+        observedHeight: 1024,
+      })
+    }
+    expect(normalizeParamsForSettings(
+      { ...DEFAULT_PARAMS, size: '3456x2304', exact_size: true },
+      settings,
+      { capRequestSize: true },
+    ).size).toBe('1536x1024')
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '1536x1024', exact_size: true }, settings, { capRequestSize: true }).size).toBe('1536x1024')
   })
 
+  it('keeps the full request when observations prove the provider honors large sizes', () => {
+    const active = getActiveApiProfile(settings)
+    recordProviderSizeObservation({
+      profile: active,
+      requestedWidth: 3456,
+      requestedHeight: 2304,
+      observedWidth: 1536,
+      observedHeight: 1024,
+    })
+    recordProviderSizeObservation({
+      profile: active,
+      requestedWidth: 3456,
+      requestedHeight: 2304,
+      observedWidth: 3456,
+      observedHeight: 2304,
+    })
+    expect(normalizeParamsForSettings(
+      { ...DEFAULT_PARAMS, size: '2304x3456', exact_size: true },
+      settings,
+      { capRequestSize: true },
+    ).size).toBe('2304x3456')
+  })
+
+  it('does not let a single clamp observation flip the policy (needs >= 2)', () => {
+    const active = getActiveApiProfile(settings)
+    recordProviderSizeObservation({
+      profile: active,
+      requestedWidth: 3456,
+      requestedHeight: 2304,
+      observedWidth: 1536,
+      observedHeight: 1024,
+    })
+    expect(normalizeParamsForSettings(
+      { ...DEFAULT_PARAMS, size: '3456x2304', exact_size: true },
+      settings,
+      { capRequestSize: true },
+    ).size).toBe('3456x2304')
+  })
+
   it('skips the cap when the profile declares nativeLargeOutput', () => {
+    const activeOf = (s: ReturnType<typeof normalizeSettings>) => getActiveApiProfile(s)
     const largeProfile = createDefaultOpenAIProfile({ apiKey: 'test-key', codexCli: false, nativeLargeOutput: true })
     const largeSettings = normalizeSettings({
       ...DEFAULT_SETTINGS,
       profiles: [largeProfile],
       activeProfileId: largeProfile.id,
     })
+    // 即便能力档案里有压图证据，显式声明优先生效
+    for (let i = 0; i < 2; i += 1) {
+      recordProviderSizeObservation({
+        profile: activeOf(largeSettings),
+        requestedWidth: 3456,
+        requestedHeight: 2304,
+        observedWidth: 1536,
+        observedHeight: 1024,
+      })
+    }
     expect(normalizeParamsForSettings(
       { ...DEFAULT_PARAMS, size: '3456x2304', exact_size: true },
       largeSettings,

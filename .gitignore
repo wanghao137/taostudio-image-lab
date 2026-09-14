@@ -43,3 +43,8 @@ docs/upstream-upgrade-report.md
 *.sw?
 
 .vercel
+
+# Production 4K v2 — ImageMagick pinned sidecar（二进制不入库；版本锚定见 tools/imagemagick/VERSION.md）
+tools/imagemagick/*
+!tools/imagemagick/VERSION.md
+!tools/imagemagick/README.md

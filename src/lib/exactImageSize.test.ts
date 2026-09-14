@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { computeExactSizeDrawPlan, getExactImageCanonicalSourceSize } from './exactImageSize'
+import { computeExactSizeDrawPlan, getExactImageCanonicalSourceSize, getExactImageSizeTarget } from './exactImageSize'
 
 describe('getExactImageCanonicalSourceSize', () => {
   it('keeps an already exact-ratio source unchanged', () => {
@@ -21,6 +21,25 @@ describe('getExactImageCanonicalSourceSize', () => {
       { width: 1915, height: 821 },
       { width: 3840, height: 1646 },
     )).toEqual({ width: 1920, height: 823 })
+  })
+})
+
+describe('getExactImageSizeTarget (delivery size decoupling)', () => {
+  it('resolves the normalized request form to the exact preset delivery target', () => {
+    // 请求侧 2400x3008（16 倍数）→ 交付 2400x3000（预设原始精确值）
+    expect(getExactImageSizeTarget({ size: '2400x3008', exact_size: true })).toEqual({ width: 2400, height: 3000 })
+    expect(getExactImageSizeTarget({ size: '3840x1648', exact_size: true })).toEqual({ width: 3840, height: 1646 })
+  })
+
+  it('keeps already-exact preset sizes and standard 16-multiple presets unchanged', () => {
+    expect(getExactImageSizeTarget({ size: '2400x3000', exact_size: true })).toEqual({ width: 2400, height: 3000 })
+    expect(getExactImageSizeTarget({ size: '3840x2160', exact_size: true })).toEqual({ width: 3840, height: 2160 })
+    expect(getExactImageSizeTarget({ size: '2400x3200', exact_size: true })).toEqual({ width: 2400, height: 3200 })
+  })
+
+  it('returns null for auto size or when exact_size is off', () => {
+    expect(getExactImageSizeTarget({ size: 'auto', exact_size: true })).toBeNull()
+    expect(getExactImageSizeTarget({ size: '2400x3008', exact_size: false })).toBeNull()
   })
 })
 

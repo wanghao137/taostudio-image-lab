@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "task-api": "node server/task-api/cli.mjs",
     "benchmark:4k": "node scripts/benchmark-4k-quality.mjs",
+    "benchmark:4k:v2": "node scripts/benchmark-4k-v2.mjs",
     "smoke:task-api:real": "node scripts/smoke-task-api-real.mjs",
     "test:external-agent": "node scripts/test-external-agent-mcp.mjs",
     "start:local": "vite --host 127.0.0.1 --port 9527",

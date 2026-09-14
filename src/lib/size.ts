@@ -1,4 +1,4 @@
-import { calculateImageSize as calculateCoreImageSize } from '../../packages/image-job-core/index.mjs'
+import { COMMON_SIZE_PRESETS, calculateImageSize as calculateCoreImageSize } from '../../packages/image-job-core/index.mjs'
 
 const SIZE_PATTERN = /^\s*(\d+)\s*[xX×]\s*(\d+)\s*$/
 const RATIO_PATTERN = /^\s*(\d+(?:\.\d+)?)\s*[:xX×]\s*(\d+(?:\.\d+)?)\s*$/
@@ -223,4 +223,39 @@ export function formatImageRatio(width: number, height: number) {
 
 export function calculateImageSize(tier: SizeTier, ratio: string) {
   return calculateCoreImageSize(tier, ratio)
+}
+
+/**
+ * 交付尺寸解析：Provider Request Size ≠ Production Target Size（P0-B）。
+ * 请求侧尺寸经 normalizeImageSize 归一化为 16 倍数（Provider 约束，如官方
+ * OpenAI 要求 width/height 为 16 的倍数）；但最终生产资产没有该约束——
+ * 4:5 4K 的交付目标必须严格是预设原始值 2400x3000，而不是 2400x3008。
+ *
+ * 规则：若入参尺寸归一化后与某档预设的归一化形态一致，则返回该预设的
+ * 原始精确值（预设表本身就是各比例的精确整数目标）；否则原样返回（自定义
+ * 尺寸保持用户输入的归一化值）。预设表（engine 直发 provider 的唯一真源）
+ * 本身不做任何改动。
+ */
+let deliverySizeByNormalized: Map<string, ImageSize> | null = null
+
+function buildDeliverySizeIndex(): Map<string, ImageSize> {
+  const index = new Map<string, ImageSize>()
+  for (const tierPresets of Object.values(COMMON_SIZE_PRESETS)) {
+    for (const preset of Object.values(tierPresets)) {
+      const normalized = normalizeImageSize(preset)
+      const parsed = parseImageSize(preset)
+      if (normalized && parsed && !index.has(normalized)) {
+        index.set(normalized, parsed)
+      }
+    }
+  }
+  return index
+}
+
+export function resolveExactDeliverySize(size: string): ImageSize | null {
+  const parsed = parseImageSize(size)
+  if (!parsed) return null
+  if (!deliverySizeByNormalized) deliverySizeByNormalized = buildDeliverySizeIndex()
+  const normalized = normalizeImageSize(size)
+  return (normalized && deliverySizeByNormalized.get(normalized)) || parsed
 }

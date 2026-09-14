@@ -253,6 +253,12 @@ export interface ExactSizeTransformRecord {
   drawWidth: number
   drawHeight: number
   aspectMismatch: boolean
+  /** 实际执行重采样的后端：browser-lanczos3（HQ）或 browser-canvas（兼容回退） */
+  resizerBackend?: 'browser-lanczos3' | 'browser-canvas'
+  /** Worker → canvas 回退原因（禁止静默质量降级，供详情页展示） */
+  resizerFallbackReason?: string
+  /** JPEG/WebP 编码失败回退 PNG 的原因（像素已保住，仅格式降级） */
+  encoderFallbackReason?: string
 }
 
 export type RefusalRecoveryTriggerCategory =

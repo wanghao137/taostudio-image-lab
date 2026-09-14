@@ -240,6 +240,14 @@ vi.mock('./lib/transparentImage', () => ({
   buildNativeTransparentPrompt: vi.fn((prompt: string) => `${prompt}\n\n背景必须完全透明`),
   removeKeyedBackgroundFromDataUrl: vi.fn(async (dataUrl: string) => `transparent:${dataUrl}`),
 }))
+// Provider 能力观测在 store 集成测试里 mock 掉：真实模块的内存兜底会在
+// 同文件用例间累积观测，让 normalizeParamsForSettings 的请求档位判定互相污染。
+// resolveProviderRequestSizePolicy 必须一并提供——paramCompatibility（未被 mock）
+// 也从该模块导入，缺了会让整条执行链抛 TypeError。
+vi.mock('./lib/providerCapability', () => ({
+  recordProviderSizeObservation: vi.fn(),
+  resolveProviderRequestSizePolicy: () => 'full',
+}))
 vi.mock('./lib/exactImageSize', () => ({
   getExactImageSizeTarget: vi.fn((params: { size: string; exact_size: boolean }) => {
     if (!params.exact_size || params.size === 'auto') return null
@@ -343,6 +351,7 @@ import { resizeImageDataUrlToExactSize } from './lib/exactImageSize'
 import { preprocessInputImagesForTarget } from './lib/inputPreprocess'
 import { formatExportFileTime } from './lib/exportFileName'
 import { calculateImageSize } from './lib/size'
+import { recordProviderSizeObservation } from './lib/providerCapability'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
@@ -1280,6 +1289,50 @@ describe('mask draft lifecycle in store actions', () => {
       width: 1254,
       height: 1254,
     })
+    await clearTasks()
+    await clearImages()
+  })
+
+  it('records provider capability observations with raw provider pixels on exact-size tasks (not the locally upscaled delivery size)', async () => {
+    const { callImageApi } = await import('./lib/api')
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(recordProviderSizeObservation).mockClear()
+    // 压图网关：请求 4:5 4K（2400x3008），provider 只回 1024x1280
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,actual-1024x1280'],
+      actualParams: { output_format: 'png', quality: 'high', size: '1024x1280' },
+      actualParamsList: [{ output_format: 'png', quality: 'high', size: '1024x1280' }],
+      revisedPrompts: [],
+    })
+    const openAIProfile = createDefaultOpenAIProfile({ id: 'gallery-openai-profile', apiKey: 'test-key' })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [openAIProfile],
+        activeProfileId: openAIProfile.id,
+      }),
+      prompt: 'poster',
+      params: {
+        ...DEFAULT_PARAMS,
+        size: '2400x3008',
+        exact_size: true,
+        quality: 'high',
+        output_format: 'png',
+      },
+    })
+
+    await submitTask()
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // 观测必须是 provider 原始像素（1024x1280），不是本地放大后的交付尺寸
+    // （2400x3000/3008）——否则压图网关会被误判为「大尺寸生效」（对抗审查场景3）
+    expect(recordProviderSizeObservation).toHaveBeenCalledTimes(1)
+    expect(recordProviderSizeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      requestedWidth: 2400,
+      requestedHeight: 3008,
+      observedWidth: 1024,
+      observedHeight: 1280,
+    }))
     await clearTasks()
     await clearImages()
   })

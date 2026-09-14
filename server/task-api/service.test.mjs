@@ -5,8 +5,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import sharp from 'sharp'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createTaskApi, TaskRepository } from './service.mjs'
+
+// 服务层测试统一禁用 ImageMagick sidecar，走 sharp 确定性回退（毫秒级，
+// 与本文件改造前的 resize 行为等价）：真实 EWA 路径由 resampler.test.mjs
+// 专项覆盖（本机有 sidecar 时全量跑 EWA 断言）。
+process.env.TAOSTUDIO_IMAGE_MAGICK = '0'
+// mock 任务全链路（SQLite + sharp + HTTP）在全量并发下偶发超 5s 默认超时
+vi.setConfig({ testTimeout: 30_000 })
 
 const running = []
 const providerServers = []
@@ -1147,6 +1154,15 @@ describe('local Image Task API', { testTimeout: 30_000 }, () => {
     expect(finalManifest).toMatchObject({ kind: 'final', width: 2160, height: 3840, ratio: '9:16', parentAssetId: job.sourceAssetId })
     expect(finalBuffer.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a')
     expect(createHash('sha256').update(finalBuffer).digest('hex')).toBe(finalManifest.sha256)
+    // Production 4K v2：final manifest 必须带 resampler transform 与 pixel hash
+    //（本文件禁用 sidecar → sharp 确定性回退；EWA 断言在 resampler.test.mjs）
+    expect(finalManifest.transform.resampler).toMatchObject({
+      backend: 'sharp',
+      method: 'tensor',
+      target: { width: 2160, height: 3840 },
+      fallback: { requested: 'imagemagick-ewa', reason: 'imagemagick-unavailable' },
+    })
+    expect(finalManifest.transform.pixelSha256).toMatch(/^[a-f0-9]{64}$/)
   })
 
   it('deduplicates concurrent creates and rejects key reuse with different input', async () => {

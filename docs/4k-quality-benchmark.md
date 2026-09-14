@@ -1,4 +1,12 @@
-# 4K Quality Benchmark
+# 4K Quality Benchmark（v1 — 已停用为生产决策依据）
+
+> **状态（2026-09-14）**：本基准存在循环偏置（sharp lanczos3 自造退化再自恢复）、
+> 全图单值 SSIM、样本仅 3 张等方法学问题，**不再作为生产决策依据**，仅保留作
+> 历史记录。生产决策请使用 **v2**：`npm run benchmark:4k:v2` +
+> [4k-quality-benchmark-v2.md](./4k-quality-benchmark-v2.md)。
+> v1 的「Default: deterministic Sharp lanczos3」结论已被 Production 4K v2 取代
+> （引擎默认 ImageMagick EWA LanczosSharp，sharp 仅为确定性回退；libvips 放大时
+> lanczos3 kernel 实际映射为 cubic 插值）。
 
 ## Decision
 
