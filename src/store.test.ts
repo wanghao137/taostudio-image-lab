@@ -4091,26 +4091,45 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
     expect(useStore.getState().prompt).toBe('general 刷新前草稿')
   })
 
-  it('skill 场景不保存也不载入草稿，底部输入区状态在进出时保持', () => {
+  it('skill 场景草稿只存 params：进出时底部输入区保持，参数随场景隔离', () => {
     useStore.setState({
       prompt: '通用草稿',
-      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      params: { ...DEFAULT_PARAMS, quality: 'high', size: '1152x2048' },
       inputImages: [imageA],
     })
 
     useStore.getState().setActiveScene('skill')
-    // skill 有独立输入区：全局输入原样保留，不存草稿键
+    // skill 输入区独立：全局输入原样保留；但参数首次进入以 skill defaults 初始化（本例无 defaults → DEFAULT）
     expect(useStore.getState().prompt).toBe('通用草稿')
-    expect(useStore.getState().params.quality).toBe('high')
     expect(useStore.getState().inputImages).toEqual([imageA])
-    expect((useStore.getState().sceneDrafts as Record<string, unknown>).skill).toBeUndefined()
+    expect(useStore.getState().params.size).toBe(DEFAULT_PARAMS.size)
 
+    // 工坊内选尺寸（写入 params）→ 切走 → 草稿只存 params（prompt/输入图为空）→ 切回恢复
+    useStore.getState().setParams({ size: '1152x2048' })
     useStore.getState().setActiveScene('general')
-    // 离开 skill 没有保存草稿；进入 general 恢复的是离开 general 时保存的草稿
+    const skillDraft = useStore.getState().sceneDrafts.skill
+    expect(skillDraft).toBeDefined()
+    expect(skillDraft?.prompt).toBe('')
+    expect(skillDraft?.inputImageIds).toEqual([])
+    expect(skillDraft?.params.size).toBe('1152x2048')
+    // 回到 general：恢复的是离开 general 时保存的草稿（含原 prompt/输入图/尺寸）
     expect(useStore.getState().prompt).toBe('通用草稿')
-    expect(useStore.getState().params.quality).toBe('high')
-    expect(useStore.getState().inputImages).toEqual([imageA])
-    expect(Object.keys(useStore.getState().sceneDrafts)).not.toContain('skill')
+    expect(useStore.getState().params.size).toBe('1152x2048')
+
+    // general 里改尺寸不污染 skill 草稿：切回 skill 后仍是工坊自己选的尺寸
+    useStore.getState().setParams({ size: '1024x1024' })
+    useStore.getState().setActiveScene('skill')
+    expect(useStore.getState().params.size).toBe('1152x2048')
+    expect(useStore.getState().prompt).toBe('通用草稿')
+  })
+
+  it('skill 场景 defaults（画幅/档位）在首次进入工坊时生效', () => {
+    useStore.getState().setSceneDefaults('skill', { ratio: '9:16', tier: '2K' })
+    useStore.setState({ params: { ...DEFAULT_PARAMS, size: '1024x1024' } })
+
+    useStore.getState().setActiveScene('skill')
+
+    expect(useStore.getState().params.size).toBe(calculateImageSize('2K', '9:16'))
   })
 
   it('engine 模式下切换场景：草稿隔离照常生效，galleryInputDraft 不被改写', () => {
@@ -4180,7 +4199,7 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
     expect(getPersistedState(useStore.getState())).not.toHaveProperty('sceneDrafts')
   })
 
-  it('持久化恢复：normalizePersistedState 校验 sceneDrafts 字段并丢弃 skill/非法场景键', () => {
+  it('持久化恢复：normalizePersistedState 校验 sceneDrafts 字段，skill 键合法（仅 params 被消费），非法键丢弃', () => {
     const restored = normalizePersistedState({
       settings: { ...DEFAULT_SETTINGS },
       params: { ...DEFAULT_PARAMS },
@@ -4190,7 +4209,7 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
           params: { ...DEFAULT_PARAMS, quality: 'high' },
           inputImageIds: ['img-1', 42, null],
         },
-        skill: { prompt: '不应恢复', params: { ...DEFAULT_PARAMS }, inputImageIds: [] },
+        skill: { prompt: '', params: { ...DEFAULT_PARAMS, size: '1152x2048' }, inputImageIds: [] },
         bogus: { prompt: '非法场景键', params: { ...DEFAULT_PARAMS }, inputImageIds: [] },
       },
     }, useStore.getState())!
@@ -4200,7 +4219,13 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
       params: { ...DEFAULT_PARAMS, quality: 'high' },
       inputImageIds: ['img-1'],
     })
-    expect(Object.keys(restored.sceneDrafts)).toEqual(['general'])
+    // skill 是合法草稿键（工坊参数隔离）：草稿保留，工坊恢复时消费其 params
+    expect(restored.sceneDrafts.skill).toEqual({
+      prompt: '',
+      params: { ...DEFAULT_PARAMS, size: '1152x2048' },
+      inputImageIds: [],
+    })
+    expect(Object.keys(restored.sceneDrafts)).toEqual(['general', 'skill'])
   })
 })
 

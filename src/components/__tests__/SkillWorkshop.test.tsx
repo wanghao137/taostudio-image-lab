@@ -262,11 +262,19 @@ describe('SkillWorkshop', () => {
     expect(screen.getByRole('button', { name: '一键生成图片' })).toBeTruthy()
     expect(screen.getByText(/高级选项（当前：严格模式 · 5 条）/)).toBeTruthy()
 
-    // 示例 chips（内置 id 才有）：点击整行填入输入框，主 CTA 随之可用
+    // chips 点击整行填入输入框，主 CTA 随之可用
     fireEvent.click(screen.getByRole('button', { name: '山海经毕方鸟' }))
     expect(useStore.getState().skillInputDraft).toBe('山海经毕方鸟')
     fireEvent.click(screen.getByRole('button', { name: '一键生成图片' }))
     expect(oneClick).toHaveBeenCalledTimes(1)
+
+    // 图片尺寸 select：渲染当前 params.size，改选即写入 params（生成链路按 params.size 提交）
+    const sizeSelect = screen.getByLabelText('图片尺寸') as HTMLSelectElement
+    expect(sizeSelect.value).toBe(useStore.getState().params.size)
+    const targetSize = sizeSelect.options[1]?.value
+    expect(targetSize).toBeTruthy()
+    fireEvent.change(sizeSelect, { target: { value: targetSize! } })
+    expect(useStore.getState().params.size).toBe(targetSize)
   })
 
   it('未绑定本地目录时不显示「清除」按钮', () => {

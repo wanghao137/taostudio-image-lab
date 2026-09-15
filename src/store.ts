@@ -1008,9 +1008,12 @@ export const useStore = create<AppState>()(
         }
         const previousScene = state.settings.activeScene
         const sceneDrafts: SceneDrafts = { ...state.sceneDrafts }
-        // 离开非 skill 场景：当前工作区快照（prompt/params/输入图 id）存入该场景草稿；
-        // 完整输入图对象（含预览 dataUrl）同时进内存 memo，同会话切回零延迟恢复。
-        if (previousScene !== 'skill') {
+        // 离开场景：当前工作区快照存入该场景草稿。skill 工坊的输入区独立（prompt/输入图
+        // 恒空），但生图 params（尺寸等）随草稿保存——工坊内选的尺寸不被其他场景冲掉。
+        // 非 skill 场景完整输入图对象（含预览 dataUrl）同时进内存 memo，同会话切回零延迟恢复。
+        if (previousScene === 'skill') {
+          sceneDrafts[previousScene] = { prompt: '', params: { ...state.params }, inputImageIds: [] }
+        } else {
           sceneDrafts[previousScene] = {
             prompt: state.prompt,
             params: { ...state.params },
@@ -1022,7 +1025,11 @@ export const useStore = create<AppState>()(
         let inputPatch: Partial<Pick<AppState, 'prompt' | 'inputImages' | 'maskDraft' | 'maskEditorImageId' | 'galleryInputDraft'>> = {}
         let nextParams = state.params
         let restoredImages: InputImage[] = []
-        if (scene !== 'skill') {
+        if (scene === 'skill') {
+          // 进入 skill 工坊：有草稿恢复其生图参数（输入区不动）；首次进入以 skill 场景
+          // defaults（画幅/档位/透明）初始化——场景抽屉给 skill 配的默认尺寸在此生效。
+          nextParams = sceneDrafts.skill ? { ...sceneDrafts.skill.params } : buildSceneInitialParams('skill')
+        } else {
           const draft = sceneDrafts[scene]
           // 进入非 skill 场景：有草稿整体恢复；首次进入 prompt/图片置空、参数以场景 defaults 初始化。
           restoredImages = draft ? resolveSceneDraftImages(scene, draft.inputImageIds) : []

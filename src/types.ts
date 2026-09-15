@@ -122,8 +122,9 @@ export interface LocalAutoSaveTaskState {
 
 export type SceneId = 'portrait' | 'general' | 'sticker' | 'skill'
 export const SCENE_ID_VALUES = ['portrait', 'general', 'sticker', 'skill'] as const
-/** 参与底部输入区草稿隔离的场景（skill 工坊有独立输入区，不参与） */
-export type SceneDraftSceneId = Exclude<SceneId, 'skill'>
+/** 参与场景草稿隔离的场景。skill 工坊的输入区独立（prompt/输入图恒空），只用 params 部分——
+ *  工坊生图尺寸随场景保存/恢复，不被其他场景的参数冲掉。 */
+export type SceneDraftSceneId = SceneId
 
 /** 场景草稿：切换场景时按场景保存/恢复的工作区快照（提示词 + 参数 + 输入图引用） */
 export interface SceneDraft {

@@ -61,10 +61,10 @@ export type NormalizedPersistedAppState = PersistedAppState & {
   skillExpansionPrefs: SkillExpansionPrefs
 }
 
-/** 参与草稿持久化的场景键（不含 skill） */
-const SCENE_DRAFT_SCENE_IDS: readonly SceneDraftSceneId[] = ['portrait', 'general', 'sticker']
+/** 参与草稿持久化的场景键（skill 只用 params 部分，prompt/输入图恒空） */
+const SCENE_DRAFT_SCENE_IDS: readonly SceneDraftSceneId[] = ['portrait', 'general', 'sticker', 'skill']
 
-/** 只保留三个非 skill 场景的合法草稿键，逐字段拷贝防外层可变性渗透 */
+/** 只保留合法场景的草稿键并逐字段拷贝，防外层可变性渗透 */
 export function toPersistableSceneDrafts(drafts: SceneDrafts | undefined): SceneDrafts {
   const out: SceneDrafts = {}
   if (!drafts) return out

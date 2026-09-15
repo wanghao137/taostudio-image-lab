@@ -3,6 +3,7 @@ import { Loader2, RefreshCw, Settings2, Sparkles, Trash2, Upload } from 'lucide-
 import { useStore } from '../store'
 import { getSceneTextApiProfileResolution } from '../lib/apiProfiles'
 import { BUILTIN_SKILL_EXAMPLE_ANCHORS } from '../lib/skillWorkshop/builtinSkills'
+import { calculateImageSize } from '../lib/size'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
 import { Checkbox } from './Checkbox'
 import type { SkillSummary, TaskRecord } from '../types'
@@ -44,6 +45,8 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const generateFromSkillEntries = useStore((s) => s.generateFromSkillEntries)
   const oneClickPhase = useStore((s) => s.oneClickPhase)
   const oneClickGenerateFromSkill = useStore((s) => s.oneClickGenerateFromSkill)
+  const params = useStore((s) => s.params)
+  const setParams = useStore((s) => s.setParams)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setShowSettings = useStore((s) => s.setShowSettings)
 
@@ -72,6 +75,28 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const oneClickBusy = oneClickPhase !== 'idle'
   // 内置 skill 的示例锚点（本地 skill 无示例不显示 chips）
   const exampleAnchors = activeSkill ? BUILTIN_SKILL_EXAMPLE_ANCHORS[activeSkill.id] ?? null : null
+  // 工坊尺寸预设（1K/2K × 常用比例；4K 依赖 exact_size 本地放大，属专业路径走画廊/场景高级区）。
+  // 当前 params.size 不在预设中（如场景 defaults 配了别的比例）时补一个只读「自定义」项保显示。
+  const sizePresetOptions = useMemo(() => {
+    const combos: Array<['1K' | '2K', string]> = [
+      ['1K', '1:1'], ['1K', '3:4'], ['1K', '4:3'], ['1K', '9:16'], ['1K', '16:9'],
+      ['2K', '1:1'], ['2K', '3:4'], ['2K', '4:3'], ['2K', '9:16'], ['2K', '16:9'],
+    ]
+    const options = combos
+      .map(([tier, ratio]) => {
+        const size = calculateImageSize(tier, ratio)
+        return size ? { value: size, label: `${tier} ${ratio}（${size.replace('x', '×')}）` } : null
+      })
+      .filter((option): option is { value: string; label: string } => option !== null)
+    if (!options.some((option) => option.value === params.size)) {
+      // auto=跟随服务商默认；非预设具体尺寸（如场景 defaults 配了冷门比例）原样展示
+      options.unshift({
+        value: params.size,
+        label: params.size === 'auto' ? '跟随服务商默认' : `当前尺寸（${params.size.replace('x', '×')}）`,
+      })
+    }
+    return options
+  }, [params.size])
   // 扩写链路与反推同源：场景文本覆盖 > 全局文本自动链（E. 模型透明化：展示生效档案与模型）
   const textProfile = useMemo(() => getSceneTextApiProfileResolution(settings).profile, [settings])
   const hasTextProfile = textProfile !== null
@@ -228,6 +253,21 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                 ))}
               </div>
             )}
+            {/* 图片尺寸：绑定 skill 场景草稿的 params.size，随场景隔离保存/恢复（store.setActiveScene） */}
+            <div className="mt-2 flex items-center gap-2">
+              <span className={SECTION_TITLE_CLASS_NAME}>图片尺寸</span>
+              <select
+                value={params.size}
+                onChange={(event) => setParams({ size: event.target.value })}
+                aria-label="图片尺寸"
+                title="生成图片的尺寸；选择会保存在 Skill 工坊，不被其他场景影响"
+                className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
+              >
+                {sizePresetOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {!hasTextProfile ? (
