@@ -260,7 +260,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                 value={params.size}
                 onChange={(event) => setParams({ size: event.target.value })}
                 aria-label="图片尺寸"
-                title="生成图片的尺寸；选择会保存在 Skill 工坊，不被其他场景影响"
+                title="生成图片的尺寸；保存在 Skill 工坊，不被其他场景影响（跨刷新保留需开启「刷新保留输入」）"
                 className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
               >
                 {sizePresetOptions.map((option) => (
