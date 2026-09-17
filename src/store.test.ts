@@ -238,7 +238,46 @@ vi.mock('./lib/transparentImage', () => ({
     transparent_output: true,
   })),
   buildNativeTransparentPrompt: vi.fn((prompt: string) => `${prompt}\n\n背景必须完全透明`),
+  buildTransparentPrompt: vi.fn((prompt: string) => `${prompt}\n\n背景必须完全透明`),
   removeKeyedBackgroundFromDataUrl: vi.fn(async (dataUrl: string) => `transparent:${dataUrl}`),
+}))
+// 表情工坊（战斗 Sprite GIF）：管线在 jsdom/node 无 canvas，整体 mock 编排链
+//（skillExpansionApi 同款模式）；导出链 mock gifEncode/apng/spriteExport。
+vi.mock('./lib/stickerSplit/spriteSheet', () => ({
+  SPRITE_MOTION_PRESETS: [
+    { id: 'sword-slash', label: '挥剑连斩', motion: '完整的挥剑攻击循环' },
+    { id: 'punch-combo', label: '出拳连击', motion: '完整的拳击连击循环' },
+  ],
+  getSpriteMotionPreset: (id: string) => ({ id, label: id, motion: '完整动作循环' }),
+  buildSpriteSheetPrompt: vi.fn((opts: { motionId: string; rows?: number; cols?: number }) =>
+    `sprite-sheet-prompt:${opts.motionId}:${opts.rows ?? 4}x${opts.cols ?? 4}`),
+  fetchSpriteSheet: vi.fn(async () => 'data:image/png;base64,sheet'),
+  processSpriteSheet: vi.fn(async (sheetDataUrl: string) => ({
+    frames: ['data:image/png;base64,frame-1', 'data:image/png;base64,frame-2'],
+    sheetDataUrl,
+    diagnostics: [{ index: 0, areaRatio: 1, dropped: false }],
+    gridMode: 'troughs',
+    byTroughs: true,
+    warnings: [],
+  })),
+  generateSpriteAnimation: vi.fn(async () => {
+    throw new Error('store 编排不使用 generateSpriteAnimation（fetch/process 拆开直调以暴露细阶段）')
+  }),
+}))
+vi.mock('./lib/stickerSplit/spriteExport', () => ({
+  buildSpriteGifFrames: vi.fn(async (dataUrls: string[], exportSize: unknown, delayMs: number) =>
+    dataUrls.map((dataUrl) => ({ data: dataUrl, width: exportSize, height: exportSize, delayMs }))),
+  buildSpriteApngFrames: vi.fn(async (dataUrls: string[], exportSize: unknown, delayMs: number) =>
+    dataUrls.map((dataUrl) => ({ canvas: dataUrl, delayMs }))),
+  downloadSpriteFramesZip: vi.fn((dataUrls: string[]) => dataUrls.length),
+  downloadBlob: vi.fn(),
+  formatBlobSize: (bytes: number) => `${Math.round(bytes / 1024)}KB`,
+}))
+vi.mock('./lib/stickerSplit/gifEncode', () => ({
+  encodeGif: vi.fn((frames: Array<{ delayMs: number }>) => new Blob([`gif:${frames.length}x${frames[0]?.delayMs}`], { type: 'image/gif' })),
+}))
+vi.mock('./lib/stickerSplit/apng', () => ({
+  encodeApngFromCanvases: vi.fn(async (frames: Array<{ delayMs: number }>) => new Blob([`apng:${frames.length}x${frames[0]?.delayMs}`], { type: 'image/apng' })),
 }))
 // Provider 能力观测在 store 集成测试里 mock 掉：真实模块的内存兜底会在
 // 同文件用例间累积观测，让 normalizeParamsForSettings 的请求档位判定互相污染。
@@ -357,7 +396,11 @@ import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
 import { buildExpansionInstructions } from './lib/skillWorkshop/expansion'
-import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, makeSkillExpansionState, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
+import { buildSpriteSheetPrompt, fetchSpriteSheet, processSpriteSheet } from './lib/stickerSplit/spriteSheet'
+import { buildSpriteApngFrames, buildSpriteGifFrames, downloadBlob, downloadSpriteFramesZip } from './lib/stickerSplit/spriteExport'
+import { encodeGif } from './lib/stickerSplit/gifEncode'
+import { encodeApngFromCanvases } from './lib/stickerSplit/apng'
+import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, makeSkillExpansionState, makeSpriteGifState, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -5636,3 +5679,257 @@ describe('编辑链路画幅三层防御（T2）', () => {
     expect(await getImage(record.outputImages[0])).toMatchObject({ dataUrl: 'data:image/png;base64,raw-2000x1000' })
   })
 })
+
+describe('sprite gif workshop（表情工坊·战斗 Sprite GIF）', () => {
+  const spriteProfile = createDefaultOpenAIProfile({
+    id: 'sprite-a',
+    name: '生图配置A',
+    apiKey: 'sk-test',
+    baseUrl: 'https://api.example.com',
+  })
+
+  // 早前 describe 会把 showToast/setShowSettings 整体替换成 vi.fn() 且不恢复；
+  // describe 收集期（任何测试运行前）先留 pristine 引用，seed 时装回真实实现
+  const realActions = {
+    showToast: useStore.getState().showToast,
+    setShowSettings: useStore.getState().setShowSettings,
+  }
+
+  /** 生图档案有效 + sticker 场景 + 默认草稿（motionId=sword-slash，4×4，size auto） */
+  function seedSpriteWorkshop() {
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [spriteProfile],
+        activeProfileId: spriteProfile.id,
+        activeScene: 'sticker',
+      }),
+      params: { ...DEFAULT_PARAMS, size: 'auto' },
+      spriteGif: makeSpriteGifState(),
+      toast: null,
+      showSettings: false,
+      ...realActions,
+    })
+  }
+
+  beforeEach(() => {
+    seedSpriteWorkshop()
+    vi.mocked(fetchSpriteSheet).mockClear().mockResolvedValue('data:image/png;base64,sheet-raw')
+    vi.mocked(processSpriteSheet).mockClear().mockImplementation(async (sheetDataUrl: string) => ({
+      frames: ['data:image/png;base64,frame-1', 'data:image/png;base64,frame-2'],
+      sheetDataUrl,
+      diagnostics: [],
+      gridMode: 'troughs',
+      byTroughs: true,
+      warnings: ['第 3 格为空格，已剔除'],
+    }))
+    vi.mocked(buildSpriteSheetPrompt).mockClear()
+    vi.mocked(buildSpriteGifFrames).mockClear()
+    vi.mocked(buildSpriteApngFrames).mockClear()
+    vi.mocked(downloadBlob).mockClear()
+    vi.mocked(downloadSpriteFramesZip).mockClear()
+    vi.mocked(encodeGif).mockClear()
+    vi.mocked(encodeApngFromCanvases).mockClear()
+  })
+
+  it('generateSpriteGif 成功：守卫通过 → 生成 → 切分对齐 → ready（帧全启用 + sheetDataUrl + 警告透传）', async () => {
+    useStore.getState().setSpriteGifDraft({ characterNote: '银发红瞳的女剑士' })
+    await useStore.getState().generateSpriteGif()
+
+    const sprite = useStore.getState().spriteGif
+    expect(sprite.status).toBe('ready')
+    expect(sprite.phase).toBeNull()
+    expect(sprite.frames).toHaveLength(2)
+    expect(sprite.frames.every((frame) => frame.enabled && frame.dataUrl.startsWith('data:image/png;base64,frame-'))).toBe(true)
+    expect(sprite.sheetDataUrl).toBe('data:image/png;base64,sheet-raw')
+    expect(sprite.warnings).toEqual(['第 3 格为空格，已剔除'])
+
+    // 提示词带动作/网格/角色描述；size auto 收口方形 1024；n 由库内收口
+    expect(vi.mocked(buildSpriteSheetPrompt).mock.calls[0]?.[0]).toMatchObject({
+      motionId: 'sword-slash',
+      rows: 4,
+      cols: 4,
+      characterNote: '银发红瞳的女剑士',
+    })
+    expect(vi.mocked(fetchSpriteSheet).mock.calls[0]?.[1]).toMatchObject({ size: '1024x1024' })
+    expect(vi.mocked(fetchSpriteSheet).mock.calls[0]?.[2]).toContain('sprite-sheet-prompt:sword-slash')
+    expect(vi.mocked(processSpriteSheet).mock.calls[0]?.[0]).toBe('data:image/png;base64,sheet-raw')
+    expect(vi.mocked(processSpriteSheet).mock.calls[0]?.[1]).toMatchObject({ rows: 4, cols: 4 })
+    expect(useStore.getState().toast?.message).toContain('已切分 2 帧')
+  })
+
+  it('无可用图像档案时守卫拦截：中文 toast 引导完善配置，且不发任何生成请求', async () => {
+    // 默认 profile 缺 API Key/URL：validateApiProfile 必失败
+    useStore.setState({ settings: normalizeSettings({ ...DEFAULT_SETTINGS, activeScene: 'sticker' }) })
+    await useStore.getState().generateSpriteGif()
+
+    expect(useStore.getState().spriteGif.status).toBe('idle')
+    expect(fetchSpriteSheet).not.toHaveBeenCalled()
+    expect(useStore.getState().toast?.message).toContain('请先完善请求 API 配置')
+    expect(useStore.getState().showSettings).toBe(true)
+  })
+
+  it('generating 中重复触发被忽略，不重复请求', async () => {
+    let releaseFetch!: () => void
+    vi.mocked(fetchSpriteSheet).mockClear().mockImplementation(async () => {
+      await new Promise<void>((resolve) => { releaseFetch = resolve })
+      return 'data:image/png;base64,sheet-raw'
+    })
+    const first = useStore.getState().generateSpriteGif()
+    await waitForAssertion(() => expect(useStore.getState().spriteGif.status).toBe('generating'))
+
+    await useStore.getState().generateSpriteGif() // generating 中的二次触发
+    expect(fetchSpriteSheet).toHaveBeenCalledTimes(1)
+
+    releaseFetch()
+    await first
+    expect(useStore.getState().spriteGif.status).toBe('ready')
+  })
+
+  it('QC 失败按库同款纪律重生一次后成功（共 2 次尝试，间隔 10s）', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(processSpriteSheet).mockClear()
+        .mockRejectedValueOnce(new Error('有效帧过少（1/16），sprite sheet 质量不合格，请重试'))
+        .mockImplementation(async (sheetDataUrl: string) => ({
+          frames: ['data:image/png;base64,frame-1'],
+          sheetDataUrl,
+          diagnostics: [],
+          gridMode: 'even',
+          byTroughs: false,
+          warnings: [],
+        }))
+
+      const pending = useStore.getState().generateSpriteGif()
+      await vi.advanceTimersByTimeAsync(10_100)
+      await pending
+
+      expect(fetchSpriteSheet).toHaveBeenCalledTimes(2)
+      expect(processSpriteSheet).toHaveBeenCalledTimes(2)
+      const sprite = useStore.getState().spriteGif
+      expect(sprite.status).toBe('ready')
+      expect(sprite.frames).toHaveLength(1)
+      expect(sprite.sheetDataUrl).toBe('data:image/png;base64,sheet-raw')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('两次尝试都失败：置 error（phase 复位）+ 中文失败 toast', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(fetchSpriteSheet).mockClear().mockRejectedValue(new Error('生成通道未返回图片'))
+
+      const pending = useStore.getState().generateSpriteGif()
+      await vi.advanceTimersByTimeAsync(10_100)
+      await pending
+
+      const sprite = useStore.getState().spriteGif
+      expect(sprite.status).toBe('error')
+      expect(sprite.phase).toBeNull()
+      expect(sprite.error).toContain('生成通道未返回图片')
+      expect(sprite.frames).toEqual([])
+      expect(fetchSpriteSheet).toHaveBeenCalledTimes(2)
+      expect(useStore.getState().toast?.message).toContain('战斗动图生成失败')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('帧管理：toggle 勾选 / remove 删除 / 帧率收口 40-300ms', () => {
+    useStore.setState({
+      spriteGif: makeSpriteGifState({
+        status: 'ready',
+        frames: [
+          { id: 'f1', dataUrl: 'data:image/png;base64,1', enabled: true },
+          { id: 'f2', dataUrl: 'data:image/png;base64,2', enabled: true },
+          { id: 'f3', dataUrl: 'data:image/png;base64,3', enabled: false },
+        ],
+      }),
+    })
+    const store = useStore.getState()
+
+    store.toggleSpriteFrame('f2')
+    expect(useStore.getState().spriteGif.frames[1].enabled).toBe(false)
+
+    store.removeSpriteFrame('f3')
+    expect(useStore.getState().spriteGif.frames.map((frame) => frame.id)).toEqual(['f1', 'f2'])
+
+    store.setSpriteFrameMs(10)
+    expect(useStore.getState().spriteGif.frameMs).toBe(40)
+    store.setSpriteFrameMs(999)
+    expect(useStore.getState().spriteGif.frameMs).toBe(300)
+    store.setSpriteFrameMs(120)
+    expect(useStore.getState().spriteGif.frameMs).toBe(120)
+  })
+
+  it('setSpriteGifDraft：动作/角色/网格草稿写入（网格收口 2/3/4）', () => {
+    const store = useStore.getState()
+    store.setSpriteGifDraft({ motionId: 'punch-combo', characterNote: '银发红瞳的女剑士' })
+    expect(useStore.getState().spriteGif.motionId).toBe('punch-combo')
+    expect(useStore.getState().spriteGif.characterNote).toBe('银发红瞳的女剑士')
+
+    store.setSpriteGifDraft({ rows: 2, cols: 2 })
+    expect(useStore.getState().spriteGif.rows).toBe(2)
+    expect(useStore.getState().spriteGif.cols).toBe(2)
+
+    store.setSpriteGifDraft({ rows: 7 })
+    expect(useStore.getState().spriteGif.rows).toBe(4)
+  })
+
+  it('exportSpriteGif：enabled 帧按 frameMs 编码并下载 sticker-sprite.gif', async () => {
+    useStore.setState({
+      spriteGif: makeSpriteGifState({
+        status: 'ready',
+        frameMs: 120,
+        frames: [
+          { id: 'f1', dataUrl: 'data:image/png;base64,1', enabled: true },
+          { id: 'f2', dataUrl: 'data:image/png;base64,2', enabled: false },
+          { id: 'f3', dataUrl: 'data:image/png;base64,3', enabled: true },
+        ],
+      }),
+    })
+    await useStore.getState().exportSpriteGif(256)
+
+    expect(buildSpriteGifFrames).toHaveBeenCalledWith(['data:image/png;base64,1', 'data:image/png;base64,3'], 256, 120)
+    expect(encodeGif).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(encodeGif).mock.calls[0]?.[0].every((frame) => frame.delayMs === 120)).toBe(true)
+    expect(downloadBlob).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(downloadBlob).mock.calls[0]?.[1]).toBe('sticker-sprite.gif')
+    expect(useStore.getState().toast?.message).toContain('GIF 已导出')
+  })
+
+  it('无启用帧时导出被拦截：中文错误 toast，不触发编码与下载', async () => {
+    useStore.setState({
+      spriteGif: makeSpriteGifState({
+        status: 'ready',
+        frames: [{ id: 'f1', dataUrl: 'data:image/png;base64,1', enabled: false }],
+      }),
+    })
+    await useStore.getState().exportSpriteGif()
+
+    expect(buildSpriteGifFrames).not.toHaveBeenCalled()
+    expect(encodeGif).not.toHaveBeenCalled()
+    expect(downloadBlob).not.toHaveBeenCalled()
+    expect(useStore.getState().toast?.message).toContain('没有可导出的帧')
+  })
+
+  it('exportSpriteApng / exportSpriteFramesZip：分别走 APNG 封装与 ZIP 打包', async () => {
+    useStore.setState({
+      spriteGif: makeSpriteGifState({
+        status: 'ready',
+        frames: [{ id: 'f1', dataUrl: 'data:image/png;base64,1', enabled: true }],
+      }),
+    })
+    await useStore.getState().exportSpriteApng(512)
+    expect(buildSpriteApngFrames).toHaveBeenCalledWith(['data:image/png;base64,1'], 512, 80)
+    expect(encodeApngFromCanvases).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(downloadBlob).mock.calls[0]?.[1]).toBe('sticker-sprite.png')
+
+    await useStore.getState().exportSpriteFramesZip()
+    expect(downloadSpriteFramesZip).toHaveBeenCalledWith(['data:image/png;base64,1'], 'sticker-sprite-frames.zip')
+    // ZIP 的下载在被 mock 的 downloadSpriteFramesZip 内部发生，store 侧只多出 APNG 那一次
+    expect(vi.mocked(downloadBlob)).toHaveBeenCalledTimes(1)
+  })
+})
+

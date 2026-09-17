@@ -80,6 +80,24 @@ try {
   await page.getByRole('button', { name: '通用创作', exact: true }).first().click()
   await page.waitForTimeout(300)
 
+  // 检查点2b: 表情与头像专属工作台（sticker 场景已工坊化）：两分区 + 动作预设/网格/表情 chips
+  //（生成入口随画像可用性变化，不参与断言）
+  await page.getByRole('button', { name: '表情与头像', exact: true }).first().click()
+  let bodySticker = ''
+  for (let i = 0; i < 20; i++) {
+    await page.waitForTimeout(250)
+    bodySticker = await page.locator('body').innerText()
+    if (await page.getByRole('heading', { name: '表情与头像工作台' }).count()) break
+  }
+  if (!(await page.getByRole('heading', { name: '表情与头像工作台' }).count())) fail('表情工坊 lazy 视图未加载（「表情与头像工作台」标题缺失）')
+  for (const s of ['静态表情 / 头像快捷生成', '战斗动图工坊（Sprite GIF）', '开心大笑', '挥剑连斩', '4×4']) {
+    if (!bodySticker.includes(s)) fail(`表情工坊分区缺失: ${s}`)
+  }
+  if (!(await page.getByRole('button', { name: '场景设置' }).count())) fail('表情工坊内场景设置齿轮缺失')
+  await page.screenshot({ path: `${screenshotDir}/scene-smoke-sticker-workshop.png` })
+  await page.getByRole('button', { name: '通用创作', exact: true }).first().click()
+  await page.waitForTimeout(300)
+
   // 检查点3: 点场景 → 画廊头部「一键全部」切换 chip → 齿轮开抽屉 → 四分区在位
   // 齿轮缺失时只 fail 不继续点击，避免对不存在元素 click 抛异常中断后续检查点
   await page.getByRole('button', { name: '人像写真', exact: true }).first().click()

@@ -10,6 +10,7 @@ import {
   getSpriteMotionPreset,
   isSpriteAreaAcceptable,
   planSpriteCellGrid,
+  type SpriteAnimationResult,
 } from './spriteSheet'
 
 describe('战斗动作预设', () => {
@@ -119,5 +120,22 @@ describe('帧面积 QC 门（战斗动作放宽档）', () => {
   it('阈值较 2×2 姿势表更宽（大幅动作帧面积变化大）', () => {
     expect(SPRITE_AREA_MIN_RATIO).toBeLessThan(0.45)
     expect(SPRITE_AREA_MAX_RATIO).toBeGreaterThan(2.2)
+  })
+})
+
+describe('SpriteAnimationResult 契约', () => {
+  it('结果携带原始 sheetDataUrl（工坊查看/重切入口依赖；processSpriteSheet 透传入参）', () => {
+    // 类型契约级断言：完整管线依赖 canvas（jsdom/node 不可用），字段存在性由
+    // 编译 + 该构造约束锁定——移除字段会让对象字面量编译失败。
+    const result: SpriteAnimationResult = {
+      frames: ['data:image/png;base64,frame-1'],
+      sheetDataUrl: 'data:image/png;base64,sheet',
+      diagnostics: [{ index: 0, areaRatio: 1, dropped: false }],
+      gridMode: 'troughs',
+      byTroughs: true,
+      warnings: [],
+    }
+    expect(result.sheetDataUrl).toBe('data:image/png;base64,sheet')
+    expect(result.frames).toHaveLength(1)
   })
 })

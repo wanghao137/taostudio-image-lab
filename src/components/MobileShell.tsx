@@ -7,7 +7,7 @@ import type { SceneId } from '../types'
 interface MobileShellProps {
   children: ReactNode
   onOpenCompose: () => void
-  /** skill 场景没有全局 InputBar，创作 FAB 隐藏避免无效入口（由 App 按场景传入） */
+  /** skill/sticker 场景没有全局 InputBar（工坊自带输入与生成入口），创作 FAB 隐藏避免无效入口（由 App 按场景传入） */
   composeHidden?: boolean
 }
 
@@ -69,7 +69,7 @@ export default function MobileShell({ children, onOpenCompose, composeHidden = f
           <TabButton icon={Cpu} label="引擎" active={appMode === 'engine'} onClick={() => setAppMode('engine')} />
           <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} />
         </div>
-        {/* FAB（skill 场景隐藏：工坊自带输入与生成入口） */}
+        {/* FAB（skill/sticker 场景隐藏：工坊自带输入与生成入口） */}
         {!composeHidden && (
           <button
             onClick={onOpenCompose}

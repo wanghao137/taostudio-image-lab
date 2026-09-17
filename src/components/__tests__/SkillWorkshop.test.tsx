@@ -271,7 +271,9 @@ describe('SkillWorkshop', () => {
     // 图片尺寸：画廊同款入口按钮显示当前尺寸，点开 SizePickerModal 选比例后写入 params
     const sizeButton = screen.getByRole('button', { name: /选择尺寸|\d+x\d+|auto/ })
     fireEvent.click(sizeButton)
-    const modal = await screen.findByRole('heading', { name: '设置图像尺寸' })
+    // SizePickerModal 是 lazy chunk：全量套件并行高负载下动态 import 偶发超过
+    // findBy 默认 1s 超时（历史偶发 flake），放宽到 3s 只放宽等待预算，不弱化断言语义
+    const modal = await screen.findByRole('heading', { name: '设置图像尺寸' }, { timeout: 3000 })
     expect(modal).toBeTruthy()
     // 切到按比例模式选 2K + 9:16，确定后写回 params.size
     fireEvent.click(screen.getByRole('button', { name: '按比例' }))

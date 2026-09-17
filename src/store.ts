@@ -74,7 +74,7 @@ import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { recordProviderSizeObservation } from './lib/providerCapability'
-import { buildNativeTransparentPrompt, createTransparentOutputMeta, getTransparentRequestParams } from './lib/transparentImage'
+import { buildNativeTransparentPrompt, buildTransparentPrompt, createTransparentOutputMeta, getTransparentRequestParams } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, getCachedImage, getUnpinnedQuotaImageIds, pinQuotaImage, scheduleThumbnailBackfill } from './lib/imageCache'
 import { hasActiveDataOperations } from './lib/dataOperations'
@@ -114,6 +114,10 @@ import {
   validateExpansionEntries,
 } from './lib/skillWorkshop/expansion'
 import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
+import { buildSpriteSheetPrompt, fetchSpriteSheet, processSpriteSheet } from './lib/stickerSplit/spriteSheet'
+import { buildSpriteApngFrames, buildSpriteGifFrames, downloadBlob, downloadSpriteFramesZip, formatBlobSize, type SpriteExportSize } from './lib/stickerSplit/spriteExport'
+import { encodeGif } from './lib/stickerSplit/gifEncode'
+import { encodeApngFromCanvases } from './lib/stickerSplit/apng'
 
 export { ensureImageCached, getCachedImage } from './lib/imageCache'
 export { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_NAME } from './lib/favoriteState'
@@ -394,6 +398,66 @@ export interface SkillWorkshopState {
   scanning: boolean
 }
 
+// ===== 表情工坊（战斗 Sprite GIF） =====
+
+export interface SpriteGifFrame {
+  id: string
+  dataUrl: string
+  enabled: boolean
+}
+
+export type SpriteGifPhase = 'fetching' | 'processing' | null
+
+export interface SpriteGifState {
+  /** generating 覆盖生成+本地处理全程 */
+  status: 'idle' | 'generating' | 'ready' | 'error'
+  /** 细阶段（UI 文案） */
+  phase: SpriteGifPhase
+  error: string | null
+  motionId: string
+  characterNote: string
+  rows: number
+  cols: number
+  /** 可选参考图（v1 不做参考图上传，纯文生图，字段保留 null） */
+  referenceImageId: string | null
+  frames: SpriteGifFrame[]
+  /** 帧间隔，默认 80ms（12.5fps），收口 40-300 */
+  frameMs: number
+  /** 原始 sheet（查看/重切入口用） */
+  sheetDataUrl: string | null
+  warnings: string[]
+}
+
+/** 会话级状态（不持久化，刷新即清；生成物通过导出落地） */
+export function makeSpriteGifState(overrides: Partial<SpriteGifState> = {}): SpriteGifState {
+  return {
+    status: 'idle',
+    phase: null,
+    error: null,
+    motionId: 'sword-slash',
+    characterNote: '',
+    rows: 4,
+    cols: 4,
+    referenceImageId: null,
+    frames: [],
+    frameMs: 80,
+    sheetDataUrl: null,
+    warnings: [],
+    ...overrides,
+  }
+}
+
+/** 帧间隔收口：40-300ms（≈3.3-25fps） */
+export function clampSpriteFrameMs(ms: number): number {
+  if (!Number.isFinite(ms)) return 80
+  return Math.min(300, Math.max(40, Math.round(ms)))
+}
+
+/** 网格规格收口：2/3/4 */
+function clampSpriteGrid(n: number): number {
+  return n === 2 || n === 3 ? n : 4
+}
+
 /** 按 id 在内置与本地 skill 列表中查找（内置优先） */
 function findSkillSummary(skills: SkillWorkshopState, id: string | null): SkillSummary | null {
   if (!id) return null
@@ -515,6 +579,19 @@ interface AppState {
   /** 一键生成编排阶段（idle/expanding/generating）：扩写 → 全部启用 → 生成，失败即停 */
   oneClickPhase: 'idle' | 'expanding' | 'generating'
   oneClickGenerateFromSkill: () => Promise<void>
+
+  // 表情工坊（战斗 Sprite GIF）
+  spriteGif: SpriteGifState
+  /** 草稿（motionId/characterNote/rows/cols/frameMs），会话内生效 */
+  setSpriteGifDraft: (patch: Partial<Pick<SpriteGifState, 'motionId' | 'characterNote' | 'rows' | 'cols' | 'frameMs'>>) => void
+  /** 生成：sheet 生成（库内 3 次退避）→ 本地切分对齐（QC 失败按纪律重生一次）；不走路廊任务系统 */
+  generateSpriteGif: () => Promise<void>
+  toggleSpriteFrame: (id: string) => void
+  removeSpriteFrame: (id: string) => void
+  setSpriteFrameMs: (ms: number) => void
+  exportSpriteGif: (exportSize?: SpriteExportSize) => Promise<void>
+  exportSpriteApng: (exportSize?: SpriteExportSize) => Promise<void>
+  exportSpriteFramesZip: () => Promise<void>
 
   // 搜索和筛选
   searchQuery: string
@@ -1393,6 +1470,152 @@ export const useStore = create<AppState>()(
           await get().generateFromSkillEntries()
         } finally {
           set({ oneClickPhase: 'idle' })
+        }
+      },
+
+      // 表情工坊（战斗 Sprite GIF）
+      spriteGif: makeSpriteGifState(),
+      setSpriteGifDraft: (patch) => set((state) => ({
+        spriteGif: {
+          ...state.spriteGif,
+          ...(patch.motionId !== undefined ? { motionId: patch.motionId } : {}),
+          ...(patch.characterNote !== undefined ? { characterNote: patch.characterNote } : {}),
+          ...(patch.rows !== undefined ? { rows: clampSpriteGrid(patch.rows) } : {}),
+          ...(patch.cols !== undefined ? { cols: clampSpriteGrid(patch.cols) } : {}),
+          ...(patch.frameMs !== undefined ? { frameMs: clampSpriteFrameMs(patch.frameMs) } : {}),
+        },
+      })),
+      generateSpriteGif: async () => {
+        const state = get()
+        if (state.spriteGif.status === 'generating') return
+        const imageProfile = getSceneImageApiProfile(state.settings)
+        const profileError = validateApiProfile(imageProfile)
+        if (profileError) {
+          state.showToast(`请先完善请求 API 配置：${profileError}`, 'error')
+          state.setShowSettings(true)
+          return
+        }
+        const requestSettings = createSettingsForApiProfile(normalizeSettings(state.settings), imageProfile)
+        // 方形 sheet 最稳（沟槽切格按行列对称检测）；n=1 由库内 fetchSpriteSheet 收口
+        const spriteParams: TaskParams = {
+          ...state.params,
+          size: state.params.size === 'auto' ? '1024x1024' : state.params.size,
+        }
+        const sprite = state.spriteGif
+        const opts = {
+          motionId: sprite.motionId,
+          rows: sprite.rows,
+          cols: sprite.cols,
+          ...(sprite.characterNote.trim() ? { characterNote: sprite.characterNote.trim() } : {}),
+        }
+        const prompt = buildTransparentPrompt(buildSpriteSheetPrompt(opts))
+        set((prev) => ({
+          spriteGif: {
+            ...prev.spriteGif,
+            status: 'generating',
+            phase: 'fetching',
+            error: null,
+            warnings: [],
+            frames: [],
+            sheetDataUrl: null,
+          },
+        }))
+        // 与库 generateSpriteAnimation 的重试纪律 1:1（传输抖动 3 次退避在 fetchSpriteSheet
+        // 内建；QC 失败重生成一次、间隔 10s）。拆成 fetch/process 两步直调是为了把
+        // 「生成精灵图中/切分对齐中」细阶段真实暴露给 UI（库无阶段回调，且除 sheetDataUrl
+        // 外不改库）。
+        let lastError: unknown = new Error('sprite sheet 生成失败')
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 10000))
+          try {
+            set((prev) => ({ spriteGif: { ...prev.spriteGif, phase: 'fetching' } }))
+            const sheetDataUrl = await fetchSpriteSheet(requestSettings, spriteParams, prompt)
+            set((prev) => ({ spriteGif: { ...prev.spriteGif, phase: 'processing' } }))
+            const result = await processSpriteSheet(sheetDataUrl, opts)
+            set((prev) => ({
+              spriteGif: {
+                ...prev.spriteGif,
+                status: 'ready',
+                phase: null,
+                frames: result.frames.map((dataUrl) => ({ id: genId(), dataUrl, enabled: true })),
+                sheetDataUrl: result.sheetDataUrl,
+                warnings: result.warnings,
+              },
+            }))
+            get().showToast(`战斗动图就绪：已切分 ${result.frames.length} 帧`, 'success')
+            return
+          } catch (err) {
+            lastError = err
+          }
+        }
+        const message = lastError instanceof Error ? lastError.message : String(lastError)
+        set((prev) => ({ spriteGif: { ...prev.spriteGif, status: 'error', phase: null, error: message } }))
+        get().showToast(`战斗动图生成失败：${message}`, 'error')
+      },
+      toggleSpriteFrame: (id) => set((state) => ({
+        spriteGif: {
+          ...state.spriteGif,
+          frames: state.spriteGif.frames.map((frame) => (frame.id === id ? { ...frame, enabled: !frame.enabled } : frame)),
+        },
+      })),
+      removeSpriteFrame: (id) => set((state) => ({
+        spriteGif: {
+          ...state.spriteGif,
+          frames: state.spriteGif.frames.filter((frame) => frame.id !== id),
+        },
+      })),
+      setSpriteFrameMs: (ms) => set((state) => ({ spriteGif: { ...state.spriteGif, frameMs: clampSpriteFrameMs(ms) } })),
+      exportSpriteGif: async (exportSize: SpriteExportSize = 512) => {
+        const state = get()
+        if (state.spriteGif.status === 'generating') return
+        const enabledFrames = state.spriteGif.frames.filter((frame) => frame.enabled)
+        if (!enabledFrames.length) {
+          state.showToast('没有可导出的帧（至少保留一帧）', 'error')
+          return
+        }
+        try {
+          const gifFrames = await buildSpriteGifFrames(enabledFrames.map((frame) => frame.dataUrl), exportSize, state.spriteGif.frameMs)
+          const blob = encodeGif(gifFrames)
+          downloadBlob(blob, 'sticker-sprite.gif')
+          get().showToast(`GIF 已导出（${formatBlobSize(blob.size)}）`, 'success')
+        } catch (err) {
+          console.error(err)
+          get().showToast('GIF 导出失败', 'error')
+        }
+      },
+      exportSpriteApng: async (exportSize: SpriteExportSize = 512) => {
+        const state = get()
+        if (state.spriteGif.status === 'generating') return
+        const enabledFrames = state.spriteGif.frames.filter((frame) => frame.enabled)
+        if (!enabledFrames.length) {
+          state.showToast('没有可导出的帧（至少保留一帧）', 'error')
+          return
+        }
+        try {
+          const snaps = await buildSpriteApngFrames(enabledFrames.map((frame) => frame.dataUrl), exportSize, state.spriteGif.frameMs)
+          const blob = await encodeApngFromCanvases(snaps)
+          downloadBlob(blob, 'sticker-sprite.png')
+          get().showToast(`APNG 已导出（${formatBlobSize(blob.size)}）`, 'success')
+        } catch (err) {
+          console.error(err)
+          get().showToast('APNG 导出失败', 'error')
+        }
+      },
+      exportSpriteFramesZip: async () => {
+        const state = get()
+        if (state.spriteGif.status === 'generating') return
+        const enabledFrames = state.spriteGif.frames.filter((frame) => frame.enabled)
+        if (!enabledFrames.length) {
+          state.showToast('没有可导出的帧（至少保留一帧）', 'error')
+          return
+        }
+        try {
+          const count = downloadSpriteFramesZip(enabledFrames.map((frame) => frame.dataUrl), 'sticker-sprite-frames.zip')
+          if (count <= 0) throw new Error('没有帧')
+          get().showToast(`已导出 ${count} 张 PNG 帧（ZIP）`, 'success')
+        } catch (err) {
+          console.error(err)
+          get().showToast('帧 ZIP 导出失败', 'error')
         }
       },
 

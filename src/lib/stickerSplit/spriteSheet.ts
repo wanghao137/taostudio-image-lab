@@ -203,7 +203,9 @@ export function extractSpriteSubject(source: HTMLCanvasElement): SpriteSubject |
   let cropY = 0
   let cropW = w
   let cropH = h
-  let data = pixels.data
+  // 守卫分支会把 data 换成 engine 的子集（Uint8ClampedArray<ArrayBufferLike>），
+  // 声明放宽到公共上界（ImageData 构造走 new Uint8ClampedArray 拷贝，不受影响）
+  let data: Uint8ClampedArray<ArrayBufferLike> = pixels.data
   try {
     const largest = extractLargestComponent({ width: w, height: h, data })
     if (largest && (largest.width < w * 0.95 || largest.height < h * 0.95)) {
@@ -307,6 +309,8 @@ export function isSpriteAreaAcceptable(frameArea: number, medianArea: number): b
 export interface SpriteAnimationResult {
   /** 对齐后的帧序列（统一画布，dataUrl PNG） */
   frames: string[]
+  /** 原始 sprite sheet（生成返回、去底前）：查看/重切入口用 */
+  sheetDataUrl: string
   /** 逐帧诊断（面积比/是否被剔除） */
   diagnostics: Array<{ index: number; areaRatio: number; dropped: boolean }>
   /** 切格方式：沟槽 or 几何退化 */
@@ -350,7 +354,8 @@ export async function fetchSpriteSheet(
         settings,
         prompt,
         params: { ...params, n: 1 },
-        ...(referenceDataUrl ? { inputImageDataUrls: [referenceDataUrl] } : {}),
+        // 消费方一律按 length 判定编辑/生成，[] 与「无参考图」语义等价
+        inputImageDataUrls: referenceDataUrl ? [referenceDataUrl] : [],
       })
       const image = result.images?.[0]
       if (!image) throw new Error('生成通道未返回图片')
@@ -419,6 +424,8 @@ export async function processSpriteSheet(
   if (!registration) throw new Error('帧对齐失败')
   return {
     frames: registration.frames.map((f) => f.canvas.toDataURL('image/png')),
+    // 透传原始 sheet：工坊「查看原图/重切」入口需要（generateSpriteAnimation 由此填充）
+    sheetDataUrl,
     diagnostics,
     gridMode: grid.byTroughs ? 'troughs' : 'even',
     byTroughs: grid.byTroughs,
@@ -439,6 +446,7 @@ export async function generateSpriteAnimation(
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 10000))
     const sheetDataUrl = await fetchSpriteSheet(settings, params, prompt, referenceDataUrl)
     try {
+      // processSpriteSheet 透传 sheetDataUrl，结果的「原始 sheet」由此填充
       return await processSpriteSheet(sheetDataUrl, opts)
     } catch (err) {
       lastError = err

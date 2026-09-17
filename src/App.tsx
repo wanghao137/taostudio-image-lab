@@ -47,6 +47,9 @@ const SceneSettingsDrawer = lazy(() =>
 const SkillWorkshop = lazy(() =>
   import('./components/SkillWorkshop').then((module) => ({ default: module.SkillWorkshop })),
 )
+const StickerWorkshop = lazy(() =>
+  import('./components/StickerWorkshop').then((module) => ({ default: module.StickerWorkshop })),
+)
 
 function getSceneLabel(scene: SceneId): string {
   // SCENE_TABS 已含全部场景，id 兜底仅防御
@@ -283,8 +286,8 @@ export default function App() {
   return (
     <>
       {isMobile ? (
-        <MobileShell composeHidden={appMode === 'gallery' && activeScene === 'skill'} onOpenCompose={() => setComposeOpen(true)}>
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : '画廊'}>
+        <MobileShell composeHidden={appMode === 'gallery' && (activeScene === 'skill' || activeScene === 'sticker')} onOpenCompose={() => setComposeOpen(true)}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? '表情与头像工作台' : '画廊'}>
             {appMode === 'engine' ? (
               <>
                 <div className="safe-area-x">
@@ -300,6 +303,13 @@ export default function App() {
               <div className="safe-area-x max-w-7xl mx-auto">
                 <Suspense fallback={<div className="min-h-[320px]" />}>
                   <SkillWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
+                </Suspense>
+              </div>
+            ) : activeScene === 'sticker' ? (
+              // 表情与头像专属工作台：替代画廊块（最近生成在工作台内），镜像 skill 工坊分支
+              <div className="safe-area-x max-w-7xl mx-auto">
+                <Suspense fallback={<div className="min-h-[320px]" />}>
+                  <StickerWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
                 </Suspense>
               </div>
             ) : (
@@ -322,7 +332,7 @@ export default function App() {
       ) : (
         <>
           <Header />
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : '画廊'}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? '表情与头像工作台' : '画廊'}>
             {appMode === 'engine' ? (
               <Suspense fallback={<div className="min-h-[320px]" />}>
                 <EngineWorkspace />
@@ -332,6 +342,14 @@ export default function App() {
                 <div className="safe-area-x max-w-7xl mx-auto">
                   <Suspense fallback={<div className="min-h-[320px]" />}>
                     <SkillWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
+                  </Suspense>
+                </div>
+              </main>
+            ) : activeScene === 'sticker' ? (
+              <main data-home-main data-drag-select-surface className="pb-6">
+                <div className="safe-area-x max-w-7xl mx-auto">
+                  <Suspense fallback={<div className="min-h-[320px]" />}>
+                    <StickerWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
                   </Suspense>
                 </div>
               </main>
@@ -352,7 +370,7 @@ export default function App() {
                 </div>
               </main>
             )}
-            {appMode === 'gallery' && activeScene !== 'skill' && <InputBar />}
+            {appMode === 'gallery' && activeScene !== 'skill' && activeScene !== 'sticker' && <InputBar />}
           </ErrorBoundary>
         </>
       )}
