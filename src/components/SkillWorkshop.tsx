@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Loader2, RefreshCw, Settings2, Sparkles, Trash2, Upload } from 'lucide-react'
 import { useStore } from '../store'
-import { getSceneTextApiProfileResolution } from '../lib/apiProfiles'
+import { getSceneImageApiProfile, getSceneTextApiProfileResolution } from '../lib/apiProfiles'
 import { BUILTIN_SKILL_EXAMPLE_ANCHORS } from '../lib/skillWorkshop/builtinSkills'
-import { calculateImageSize } from '../lib/size'
+import { normalizeCodexCliImageSize, normalizeImageSize } from '../lib/size'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
 import { Checkbox } from './Checkbox'
 import type { SkillSummary, TaskRecord } from '../types'
+
+const SizePickerModal = lazy(() => import('./SizePickerModal'))
 
 const CARD_CLASS_NAME = 'mt-4 overflow-hidden rounded-2xl border border-stone-200/80 bg-white/70 shadow-[0_18px_50px_rgba(72,54,35,0.08)] ring-1 ring-white/70 backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.035] dark:shadow-[0_18px_60px_rgba(0,0,0,0.28)] dark:ring-white/[0.04]'
 const SECTION_TITLE_CLASS_NAME = 'text-xs font-semibold text-stone-500 dark:text-stone-400'
@@ -75,34 +77,26 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const oneClickBusy = oneClickPhase !== 'idle'
   // 内置 skill 的示例锚点（本地 skill 无示例不显示 chips）
   const exampleAnchors = activeSkill ? BUILTIN_SKILL_EXAMPLE_ANCHORS[activeSkill.id] ?? null : null
-  // 工坊尺寸预设（1K/2K × 常用比例；4K 依赖 exact_size 本地放大，属专业路径走画廊/场景高级区）。
-  // 当前 params.size 不在预设中（如场景 defaults 配了别的比例）时补一个只读「自定义」项保显示。
-  const sizePresetOptions = useMemo(() => {
-    const combos: Array<['1K' | '2K', string]> = [
-      ['1K', '1:1'], ['1K', '3:4'], ['1K', '4:3'], ['1K', '9:16'], ['1K', '16:9'],
-      ['2K', '1:1'], ['2K', '3:4'], ['2K', '4:3'], ['2K', '9:16'], ['2K', '16:9'],
-    ]
-    const options = combos
-      .map(([tier, ratio]) => {
-        const size = calculateImageSize(tier, ratio)
-        return size ? { value: size, label: `${tier} ${ratio}（${size.replace('x', '×')}）` } : null
-      })
-      .filter((option): option is { value: string; label: string } => option !== null)
-    if (!options.some((option) => option.value === params.size)) {
-      // auto=跟随服务商默认；非预设具体尺寸（如场景 defaults 配了冷门比例）原样展示
-      options.unshift({
-        value: params.size,
-        label: params.size === 'auto' ? '跟随服务商默认' : `当前尺寸（${params.size.replace('x', '×')}）`,
-      })
-    }
-    return options
-  }, [params.size])
+  // 场景图像档案（工坊生成链路实际使用的档案）：尺寸弹层的 codexCli 规整与 displaySize 与其保持一致
+  const imageProfile = useMemo(() => getSceneImageApiProfile(settings), [settings])
+  const displaySize = (imageProfile.codexCli ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || params.size
+  const [showSizePicker, setShowSizePicker] = useState(false)
   // 扩写链路与反推同源：场景文本覆盖 > 全局文本自动链（E. 模型透明化：展示生效档案与模型）
   const textProfile = useMemo(() => getSceneTextApiProfileResolution(settings).profile, [settings])
   const hasTextProfile = textProfile !== null
 
   return (
     <section data-no-drag-select data-ui-summary className={CARD_CLASS_NAME}>
+      {showSizePicker && (
+        <Suspense fallback={null}>
+          <SizePickerModal
+            currentSize={params.size}
+            onSelect={(size) => setParams({ size })}
+            onClose={() => setShowSizePicker(false)}
+            codexCli={imageProfile.codexCli}
+          />
+        </Suspense>
+      )}
       {/* 工坊标题栏 + 场景设置入口 */}
       <div className="flex items-center justify-between gap-3 border-b border-stone-200/70 px-4 py-3 dark:border-white/[0.06]">
         <div className="flex min-w-0 items-center gap-2">
@@ -253,20 +247,18 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
                 ))}
               </div>
             )}
-            {/* 图片尺寸：绑定 skill 场景草稿的 params.size，随场景隔离保存/恢复（store.setActiveScene） */}
+            {/* 图片尺寸：与画廊 InputBar 同款入口 + SizePickerModal（自动/按比例 1K-4K×13 比例/自定义宽高），
+                绑定 skill 场景草稿的 params.size，随场景隔离保存/恢复（store.setActiveScene） */}
             <div className="mt-2 flex items-center gap-2">
               <span className={SECTION_TITLE_CLASS_NAME}>图片尺寸</span>
-              <select
-                value={params.size}
-                onChange={(event) => setParams({ size: event.target.value })}
-                aria-label="图片尺寸"
-                title="生成图片的尺寸；保存在 Skill 工坊，不被其他场景影响（跨刷新保留需开启「刷新保留输入」）"
-                className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
+              <button
+                type="button"
+                onClick={() => setShowSizePicker(true)}
+                title="选择尺寸"
+                className="rounded-xl border border-stone-200/80 bg-white/60 px-3 py-1.5 text-left font-mono text-xs text-stone-700 shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200 dark:hover:bg-white/[0.06]"
               >
-                {sizePresetOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
+                {displaySize}
+              </button>
             </div>
           </div>
 

@@ -240,7 +240,7 @@ describe('SkillWorkshop', () => {
     expect(loadBuiltinSkills).toHaveBeenCalled()
   })
 
-  it('一键生成主 CTA、示例 chips 点击填入与高级选项折叠', () => {
+  it('一键生成主 CTA、示例 chips 点击填入与高级选项折叠', async () => {
     const SKILL_SHANZE: SkillSummary = {
       id: 'shan-ze-school',
       name: 'shan-ze-school',
@@ -268,13 +268,17 @@ describe('SkillWorkshop', () => {
     fireEvent.click(screen.getByRole('button', { name: '一键生成图片' }))
     expect(oneClick).toHaveBeenCalledTimes(1)
 
-    // 图片尺寸 select：渲染当前 params.size，改选即写入 params（生成链路按 params.size 提交）
-    const sizeSelect = screen.getByLabelText('图片尺寸') as HTMLSelectElement
-    expect(sizeSelect.value).toBe(useStore.getState().params.size)
-    const targetSize = sizeSelect.options[1]?.value
-    expect(targetSize).toBeTruthy()
-    fireEvent.change(sizeSelect, { target: { value: targetSize! } })
-    expect(useStore.getState().params.size).toBe(targetSize)
+    // 图片尺寸：画廊同款入口按钮显示当前尺寸，点开 SizePickerModal 选比例后写入 params
+    const sizeButton = screen.getByRole('button', { name: /选择尺寸|\d+x\d+|auto/ })
+    fireEvent.click(sizeButton)
+    const modal = await screen.findByRole('heading', { name: '设置图像尺寸' })
+    expect(modal).toBeTruthy()
+    // 切到按比例模式选 2K + 9:16，确定后写回 params.size
+    fireEvent.click(screen.getByRole('button', { name: '按比例' }))
+    fireEvent.click(screen.getByRole('button', { name: '2K' }))
+    fireEvent.click(screen.getByRole('button', { name: '9:16' }))
+    fireEvent.click(screen.getByRole('button', { name: '确定' }))
+    expect(useStore.getState().params.size).toBe('1440x2560')
   })
 
   it('未绑定本地目录时不显示「清除」按钮', () => {
