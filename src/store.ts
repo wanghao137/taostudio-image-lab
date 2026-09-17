@@ -1520,37 +1520,42 @@ export const useStore = create<AppState>()(
             sheetDataUrl: null,
           },
         }))
-        // 与库 generateSpriteAnimation 的重试纪律 1:1（传输抖动 3 次退避在 fetchSpriteSheet
-        // 内建；QC 失败重生成一次、间隔 10s）。拆成 fetch/process 两步直调是为了把
-        // 「生成精灵图中/切分对齐中」细阶段真实暴露给 UI（库无阶段回调，且除 sheetDataUrl
-        // 外不改库）。
-        let lastError: unknown = new Error('sprite sheet 生成失败')
-        for (let attempt = 0; attempt < 2; attempt++) {
-          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 10000))
-          try {
+        // 与库 generateSpriteAnimation 的重试纪律 1:1：fetchSpriteSheet 内建传输抖动
+        // 3 次退避——传输性失败在 try 外直接中止（不双倍计费）；QC/处理失败才进入
+        // 重生轮（间隔 10s 后重新生成新 sheet，确定性处理重切同图无意义）。
+        // 拆成 fetch/process 两步直调是为了把「生成精灵图中/切分对齐中」细阶段
+        // 真实暴露给 UI（库无阶段回调，且除 sheetDataUrl 外不改库）。
+        try {
+          let lastError: unknown = new Error('sprite sheet 处理失败')
+          for (let attempt = 0; attempt < 2; attempt++) {
+            if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 10000))
             set((prev) => ({ spriteGif: { ...prev.spriteGif, phase: 'fetching' } }))
             const sheetDataUrl = await fetchSpriteSheet(requestSettings, spriteParams, prompt)
-            set((prev) => ({ spriteGif: { ...prev.spriteGif, phase: 'processing' } }))
-            const result = await processSpriteSheet(sheetDataUrl, opts)
-            set((prev) => ({
-              spriteGif: {
-                ...prev.spriteGif,
-                status: 'ready',
-                phase: null,
-                frames: result.frames.map((dataUrl) => ({ id: genId(), dataUrl, enabled: true })),
-                sheetDataUrl: result.sheetDataUrl,
-                warnings: result.warnings,
-              },
-            }))
-            get().showToast(`战斗动图就绪：已切分 ${result.frames.length} 帧`, 'success')
-            return
-          } catch (err) {
-            lastError = err
+            try {
+              set((prev) => ({ spriteGif: { ...prev.spriteGif, phase: 'processing' } }))
+              const result = await processSpriteSheet(sheetDataUrl, opts)
+              set((prev) => ({
+                spriteGif: {
+                  ...prev.spriteGif,
+                  status: 'ready',
+                  phase: null,
+                  frames: result.frames.map((dataUrl) => ({ id: genId(), dataUrl, enabled: true })),
+                  sheetDataUrl: result.sheetDataUrl,
+                  warnings: result.warnings,
+                },
+              }))
+              get().showToast(`战斗动图就绪：已切分 ${result.frames.length} 帧`, 'success')
+              return
+            } catch (err) {
+              lastError = err
+            }
           }
+          throw lastError instanceof Error ? lastError : new Error(String(lastError))
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          set((prev) => ({ spriteGif: { ...prev.spriteGif, status: 'error', phase: null, error: message } }))
+          get().showToast(`战斗动图生成失败：${message}`, 'error')
         }
-        const message = lastError instanceof Error ? lastError.message : String(lastError)
-        set((prev) => ({ spriteGif: { ...prev.spriteGif, status: 'error', phase: null, error: message } }))
-        get().showToast(`战斗动图生成失败：${message}`, 'error')
       },
       toggleSpriteFrame: (id) => set((state) => ({
         spriteGif: {

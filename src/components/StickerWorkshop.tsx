@@ -87,19 +87,27 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
     ? DEFAULT_FAL_IMAGE_SIZE
     : (imageProfile.codexCli ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || params.size
 
-  // 分区 A：一键生成（纯文生图语义，submitTask 自带守卫与 toast）
+  // 分区 A：一键生成（纯文生图语义，submitTask 自带守卫与 toast）；
+  // submitting 防 in-flight 双击（submitTask 无编排态，双击=两个计费任务）
+  const [submitting, setSubmitting] = useState(false)
   const submitStaticGeneration = async () => {
     const text = staticDraft.trim()
     if (!text) {
       showToast('请先描述想要的表情或头像（可点击表情快捷填入）', 'error')
       return
     }
-    // 与 Skill 工坊同语义：静态快捷生成为纯文生图，清掉本场景遗留的参考图/遮罩，
-    // 避免静默携带输入图变成计费编辑请求
-    clearInputImages()
-    clearMaskDraft()
-    setPrompt(text)
-    await submitTask()
+    if (submitting) return
+    setSubmitting(true)
+    try {
+      // 与 Skill 工坊同语义：静态快捷生成为纯文生图，清掉本场景遗留的参考图/遮罩，
+      // 避免静默携带输入图变成计费编辑请求
+      clearInputImages()
+      clearMaskDraft()
+      setPrompt(text)
+      await submitTask()
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const runExport = async (kind: 'gif' | 'apng' | 'zip') => {
@@ -190,7 +198,7 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
                 </button>
               ))}
             </div>
-            <p className={`${HINT_CLASS_NAME} mt-1`}>点击表情快速填入；生成的任务进入本场景画廊（可在设置切换查看全部场景）。</p>
+            <p className={`${HINT_CLASS_NAME} mt-1`}>点击表情快速填入；最近生成显示在下方，切换到其他场景后可在画廊按「全部」查看历史。</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2">
@@ -207,7 +215,7 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
             <button
               type="button"
               onClick={() => { void submitStaticGeneration() }}
-              disabled={busy || !staticDraft.trim()}
+              disabled={busy || submitting || !staticDraft.trim()}
               className={PRIMARY_BUTTON_CLASS_NAME}
             >
               <Sparkles className="h-4 w-4" aria-hidden />

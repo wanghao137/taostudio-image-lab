@@ -5815,13 +5815,12 @@ describe('sprite gif workshop（表情工坊·战斗 Sprite GIF）', () => {
     }
   })
 
-  it('两次尝试都失败：置 error（phase 复位）+ 中文失败 toast', async () => {
+  it('传输性失败（fetch 耗尽退避）：直接中止不重生——fetch 仅 1 次（避免双倍计费），置 error', async () => {
     vi.useFakeTimers()
     try {
       vi.mocked(fetchSpriteSheet).mockClear().mockRejectedValue(new Error('生成通道未返回图片'))
 
       const pending = useStore.getState().generateSpriteGif()
-      await vi.advanceTimersByTimeAsync(10_100)
       await pending
 
       const sprite = useStore.getState().spriteGif
@@ -5829,7 +5828,29 @@ describe('sprite gif workshop（表情工坊·战斗 Sprite GIF）', () => {
       expect(sprite.phase).toBeNull()
       expect(sprite.error).toContain('生成通道未返回图片')
       expect(sprite.frames).toEqual([])
+      // 与库纪律 1:1：传输失败（fetchSpriteSheet 内部 3 次退避耗尽后抛出）在重生轮之外直接中止
+      expect(fetchSpriteSheet).toHaveBeenCalledTimes(1)
+      expect(useStore.getState().toast?.message).toContain('战斗动图生成失败')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('QC 失败（process 抛错）：间隔 10s 后重新生成新 sheet 再处理——fetch 共 2 次，最终 error', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(fetchSpriteSheet).mockClear().mockResolvedValue('data:image/png;base64,sheet')
+      vi.mocked(processSpriteSheet).mockClear().mockRejectedValue(new Error('有效帧过少'))
+
+      const pending = useStore.getState().generateSpriteGif()
+      await vi.advanceTimersByTimeAsync(10_100)
+      await pending
+
+      const sprite = useStore.getState().spriteGif
+      expect(sprite.status).toBe('error')
+      expect(sprite.error).toContain('有效帧过少')
       expect(fetchSpriteSheet).toHaveBeenCalledTimes(2)
+      expect(processSpriteSheet).toHaveBeenCalledTimes(2)
       expect(useStore.getState().toast?.message).toContain('战斗动图生成失败')
     } finally {
       vi.useRealTimers()

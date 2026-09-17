@@ -173,7 +173,7 @@ export interface SpriteSubject {
 
 export interface RegisteredFrame {
   canvas: HTMLCanvasElement
-  /** 相对基准帧的质心平移量（画布统一坐标系） */
+  /** 该帧在统一画布内的落位偏移（相对联合包围盒原点） */
   offset: { dx: number; dy: number }
 }
 
@@ -228,6 +228,7 @@ export function extractSpriteSubject(source: HTMLCanvasElement): SpriteSubject |
   let area = 0
   let cx = 0
   let cy = 0
+  let weightSum = 0
   for (let y = 0; y < cropH; y++) {
     for (let x = 0; x < cropW; x++) {
       const a = data[(y * cropW + x) * 4 + 3]
@@ -237,19 +238,23 @@ export function extractSpriteSubject(source: HTMLCanvasElement): SpriteSubject |
         if (y < minY) minY = y
         if (y > maxY) maxY = y
         area++
-        cx += x * (a / 255)
-        cy += y * (a / 255)
+        const w = a / 255
+        cx += x * w
+        cy += y * w
+        weightSum += w
       }
     }
   }
-  if (area <= 0 || maxX < 0) return null
+  if (area <= 0 || maxX < 0 || weightSum <= 0) return null
   const canvas = document.createElement('canvas')
   canvas.width = maxX - minX + 1
   canvas.height = maxY - minY + 1
   canvas.getContext('2d')?.drawImage(source, minX, minY, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height)
   return {
     canvas,
-    centroid: { x: cx / area - minX, y: cy / area - minY },
+    // alpha 加权质心：分子与分母同为 alpha 权重（Σx·w / Σw），半透明像素（光效/辉光）
+    // 按其不透明度参与锚点，帧间 alpha 分布差异不再污染 registration 基准
+    centroid: { x: cx / weightSum - minX, y: cy / weightSum - minY },
     area,
   }
 }
@@ -381,12 +386,12 @@ export async function processSpriteSheet(
   const alpha = sctx.getImageData(0, 0, w, h).data
   const rowT = (y: number) => {
     let n = 0
-    for (let x = 0; x < w; x++) if (alpha[(y * w + x) * 4 + 3] <= 8) n++
+    for (let x = 0; x < w; x++) if (alpha[(y * w + x) * 4 + 3] <= 12) n++
     return n / w
   }
   const colT = (x: number) => {
     let n = 0
-    for (let y = 0; y < h; y++) if (alpha[(y * w + x) * 4 + 3] <= 8) n++
+    for (let y = 0; y < h; y++) if (alpha[(y * w + x) * 4 + 3] <= 12) n++
     return n / h
   }
   const grid = planSpriteCellGrid(rowT, colT, w, h, opts.rows, opts.cols)
