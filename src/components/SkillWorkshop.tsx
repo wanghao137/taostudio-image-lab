@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Loader2, RefreshCw, Settings2, Sparkles, Trash2, Upload } from 'lucide-react'
 import { useStore } from '../store'
 import { getSceneImageApiProfile, getSceneTextApiProfileResolution } from '../lib/apiProfiles'
 import { BUILTIN_SKILL_EXAMPLE_ANCHORS } from '../lib/skillWorkshop/builtinSkills'
+import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import { normalizeCodexCliImageSize, normalizeImageSize } from '../lib/size'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
 import { Checkbox } from './Checkbox'
@@ -77,9 +79,13 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const oneClickBusy = oneClickPhase !== 'idle'
   // 内置 skill 的示例锚点（本地 skill 无示例不显示 chips）
   const exampleAnchors = activeSkill ? BUILTIN_SKILL_EXAMPLE_ANCHORS[activeSkill.id] ?? null : null
-  // 场景图像档案（工坊生成链路实际使用的档案）：尺寸弹层的 codexCli 规整与 displaySize 与其保持一致
+  // 场景图像档案（工坊生成链路实际使用的档案）：尺寸弹层的 codexCli 规整与 displaySize 与其保持一致；
+  // fal 档案与画廊同规则（工坊恒为纯文生图）：不允许 auto，显示态回落 DEFAULT_FAL_IMAGE_SIZE
   const imageProfile = useMemo(() => getSceneImageApiProfile(settings), [settings])
-  const displaySize = (imageProfile.codexCli ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || params.size
+  const isFalImage = imageProfile.provider === 'fal'
+  const displaySize = isFalImage && params.size === 'auto'
+    ? DEFAULT_FAL_IMAGE_SIZE
+    : (imageProfile.codexCli ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || params.size
   const [showSizePicker, setShowSizePicker] = useState(false)
   // 扩写链路与反推同源：场景文本覆盖 > 全局文本自动链（E. 模型透明化：展示生效档案与模型）
   const textProfile = useMemo(() => getSceneTextApiProfileResolution(settings).profile, [settings])
@@ -87,15 +93,19 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
 
   return (
     <section data-no-drag-select data-ui-summary className={CARD_CLASS_NAME}>
-      {showSizePicker && (
+      {/* 弹层 portal 到 body：卡片带 backdrop-blur/overflow-hidden，fixed 后代会被降级为
+          卡片内定位并被裁剪（画廊挂在 InputBar 顶层，同语义必须逃离卡片层叠上下文） */}
+      {showSizePicker && createPortal(
         <Suspense fallback={null}>
           <SizePickerModal
             currentSize={params.size}
             onSelect={(size) => setParams({ size })}
             onClose={() => setShowSizePicker(false)}
+            allowAuto={!isFalImage}
             codexCli={imageProfile.codexCli}
           />
-        </Suspense>
+        </Suspense>,
+        document.body,
       )}
       {/* 工坊标题栏 + 场景设置入口 */}
       <div className="flex items-center justify-between gap-3 border-b border-stone-200/70 px-4 py-3 dark:border-white/[0.06]">
@@ -254,7 +264,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
               <button
                 type="button"
                 onClick={() => setShowSizePicker(true)}
-                title="选择尺寸"
+                title="选择尺寸；保存在 Skill 工坊，不被其他场景影响（跨刷新保留需开启「刷新保留输入」）"
                 className="rounded-xl border border-stone-200/80 bg-white/60 px-3 py-1.5 text-left font-mono text-xs text-stone-700 shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200 dark:hover:bg-white/[0.06]"
               >
                 {displaySize}
