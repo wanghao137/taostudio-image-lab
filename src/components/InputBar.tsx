@@ -1,10 +1,12 @@
-import { lazy, Suspense, useRef, useEffect, useCallback, useState, useLayoutEffect, type ReactNode } from 'react'
+import { lazy, Suspense, useRef, useEffect, useCallback, useState, useLayoutEffect, useMemo, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ImageUp, Maximize2, SlidersHorizontal } from 'lucide-react'
-import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks } from '../store'
+import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks, stopBatchPrompts } from '../store'
 import { type TaskParams, type TaskRecord } from '../types'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState } from '../lib/favoriteState'
 import { filterAndSortTasks } from '../lib/taskFilters'
+import { splitModelList } from '../lib/apiProfiles'
+import { splitBatchPrompts } from '../lib/batchPrompts'
 import {
   getContentEditableBoundaryOffset,
   getContentEditableCursor,
@@ -19,7 +21,7 @@ import {
 import { ensureImageCached } from '../lib/imageCache'
 import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
-import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
+import { getAtImageQuery, getImageComments, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
 import {
   ASSET_4K_RATIO_PRESETS,
   getAsset4KRatioSize,
@@ -34,7 +36,8 @@ import { useImageComposer } from '../hooks/useImageComposer'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
 import Select from './Select'
 import ViewportTooltip from './ViewportTooltip'
-import { CloseIcon } from './icons'
+import { CloseIcon, SketchIcon } from './icons'
+import { CommentBadge } from './CommentMarks'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
 const PromptHistoryPopoverLazy = lazy(() => import('./input/PromptHistoryPopover'))
@@ -139,6 +142,12 @@ export default function InputBar() {
   const setSettings = useStore((s) => s.setSettings)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
+  const setSketchBoard = useStore((s) => s.setSketchBoard)
+  const batchProgress = useStore((s) => s.batchProgress)
+  const reusedTaskApiModel = useStore((s) => s.reusedTaskApiModel)
+  const setReusedTaskApiModel = useStore((s) => s.setReusedTaskApiModel)
+  const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
+  const setPromptSelection = useStore((s) => s.setPromptSelection)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const selectedTaskIds = useStore((s) => s.selectedTaskIds)
   const setSelectedTaskIds = useStore((s) => s.setSelectedTaskIds)
@@ -428,6 +437,7 @@ export default function InputBar() {
   const [isSingleLine, setIsSingleLine] = useState(true)
   const [submitHover, setSubmitHover] = useState(false)
   const [attachHover, setAttachHover] = useState(false)
+  const [showUploadMenu, setShowUploadMenu] = useState(false)
   const [reverseUploadHover, setReverseUploadHover] = useState(false)
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
@@ -546,6 +556,29 @@ export default function InputBar() {
         ]
       : []),
   ]
+  // 多模型切换（上游 v0.7.16）：模型 ID 支持逗号分隔列表，首页按配置记忆选择。
+  const isTemporarilyReusedProfile = Boolean(settings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId && activeProfile.id === reusedTaskApiProfileId)
+  const modelOptions = useMemo(() => (
+    splitModelList(settings.profiles.find((profile) => profile.id === activeProfile.id)?.model ?? activeProfile.model)
+      .map((model) => ({ label: model, value: model }))
+  ), [activeProfile.id, activeProfile.model, settings.profiles])
+  const handleModelChange = useCallback((model: string) => {
+    if (isTemporarilyReusedProfile) {
+      setReusedTaskApiModel(model)
+      return
+    }
+    setSettings({
+      profiles: settings.profiles.map((profile) => profile.id === activeProfile.id ? { ...profile, selectedModel: model } : profile),
+    })
+  }, [activeProfile.id, isTemporarilyReusedProfile, setReusedTaskApiModel, setSettings, settings.profiles])
+  // 场景对图像模型有显式覆盖时切换器不生效（覆盖优先级高于 selectedModel），直接隐藏。
+  const sceneModelOverride = !isTemporarilyReusedProfile
+    ? (settings.scenes[settings.activeScene]?.imageModelOverride?.trim() || '')
+    : ''
+  // 多提示词批量提交（上游 v0.7.16）：偏好设置开启后，提示词之间空两行分隔。
+  const batchRunning = Boolean(batchProgress)
+  const batchEnabled = settings.showBatchPrompt && settings.batchPromptEnabled
+  const batchPromptCount = useMemo(() => (batchEnabled ? splitBatchPrompts(prompt).length : 0), [batchEnabled, prompt])
   const transparentOutputHint = useHintTooltip()
   const handleTransparentOutputMenuOpenChange = useCallback((open: boolean) => {
     if (open) transparentOutputHint.hide()
@@ -732,50 +765,66 @@ export default function InputBar() {
     replaceFileInputRef.current?.click()
   }, [])
 
-  const commitReferenceEditChoice = useCallback((choice: 'replace-reference' | 'add-mask', remember?: boolean) => {
+  const commitReferenceEditChoice = useCallback((choice: 'sketch' | 'mask', remember?: boolean) => {
     if (remember) setSettings({ referenceImageEditAction: choice })
   }, [setSettings])
 
   const handleEditReferenceImage = useCallback((img: (typeof inputImages)[number], idx: number, isMaskTarget: boolean) => {
+    // 已是遮罩主图时继续编辑遮罩
     if (isMaskTarget) {
       setMaskEditorImageId(img.id)
       return
     }
 
-    if (settings.referenceImageEditAction === 'replace-reference') {
-      openReplaceReferenceFilePicker(idx, img.id)
-      return
+    const openSketch = () => setSketchBoard({ baseImageSrc: img.dataUrl, replaceImageId: img.id })
+    const openMask = () => {
+      if (maskDraft) {
+        showToast('只能有一张遮罩图，请先移除现有遮罩', 'info')
+        return
+      }
+      setMaskEditorImageId(img.id)
     }
 
-    if (settings.referenceImageEditAction === 'add-mask') {
-      setMaskEditorImageId(img.id)
+    if (settings.referenceImageEditAction === 'sketch') {
+      openSketch()
+      return
+    }
+    if (settings.referenceImageEditAction === 'mask') {
+      openMask()
       return
     }
 
     setConfirmDialog({
-      title: '编辑参考图',
-      message: '请选择这次要执行的操作。若不勾选下方的选项，则每次都询问；勾选后可在 **设置-习惯配置** 修改选择。',
+      title: '编辑图片',
+      message: '画板可在图片上手绘、评论，标注修改意图；遮罩可指定需要重绘的区域；替换图片直接换一张参考图文件。\n若勾选下方选项，之后可在 **设置-习惯配置** 中修改。',
       checkbox: { label: '以后默认执行此选择' },
       buttons: [
         {
-          label: '替换参考图',
+          label: '遮罩',
           tone: 'secondary',
           action: (remember) => {
-            commitReferenceEditChoice('replace-reference', remember)
-            openReplaceReferenceFilePicker(idx, img.id)
+            commitReferenceEditChoice('mask', remember)
+            openMask()
           },
         },
         {
-          label: '添加遮罩',
+          label: '画板',
           tone: 'primary',
           action: (remember) => {
-            commitReferenceEditChoice('add-mask', remember)
-            setMaskEditorImageId(img.id)
+            commitReferenceEditChoice('sketch', remember)
+            openSketch()
+          },
+        },
+        {
+          label: '替换图片',
+          tone: 'secondary',
+          action: () => {
+            openReplaceReferenceFilePicker(idx, img.id)
           },
         },
       ],
     })
-  }, [commitReferenceEditChoice, openReplaceReferenceFilePicker, setConfirmDialog, setMaskEditorImageId, settings.referenceImageEditAction])
+  }, [commitReferenceEditChoice, maskDraft, openReplaceReferenceFilePicker, setConfirmDialog, setMaskEditorImageId, setSketchBoard, settings.referenceImageEditAction, showToast])
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     await handleFilesRef.current(e.target.files || [])
@@ -862,11 +911,11 @@ export default function InputBar() {
         if (e.shiftKey) {
           insertPromptTextAtSelection('\n')
         } else if (!isModifier) {
-          if (canSubmit) submitCurrentMode()
+          if (canSubmit && !batchRunning) submitCurrentMode()
         }
       } else {
         if (isModifier) {
-          if (canSubmit) submitCurrentMode()
+          if (canSubmit && !batchRunning) submitCurrentMode()
         } else {
           insertPromptTextAtSelection('\n')
         }
@@ -1096,6 +1145,10 @@ export default function InputBar() {
 
       const range = getContentEditableSelection(el)
       setCursorPos(range.start)
+      // 记录选区供画板等外部入口插入胶囊并覆盖选中内容；只记录完全落在输入框内的选区。
+      if (domRange.startContainer && el.contains(domRange.startContainer) && el.contains(domRange.endContainer)) {
+        setPromptSelection({ start: range.start, end: range.end })
+      }
       syncMentionTagSelection(el)
 
       const rangeRect = domRange.getBoundingClientRect()
@@ -1132,6 +1185,17 @@ export default function InputBar() {
   useEffect(() => {
     adjustTextareaHeight()
   }, [inputImages.length, Boolean(maskDraft), maskPreviewUrl, adjustTextareaHeight])
+
+  // “+”菜单打开时点击外部关闭
+  useEffect(() => {
+    if (!showUploadMenu) return
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (!target?.closest('[data-add-image-menu]')) setShowUploadMenu(false)
+    }
+    document.addEventListener('mousedown', handleMouseDown)
+    return () => document.removeEventListener('mousedown', handleMouseDown)
+  }, [showUploadMenu])
 
   useEffect(() => {
     window.addEventListener('resize', adjustTextareaHeight)
@@ -1250,6 +1314,7 @@ export default function InputBar() {
     const isLast = idx === inputImages.length - 1
     const showDropBefore = imageDragOverIndex === idx && imageDragIndex !== idx
     const showDropAfter = imageDragOverIndex === inputImages.length && isLast && imageDragIndex !== idx
+    const commentCount = isMaskTarget ? 0 : getImageComments(prompt, idx).length
 
     const handleDragStart = (e: React.DragEvent) => {
       if (isMaskTarget) {
@@ -1400,7 +1465,7 @@ export default function InputBar() {
         )}
         <div
           className={`relative w-[40px] h-[40px] rounded-lg overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
-            isMaskTarget
+            isMaskTarget || commentCount > 0
               ? 'border-2 border-blue-500'
               : 'border border-gray-200 dark:border-white/[0.08]'
           }`}
@@ -1414,7 +1479,7 @@ export default function InputBar() {
               maskConflictNoticeShownRef.current = true
               showToast('只能有一张遮罩图', 'info')
             }
-            setLightboxImageId(img.id, inputImages.map((i) => i.id))
+            setLightboxImageId(img.id, inputImages.map((i) => i.id), prompt)
           }}
         >
           {displaySrc && (
@@ -1431,6 +1496,7 @@ export default function InputBar() {
               MASK
             </span>
           )}
+          {commentCount > 0 && <CommentBadge count={commentCount} className={isMaskTarget ? 'left-1 top-[18px]' : 'left-1 top-1'} />}
           <span className="absolute bottom-1 left-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/55 text-[9px] font-semibold text-white backdrop-blur-sm z-10 pointer-events-none">
             {idx + 1}
           </span>
@@ -1534,6 +1600,38 @@ export default function InputBar() {
             : <>Codex CLI 自定义尺寸会自动限制在 1K 以内</>}
         />
       </label>
+      {modelOptions.length > 1 && !sceneModelOverride && (
+        <label className="flex flex-col gap-0.5">
+          <span className="text-gray-400 dark:text-gray-500 ml-1">模型</span>
+          <Select
+            value={activeProfile.model}
+            onChange={handleModelChange}
+            options={modelOptions}
+            className="px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] focus:outline-none text-xs text-left transition-all duration-200 shadow-sm font-mono"
+          />
+        </label>
+      )}
+      {settings.showBatchPrompt && (
+        <label className="flex flex-col gap-0.5">
+          <span className="text-gray-400 dark:text-gray-500 ml-1">批量</span>
+          <Select
+            value={!settings.batchPromptEnabled ? 'off' : settings.batchPromptMode}
+            onChange={(val) => {
+              if (val === 'off') {
+                setSettings({ batchPromptEnabled: false })
+              } else {
+                setSettings({ batchPromptEnabled: true, batchPromptMode: val as 'queue' | 'concurrent' })
+              }
+            }}
+            options={[
+              { label: '关闭', value: 'off' },
+              { label: `排队${batchEnabled && batchPromptCount > 0 ? ` · ${batchPromptCount} 条` : ''}`, value: 'queue' },
+              { label: `并发${batchEnabled && batchPromptCount > 0 ? ` · ${batchPromptCount} 条` : ''}`, value: 'concurrent' },
+            ]}
+            className="px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] hover:bg-white dark:hover:bg-white/[0.06] focus:outline-none text-xs text-left transition-all duration-200 shadow-sm font-mono"
+          />
+        </label>
+      )}
       <label
         className="relative flex flex-col gap-0.5"
         onMouseEnter={exactSizeHint.show}
@@ -1968,6 +2066,26 @@ export default function InputBar() {
       )}
 
       <div data-input-bar className="fixed bottom-3 left-1/2 z-30 w-full max-w-5xl -translate-x-1/2 px-3 transition-all duration-300 sm:bottom-5 sm:px-4">
+        {batchProgress && (
+          <div className="mx-auto mb-2 flex max-w-md items-center gap-3 rounded-full border border-gray-200/50 bg-white/90 px-4 py-1.5 shadow-[0_8px_30px_rgb(0,0,0,0.12)] backdrop-blur dark:border-white/10 dark:bg-gray-800/90">
+            <span className="shrink-0 text-xs text-gray-600 dark:text-gray-300">
+              批量 {batchProgress.finished}/{batchProgress.total}
+            </span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-200 dark:bg-white/10">
+              <div
+                className="h-full rounded-full bg-blue-500 transition-all duration-300"
+                style={{ width: `${batchProgress.total ? Math.round((batchProgress.finished / batchProgress.total) * 100) : 0}%` }}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => void stopBatchPrompts()}
+              className="shrink-0 text-xs text-red-500 hover:text-red-600 dark:text-red-400"
+            >
+              停止
+            </button>
+          </div>
+        )}
         {showFavoriteCollectionBatchBar && (
           <div className="flex justify-center mb-3">
             <div className="bg-white/90 dark:bg-gray-800/90 backdrop-blur shadow-[0_8px_30px_rgb(0,0,0,0.12)] dark:shadow-lg rounded-full flex items-center p-1 border border-gray-200/50 dark:border-white/10 pointer-events-auto">
@@ -2310,24 +2428,74 @@ export default function InputBar() {
 
               <div className="flex gap-2 flex-shrink-0">
               <div
+                data-add-image-menu
                 className="relative"
                 onMouseEnter={() => setAttachHover(true)}
                 onMouseLeave={() => setAttachHover(false)}
               >
-                <ButtonTooltip visible={attachHover} text={uploadImageTooltipText} />
+                <ButtonTooltip visible={attachHover && !showUploadMenu} text={uploadImageTooltipText} />
                 <button
-                  onClick={() => !atImageLimit && fileInputRef.current?.click()}
+                  onClick={() => {
+                    if (atImageLimit) return
+                    setAttachHover(false)
+                    setShowUploadMenu(!showUploadMenu)
+                  }}
                   className={`p-2.5 rounded-xl transition-all shadow-sm ${
                     atImageLimit
                       ? 'bg-gray-200 dark:bg-white/[0.04] text-gray-300 dark:text-gray-500 cursor-not-allowed'
                       : 'bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 hover:shadow'
                   }`}
                   aria-label={uploadImageTooltipText}
+                  aria-expanded={showUploadMenu}
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                  <svg className={`w-5 h-5 transition-transform duration-200 ${showUploadMenu ? 'rotate-45' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                   </svg>
                 </button>
+                {showUploadMenu && (
+                  <div className="absolute bottom-full right-0 mb-2 w-36 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 overflow-hidden z-50">
+                    {isMobile && (
+                      <button
+                        type="button"
+                        className="w-full px-4 py-2.5 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+                        onClick={() => {
+                          setShowUploadMenu(false)
+                          cameraInputRef.current?.click()
+                        }}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        拍照
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+                      onClick={() => {
+                        setShowUploadMenu(false)
+                        fileInputRef.current?.click()
+                      }}
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                      </svg>
+                      上传图片
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+                      onClick={() => {
+                        setShowUploadMenu(false)
+                        setSketchBoard({ baseImageSrc: null })
+                      }}
+                    >
+                      <SketchIcon className="w-4 h-4" />
+                      画板
+                    </button>
+                  </div>
+                )}
               </div>
               <div
                 className="relative"
@@ -2355,7 +2523,7 @@ export default function InputBar() {
                 <ButtonTooltip visible={!hasSubmitApiConfig && submitHover} text={submitTooltipText} />
                 <button
                   onClick={() => hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
-                  disabled={hasSubmitApiConfig ? !canSubmit : false}
+                  disabled={hasSubmitApiConfig ? (!canSubmit || batchRunning) : false}
                   className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
                     !hasSubmitApiConfig
                       ? 'bg-gray-300 dark:bg-white/[0.06] text-white cursor-pointer'
@@ -2455,7 +2623,7 @@ export default function InputBar() {
                   <ButtonTooltip visible={!hasSubmitApiConfig && submitHover} text={submitTooltipText} />
                   <button
                     onClick={() => hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
-                    disabled={hasSubmitApiConfig ? !canSubmit : false}
+                    disabled={hasSubmitApiConfig ? (!canSubmit || batchRunning) : false}
                     aria-label={submitButtonAriaLabel}
                     className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm ${
                       !hasSubmitApiConfig
@@ -2466,7 +2634,7 @@ export default function InputBar() {
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                     </svg>
-                    {maskDraft ? '遮罩编辑' : '生成图像'}
+                    {maskDraft ? '遮罩编辑' : batchEnabled ? `批量生成 ${batchPromptCount} 条` : '生成图像'}
                   </button>
                 </div>
               </div>

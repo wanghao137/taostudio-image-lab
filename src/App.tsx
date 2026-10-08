@@ -28,6 +28,7 @@ const Lightbox = lazy(() => import('./components/Lightbox'))
 const SettingsModal = lazy(() => import('./components/SettingsModal'))
 const ConfirmDialog = lazy(() => import('./components/ConfirmDialog'))
 const MaskEditorModal = lazy(() => import('./components/MaskEditorModal'))
+const SketchBoardModal = lazy(() => import('./components/SketchBoardModal'))
 const StickerSplitModal = lazy(() => import('./components/StickerSplitModal'))
 const PromptReverseModal = lazy(() => import('./components/PromptReverseModal'))
 const SupportPromptModal = lazy(() => import('./components/SupportPromptModal'))
@@ -175,6 +176,7 @@ export default function App() {
   const confirmDialog = useStore((s) => s.confirmDialog)
   const supportPromptOpen = useStore((s) => s.supportPromptOpen)
   const maskEditorImageId = useStore((s) => s.maskEditorImageId)
+  const sketchBoard = useStore((s) => s.sketchBoard)
   const stickerSplitSource = useStore((s) => s.stickerSplitSource)
   const promptReverseSource = useStore((s) => s.promptReverseSource)
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
@@ -395,6 +397,7 @@ export default function App() {
           {confirmDialog ? <ConfirmDialog /> : null}
           {supportPromptOpen ? <SupportPromptModal /> : null}
           {maskEditorImageId ? <MaskEditorModal /> : null}
+          {sketchBoard ? <SketchBoardModal /> : null}
           {stickerSplitSource ? <StickerSplitModal /> : null}
           {promptReverseSource ? <PromptReverseModal /> : null}
           {favoritePickerTaskIds?.length ? <FavoriteCollectionPickerModal /> : null}

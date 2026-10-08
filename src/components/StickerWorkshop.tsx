@@ -104,7 +104,7 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
       clearInputImages()
       clearMaskDraft()
       setPrompt(text)
-      await submitTask()
+      await submitTask({ ignoreBatchPrompt: true })
     } finally {
       setSubmitting(false)
     }

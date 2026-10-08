@@ -3,6 +3,7 @@ import type {
   ApiProfile,
   ApiProvider,
   AppSettings,
+  PresetConfig,
   CustomProviderContentType,
   CustomProviderDefinition,
   CustomProviderFileMapping,
@@ -23,6 +24,7 @@ import { DEFAULT_IMAGES_MODEL } from './imageModels'
 import { normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApiUrl } from './defaultApiUrl'
 import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './importableConfigUrl'
+import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -64,6 +66,11 @@ function normalizeOpenAIModelForMode(model: unknown, apiMode: ApiMode): string {
   // 注意：Images 侧不做旧默认自动迁移。gpt-image-2 未被官方弃用，
   // 且自定义网关（如 chatgpt2api）可能长期只支持旧模型 ID，用户手填的值必须粘住。
   return rawModel
+}
+
+/** 多模型列表逐项应用模式归一（v0.7.16 上游 model 支持逗号分隔多模型，gpt-5.5 迁移逐项生效）。 */
+function normalizeOpenAIModelListForMode(value: string, apiMode: ApiMode): string {
+  return splitModelList(value).map((item) => normalizeOpenAIModelForMode(item, apiMode)).join(', ')
 }
 
 function normalizeModelByApiMode(value: unknown): ApiProfile['modelByApiMode'] {
@@ -210,7 +217,9 @@ export function getDefaultApiProfileId(settings: Partial<AppSettings> | unknown)
 }
 
 function normalizeReferenceImageEditAction(value: unknown): ReferenceImageEditAction {
-  return value === 'replace-reference' || value === 'add-mask' ? value : 'ask'
+  // 旧持久化值迁移：add-mask 与 mask 同为打开遮罩编辑器；replace-reference 无对应行为，回落 ask。
+  if (value === 'add-mask') return 'mask'
+  return value === 'sketch' || value === 'mask' ? value : 'ask'
 }
 
 function normalizeZipDownloadRoutes(value: unknown) {
@@ -589,7 +598,7 @@ function normalizeProviderDraft(
     ? createDefaultFalProfile()
     : createDefaultOpenAIProfile({ transparentBackgroundMethod })
   const baseUrl = typeof input.baseUrl === 'string' ? input.baseUrl : undefined
-  const model = typeof input.model === 'string' && input.model.trim() ? input.model : undefined
+  const model = (typeof input.model === 'string' && normalizeModelList(input.model)) || undefined
   const imageGenerationModel = typeof input.imageGenerationModel === 'string' ? input.imageGenerationModel.trim() : ''
   const apiMode = input.apiMode === 'responses' ? 'responses' : input.apiMode === 'images' ? 'images' : undefined
   const knownProvider = BUILT_IN_PROVIDER_IDS.has(provider) || customProviderIds.has(provider)
@@ -660,8 +669,9 @@ export function normalizeApiProfile(
     baseUrl: provider === 'fal' ? rawBaseUrl.trim().replace(/\/+$/, '') : rawBaseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : defaults.apiKey,
     model: provider === 'openai'
-      ? normalizeOpenAIModelForMode(typeof record.model === 'string' ? record.model : defaults.model, apiMode)
-      : typeof record.model === 'string' && record.model.trim() ? record.model : defaults.model,
+      ? normalizeOpenAIModelListForMode(typeof record.model === 'string' && normalizeModelList(record.model) || defaults.model, apiMode)
+      : (typeof record.model === 'string' && normalizeModelList(record.model)) || defaults.model,
+    selectedModel: typeof record.selectedModel === 'string' && record.selectedModel.trim() ? record.selectedModel.trim() : undefined,
     imageGenerationModel: typeof record.imageGenerationModel === 'string'
       ? record.imageGenerationModel.trim()
       : '',
@@ -862,6 +872,11 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     taskCompletionNotification: typeof record.taskCompletionNotification === 'boolean' ? record.taskCompletionNotification : false,
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
     ratioAutoCorrect: typeof record.ratioAutoCorrect === 'boolean' ? record.ratioAutoCorrect : true,
+    showBatchPrompt: typeof record.showBatchPrompt === 'boolean' ? record.showBatchPrompt : false,
+    batchPromptEnabled: typeof record.batchPromptEnabled === 'boolean' ? record.batchPromptEnabled : false,
+    batchPromptMode: record.batchPromptMode === 'concurrent' ? 'concurrent' : 'queue',
+    batchPromptConcurrencyLimited: typeof record.batchPromptConcurrencyLimited === 'boolean' ? record.batchPromptConcurrencyLimited : true,
+    batchPromptConcurrency: normalizeBatchPromptConcurrency(record.batchPromptConcurrency),
     referenceImageEditAction: normalizeReferenceImageEditAction(record.referenceImageEditAction),
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
     localAutoSave: normalizeLocalAutoSaveSettings(record.localAutoSave),
@@ -899,7 +914,8 @@ export function getTextApiProfileResolution(settings: Partial<AppSettings> | unk
   const normalized = normalizeSettings(settings)
   if (normalized.textApiProfileId) {
     const explicit = normalized.profiles.find((profile) => profile.id === normalized.textApiProfileId)
-    if (explicit) return { profile: explicit, resolvedBy: 'explicit', reason: null }
+    // resolve 折叠多模型列表为单模型：文本请求 body.model 必须是单个 ID。
+    if (explicit) return { profile: resolveApiProfileModel(explicit), resolvedBy: 'explicit', reason: null }
   }
   // active 分支传原始 settings 给 getActiveApiProfile：normalize 会把顶层镜像字段折叠成激活
   // profile 值，先 normalize 再取激活配置会丢旧版 URL 参数覆盖语义（getActiveApiProfile 内部
@@ -907,7 +923,7 @@ export function getTextApiProfileResolution(settings: Partial<AppSettings> | unk
   const active = getActiveApiProfile(settings)
   if (isTextCapableApiProfile(active)) return { profile: active, resolvedBy: 'active', reason: null }
   const textProfiles = normalized.profiles.filter(isTextCapableApiProfile)
-  if (textProfiles.length === 1) return { profile: textProfiles[0], resolvedBy: 'sole', reason: null }
+  if (textProfiles.length === 1) return { profile: resolveApiProfileModel(textProfiles[0]), resolvedBy: 'sole', reason: null }
   return { profile: null, resolvedBy: null, reason: textProfiles.length === 0 ? 'none' : 'ambiguous' }
 }
 
@@ -939,7 +955,7 @@ export function getSceneImageApiProfile(settings: Partial<AppSettings> | unknown
       if (modelOverride) resolved = { ...resolved, model: modelOverride }
       const imageGenerationModelOverride = sceneSettings.imageGenerationModelOverride?.trim()
       if (imageGenerationModelOverride) resolved = { ...resolved, imageGenerationModel: imageGenerationModelOverride }
-      return resolved
+      return resolveApiProfileModel(resolved)
     }
   }
   return getActiveApiProfile(settings)
@@ -955,7 +971,7 @@ export function getSceneTextApiProfileResolution(settings: Partial<AppSettings> 
   const sceneTextProfileId = normalized.scenes[normalized.activeScene].textProfileId
   if (sceneTextProfileId) {
     const profile = normalized.profiles.find((p) => p.id === sceneTextProfileId)
-    if (profile) return { profile, resolvedBy: 'explicit', reason: null }
+    if (profile) return { profile: resolveApiProfileModel(profile), resolvedBy: 'explicit', reason: null }
   }
   return getTextApiProfileResolution(settings)
 }
@@ -977,9 +993,7 @@ export function isOpenAICompatibleProvider(settings: Partial<AppSettings> | unkn
   return provider === 'openai' || Boolean(getCustomProviderDefinition(settings, provider))
 }
 
-export interface ImportedProviderSettings {
-  customProviders: CustomProviderDefinition[]
-  profiles: ApiProfile[]
+export interface ImportedProviderSettings extends PresetConfig {
   presetProfileFields?: Record<string, string[]>
 }
 
@@ -1014,12 +1028,12 @@ export function importCustomProviderSettingsFromJson(
 
   const record = parsed as Record<string, unknown>
 
-  // 包裹结构：{customProviders: [...], profiles: [...]}
-  if (Array.isArray(record.customProviders)) {
+  // 包裹结构：profiles 可独立于自定义服务商配置导入。
+  if (Array.isArray(record.profiles) || Array.isArray(record.customProviders)) {
     if (options.deploymentConfig) validateDeploymentProviderIds(record.customProviders)
     const customProviders = normalizeCustomProviderDefinitions(record.customProviders)
-    if (customProviders.length === 0) {
-      if (!options.deploymentConfig) throw new Error('customProviders 数组中没有有效的服务商配置')
+    if (!options.deploymentConfig && Array.isArray(record.customProviders) && record.customProviders.length > 0 && !customProviders.length) {
+      throw new Error('customProviders 数组中没有有效的服务商配置')
     }
     validateCustomProviderTaskMappings(customProviders)
     const customProviderIds = new Set(customProviders.map((provider) => provider.id))
@@ -1054,6 +1068,22 @@ export function importCustomProviderDefinitionFromJson(jsonText: string, existin
   return result.customProviders[0]
 }
 
+/** 拆分模型列表，兼容中英文逗号并去重 */
+export function splitModelList(value: string) {
+  return Array.from(new Set(value.split(/[,，]/).map((item) => item.trim()).filter(Boolean)))
+}
+
+export function normalizeModelList(value: string) {
+  return splitModelList(value).join(', ')
+}
+
+/** 将模型列表解析为实际请求使用的单个模型，优先使用 preferred，其次是首页选中的模型 */
+export function resolveApiProfileModel(profile: ApiProfile, preferred?: string): ApiProfile {
+  const models = splitModelList(profile.model)
+  const model = [preferred, profile.selectedModel].find((item) => item && models.includes(item)) ?? models[0] ?? profile.model
+  return { ...profile, model }
+}
+
 export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): ApiProfile {
   const record = settings && typeof settings === 'object' ? settings as Record<string, unknown> : {}
   const normalized = normalizeSettings(settings)
@@ -1062,7 +1092,7 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
     ? record.apiMode
     : profile.apiMode
 
-  return {
+  return resolveApiProfileModel({
     ...profile,
     baseUrl: typeof record.baseUrl === 'string' ? record.baseUrl : profile.baseUrl,
     apiKey: typeof record.apiKey === 'string' ? record.apiKey : profile.apiKey,
@@ -1074,7 +1104,7 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
     streamImages: profile.provider === 'openai' && typeof record.streamImages === 'boolean' ? record.streamImages : profile.streamImages,
     streamPartialImages: normalizeStreamPartialImages(record.streamPartialImages, profile.streamPartialImages),
     nativeLargeOutput: record.nativeLargeOutput === true ? true : profile.nativeLargeOutput === true ? true : undefined,
-  }
+  })
 }
 
 export function validateApiProfile(profile: ApiProfile): string | null {
@@ -1322,10 +1352,10 @@ export function mergePresetImportedSettings(
     lockPresetParams?: boolean
     dismissedPresetProfileIds?: string[]
     dismissedPresetProviderIds?: string[]
-    previousPresetConfig?: Pick<AppSettings, 'customProviders' | 'profiles'> | null
+    previousPresetConfig?: PresetConfig | null
     usedPresetProfileIds?: string[]
   } = {},
-): { settings: AppSettings; presetConfig: Pick<AppSettings, 'customProviders' | 'profiles'> } {
+): { settings: AppSettings; presetConfig: PresetConfig } {
   const importedRecord = isRecord(importedSettings) ? importedSettings : {}
   validateDeploymentProviderIds(importedRecord.customProviders)
   const normalizedImported = normalizeSettings(importedSettings)

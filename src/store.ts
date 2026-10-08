@@ -11,6 +11,9 @@ import type {
   MaskDraft,
   StickerSplitSource,
   PromptReverseSource,
+  SketchBoardRequest,
+  BatchProgress,
+  PresetConfig,
   TaskRecord,
   FavoriteCollection,
   PromptHistoryEntry,
@@ -25,10 +28,10 @@ import type {
   SkillSummary,
 } from './types'
 import { DEFAULT_PARAMS } from './types'
-import { DEFAULT_SETTINGS, getActiveApiProfile, getCustomProviderDefinition, getSceneImageApiProfile, getSceneTextApiProfileResolution, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, validateApiProfile } from './lib/apiProfiles'
+import { DEFAULT_SETTINGS, getActiveApiProfile, getCustomProviderDefinition, getSceneImageApiProfile, getSceneTextApiProfileResolution, mergeImportedSettings, mergePresetImportedSettings, normalizeSettings, resolveApiProfileModel, splitModelList, validateApiProfile } from './lib/apiProfiles'
 import { enforcePresetConfigPolicy, getPresetConfig, getPresetProfileIds, getPresetProviderIds, isPresetConfigDeletionPrevented, isPresetConfigOnlyEnabled, isPresetConfigParamsLocked, isPresetProfile, isPresetProviderDeletionPrevented } from './lib/presetConfig'
 import { dismissAllTooltips } from './lib/tooltipDismiss'
-import { remapImageMentionsForOrder, replaceImageMentionsForApi, stripImageMentionMarkers } from './lib/promptImageMentions'
+import { getTaskPromptText, remapImageMentionsForOrder, replaceImageMentionsForApi, stripImageMentionMarkers } from './lib/promptImageMentions'
 import {
   getAllTasks,
   putTask as dbPutTask,
@@ -74,6 +77,7 @@ import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { recordProviderSizeObservation } from './lib/providerCapability'
+import { runWithConcurrency, splitBatchPrompts } from './lib/batchPrompts'
 import { buildNativeTransparentPrompt, buildTransparentPrompt, createTransparentOutputMeta, getTransparentRequestParams } from './lib/transparentImage'
 import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, getCachedImage, getUnpinnedQuotaImageIds, pinQuotaImage, scheduleThumbnailBackfill } from './lib/imageCache'
@@ -472,7 +476,7 @@ interface AppState {
 
   // 设置
   settings: AppSettings
-  previousPresetConfig: Pick<AppSettings, 'customProviders' | 'profiles'> | null
+  previousPresetConfig: PresetConfig | null
   setSettings: (s: Partial<AppSettings>) => void
   setPresetImportedSettings: (
     importedSettings: Partial<AppSettings> | unknown,
@@ -490,6 +494,12 @@ interface AppState {
   // 输入
   prompt: string
   setPrompt: (p: string) => void
+  /**
+   * 输入框最后一次的选区（可见文本偏移），供画板等外部入口插入胶囊并覆盖选中内容；未聚焦过时为 null。
+   * 同时记下当时的提示词，提示词被其他途径替换后选区即失效，使用前需比对。
+   */
+  promptSelection: { start: number; end: number; prompt: string } | null
+  setPromptSelection: (selection: { start: number; end: number }) => void
   inputImages: InputImage[]
   addInputImage: (img: InputImage) => void
   replaceInputImage: (idx: number, img: InputImage) => void
@@ -514,7 +524,13 @@ interface AppState {
   reusedTaskApiProfileId: string | null
   reusedTaskApiProfileName: string | null
   reusedTaskApiProfileMissing: boolean
-  setReusedTaskApiProfile: (profileId: string | null, missing?: boolean, profileName?: string | null) => void
+  /** 临时复用其他配置时使用的模型，只在本次复用中生效，不写入该配置 */
+  reusedTaskApiModel: string | null
+  setReusedTaskApiProfile: (profileId: string | null, missing?: boolean, profileName?: string | null, model?: string | null) => void
+  setReusedTaskApiModel: (model: string) => void
+  /** 正在进行的批量提交进度，仅保存在内存中 */
+  batchProgress: BatchProgress | null
+  setBatchProgress: (progress: BatchProgress | null) => void
 
   // 任务列表
   tasks: TaskRecord[]
@@ -619,7 +635,12 @@ interface AppState {
   setDetailTaskId: (id: string | null) => void
   lightboxImageId: string | null
   lightboxImageList: string[]
-  setLightboxImageId: (id: string | null, list?: string[]) => void
+  /** 预览参考图时对应的提示词，按图片在列表中的位置取其评论；为空时不显示评论 */
+  lightboxCommentPrompt: string | null
+  setLightboxImageId: (id: string | null, list?: string[], commentPrompt?: string | null) => void
+  /** 画板；baseImageSrc 为画布底图，replaceImageId 为完成后要替换的参考图 */
+  sketchBoard: SketchBoardRequest | null
+  setSketchBoard: (board: SketchBoardRequest | null) => void
   showSettings: boolean
   settingsTabRequest: SettingsTab | null
   setShowSettings: (v: boolean, tab?: SettingsTab) => void
@@ -833,7 +854,7 @@ export const useStore = create<AppState>()(
         return {
           settings,
           ...(shouldClearReusedProfile
-            ? { reusedTaskApiProfileId: null, reusedTaskApiProfileName: null, reusedTaskApiProfileMissing: false }
+            ? { reusedTaskApiProfileId: null, reusedTaskApiProfileName: null, reusedTaskApiProfileMissing: false, reusedTaskApiModel: null }
             : {}),
         }
       }),
@@ -868,7 +889,7 @@ export const useStore = create<AppState>()(
             dismissedPresetProviderIds,
             reusedTaskApiProfileId: shouldClearReusedProfile ? null : state.reusedTaskApiProfileId,
             ...(shouldClearReusedProfile
-              ? { reusedTaskApiProfileName: null, reusedTaskApiProfileMissing: false }
+              ? { reusedTaskApiProfileName: null, reusedTaskApiProfileMissing: false, reusedTaskApiModel: null }
               : {}),
           }
         })
@@ -883,6 +904,8 @@ export const useStore = create<AppState>()(
       // Input
       prompt: '',
       setPrompt: (prompt) => set((s) => syncActiveInputDraft(s, { prompt })),
+      promptSelection: null,
+      setPromptSelection: (selection) => set((s) => ({ promptSelection: { ...selection, prompt: s.prompt } })),
       inputImages: [],
       addInputImage: (img) =>
         set((s) => {
@@ -984,11 +1007,16 @@ export const useStore = create<AppState>()(
       reusedTaskApiProfileId: null,
       reusedTaskApiProfileName: null,
       reusedTaskApiProfileMissing: false,
-      setReusedTaskApiProfile: (profileId, missing = false, profileName = null) => set({
+      reusedTaskApiModel: null,
+      setReusedTaskApiProfile: (profileId, missing = false, profileName = null, model = null) => set({
         reusedTaskApiProfileId: profileId,
         reusedTaskApiProfileName: profileName,
         reusedTaskApiProfileMissing: missing,
+        reusedTaskApiModel: profileId ? model : null,
       }),
+      setReusedTaskApiModel: (reusedTaskApiModel) => set({ reusedTaskApiModel }),
+      batchProgress: null,
+      setBatchProgress: (batchProgress) => set({ batchProgress }),
 
       // Tasks
       tasks: [],
@@ -1424,7 +1452,7 @@ export const useStore = create<AppState>()(
         try {
           for (const entry of enabledEntries) {
             useStore.getState().setPrompt(entry.text)
-            await submitTask({ skillMeta })
+            await submitTask({ skillMeta, ignoreBatchPrompt: true })
             submittedCount += 1
           }
         } catch {
@@ -1674,9 +1702,19 @@ export const useStore = create<AppState>()(
       },
       lightboxImageId: null,
       lightboxImageList: [],
-      setLightboxImageId: (lightboxImageId, list) => {
+      lightboxCommentPrompt: null,
+      setLightboxImageId: (lightboxImageId, list, commentPrompt = null) => {
         if (lightboxImageId) dismissAllTooltips()
-        set({ lightboxImageId, lightboxImageList: list ?? (lightboxImageId ? [lightboxImageId] : []) })
+        set({
+          lightboxImageId,
+          lightboxImageList: list ?? (lightboxImageId ? [lightboxImageId] : []),
+          lightboxCommentPrompt: lightboxImageId ? commentPrompt : null,
+        })
+      },
+      sketchBoard: null,
+      setSketchBoard: (sketchBoard) => {
+        if (sketchBoard) dismissAllTooltips()
+        set({ sketchBoard })
       },
       showSettings: false,
       settingsTabRequest: null,
@@ -1860,7 +1898,7 @@ export function taskMatchesFilterStatus(task: TaskRecord, filterStatus: AppState
 export function taskMatchesSearchQuery(task: TaskRecord, query: string) {
   const q = query.trim().toLowerCase()
   if (!q) return true
-  const prompt = (task.prompt || '').toLowerCase()
+  const prompt = getTaskPromptText(task.prompt || '', task.inputImageIds.length).toLowerCase()
   const paramStr = JSON.stringify(task.params).toLowerCase()
   const errorStr = [task.error, ...(task.outputErrors ?? []).map((item) => item.error)].filter(Boolean).join('\n').toLowerCase()
   return prompt.includes(q) || paramStr.includes(q) || errorStr.includes(q)
@@ -1912,7 +1950,9 @@ function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {
 export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiProfile | null {
   const normalized = normalizeSettings(settings)
   if (!task.apiProfileId) return null
-  return normalized.profiles.find((profile) => profile.id === task.apiProfileId) ?? null
+  const profile = normalized.profiles.find((item) => item.id === task.apiProfileId)
+  // 任务记录的模型仍在配置的模型列表中时，沿用任务提交时的模型
+  return profile ? resolveApiProfileModel(profile, task.apiModel) : null
 }
 
 /**
@@ -1948,9 +1988,10 @@ function createSettingsForApiProfile(settings: AppSettings, profile: ApiProfile)
   })
 }
 
-function getReusedTaskApiProfile(settings: AppSettings, profileId: string | null): ApiProfile | null {
+function getReusedTaskApiProfile(settings: AppSettings, profileId: string | null, model: string | null): ApiProfile | null {
   if (!profileId) return null
-  return normalizeSettings(settings).profiles.find((profile) => profile.id === profileId) ?? null
+  const profile = normalizeSettings(settings).profiles.find((item) => item.id === profileId)
+  return profile ? resolveApiProfileModel(profile, model ?? undefined) : null
 }
 
 function getTaskApiProfileName(task: TaskRecord) {
@@ -2380,18 +2421,18 @@ export async function initStore() {
 }
 
 /** 提交新任务 */
-export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean; skillMeta?: { skillId: string; skillInput: string } } = {}) {
+export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean; skillMeta?: { skillId: string; skillInput: string }; ignoreBatchPrompt?: boolean } = {}) {
   // 用户发起新生成：重置数据清除标志，确保新任务能正常写入。
   tasksCleared = false
   await refreshTaskStorageGeneration()
-  const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, showToast, setConfirmDialog } =
+  const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, reusedTaskApiModel, showToast, setConfirmDialog } =
     useStore.getState()
 
   const normalizedSettings = normalizeSettings(settings)
   let activeProfile = getSceneImageApiProfile(settings)
   let requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
   if (normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
-    const reusedProfile = getReusedTaskApiProfile(normalizedSettings, reusedTaskApiProfileId)
+    const reusedProfile = getReusedTaskApiProfile(normalizedSettings, reusedTaskApiProfileId, reusedTaskApiModel)
     if (!reusedProfile) {
       if (options.useCurrentApiProfileWhenReusedMissing) {
         useStore.getState().setReusedTaskApiProfile(null)
@@ -2424,6 +2465,16 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     return
   }
 
+  // 程序化逐条提交（Skill 工坊/表情工坊）不走批量管线：批量会使 submitTask 阻塞至
+  // 每条任务完成，把循环退化为串行并产生成倍的批量开始/完成提示。
+  const batchPrompts = !options.ignoreBatchPrompt && normalizedSettings.showBatchPrompt && normalizedSettings.batchPromptEnabled ? splitBatchPrompts(prompt) : []
+  if (useStore.getState().batchProgress) {
+    showToast('批量任务进行中，请等待完成或停止后再提交', 'error')
+    return
+  }
+  // 检查通过后立即占位，避免后续 await 期间重复提交启动第二批
+  const batchId = batchPrompts.length ? beginBatch(batchPrompts.length) : 0
+
   let orderedInputImages = inputImages
   let maskImageId: string | null = null
   let maskTargetImageId: string | null = null
@@ -2442,6 +2493,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
             void submitTask({ allowFullMask: true })
           },
         })
+        endBatch(batchId)
         return
       }
       maskImageId = await storeImage(maskDraft.maskDataUrl, 'mask')
@@ -2452,13 +2504,21 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
         useStore.getState().clearMaskDraft()
       }
       showToast(err instanceof Error ? err.message : String(err), 'error')
+      endBatch(batchId)
       return
     }
   }
 
   // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
-  for (const img of orderedInputImages) {
-    await storeImage(img.dataUrl)
+  try {
+    for (const img of orderedInputImages) {
+      await storeImage(img.dataUrl)
+    }
+  } catch (err) {
+    console.error('保存参考图失败', err)
+    endBatch(batchId)
+    showToast(`保存参考图失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    return
   }
 
   const normalizedParams = normalizeParamsForSettings(params, requestSettings, {
@@ -2473,6 +2533,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   // 编辑链路画幅防御第一层：输入图比例预处理（网关编辑输出画幅=输入图原尺寸，
   // 预处理输入图是控画幅的主力，详见 docs/portrait-general-skill-optimization-plan-2026-09-11.md T2）。
   // 仅「有输入图 + size 为具体尺寸」时执行；带遮罩的任务跳过（遮罩坐标绑定原图像素）。
+  // 多提示词批量时预处理结果对每条提示词复用（上游语义：参考图和参数对每条提示词都生效）。
   const preprocessTarget = orderedInputImages.length > 0 && !maskDraft && taskParams.size !== 'auto'
     ? parseImageSize(taskParams.size)
     : null
@@ -2514,10 +2575,6 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       ...(preprocessFailed ? { failed: true } : {}),
     }
   }
-
-  const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
-    ? createTransparentOutputMeta(prompt.trim())
-    : null
   const normalizedParamPatch = getChangedParams(params, taskParams)
   if (Object.keys(normalizedParamPatch).length) {
     useStore.getState().setParams(normalizedParamPatch)
@@ -2525,45 +2582,58 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
 
   // 记录提示词历史（画廊模式的一键回填来源）。
   // 剥离图片提及标记：历史回填后 @图N 若按索引绑定到当前不相关的图，
-  // 会对错误的图发起计费编辑请求；纯文本化最安全。
+  // 会对错误的图发起计费编辑请求；纯文本化最安全。批量提交只记一次完整原文。
   useStore.getState().recordPromptHistory(stripImageMentionMarkers(prompt), taskParams)
 
-  const taskId = genId()
-  const task: TaskRecord = {
-    id: taskId,
-    storageGeneration: taskStorageGeneration,
-    prompt: prompt.trim(),
-    params: taskParams,
-    apiProvider: activeProfile.provider,
-    apiProfileId: activeProfile.id,
-    apiProfileName: activeProfile.name,
-    apiMode: activeProfile.apiMode,
-    apiModel: activeProfile.model,
-    inputImageIds,
-    maskTargetImageId,
-    maskImageId,
-    inputPreprocess,
-    originalInputImageIds,
-    transparentOutput: transparentMeta?.transparentOutput,
-    transparentPrompt: transparentMeta?.effectivePrompt,
-    outputImages: [],
-    status: 'running',
-    error: null,
-    sceneId: settings.activeScene,
-    // Skill 工坊溯源（generateFromSkillEntries 逐条目提交时携带）
-    ...(options.skillMeta ? { skillId: options.skillMeta.skillId, skillInput: options.skillMeta.skillInput } : {}),
-    createdAt: Date.now(),
-    finishedAt: null,
-    elapsed: null,
+  const startTask = async (taskPrompt: string) => {
+    const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
+      ? createTransparentOutputMeta(taskPrompt)
+      : null
+    const task: TaskRecord = {
+      id: genId(),
+      storageGeneration: taskStorageGeneration,
+      prompt: taskPrompt,
+      params: taskParams,
+      apiProvider: activeProfile.provider,
+      apiProfileId: activeProfile.id,
+      apiProfileName: activeProfile.name,
+      apiMode: activeProfile.apiMode,
+      apiModel: activeProfile.model,
+      inputImageIds,
+      maskTargetImageId,
+      maskImageId,
+      inputPreprocess,
+      originalInputImageIds,
+      transparentOutput: transparentMeta?.transparentOutput,
+      transparentPrompt: transparentMeta?.effectivePrompt,
+      outputImages: [],
+      status: 'running',
+      error: null,
+      sceneId: settings.activeScene,
+      // Skill 工坊溯源（generateFromSkillEntries 逐条目提交时携带）
+      ...(options.skillMeta ? { skillId: options.skillMeta.skillId, skillInput: options.skillMeta.skillInput } : {}),
+      createdAt: Date.now(),
+      finishedAt: null,
+      elapsed: null,
+    }
+
+    useStore.getState().setTasks([task, ...useStore.getState().tasks])
+    await putTask(task)
+    if (batchId) batchTaskIds.add(task.id)
+    // 异步调用 API
+    executeTask(task.id)
+    return task.id
   }
 
-  const latestTasks = useStore.getState().tasks
-  useStore.getState().setTasks([task, ...latestTasks])
-  await putTask(task)
-  useStore.getState().showToast('任务已提交', 'success')
-  // 预处理失败的提示放在「任务已提交」之后，避免被后者立刻覆盖
-  if (preprocessFailed) {
-    useStore.getState().showToast('输入图预处理失败，已按原图提交', 'error')
+  if (batchPrompts.length) {
+    useStore.getState().showToast(`已开始批量提交 ${batchPrompts.length} 条提示词`, 'success')
+  } else {
+    await startTask(prompt.trim())
+    useStore.getState().showToast('任务已提交', 'success')
+    // 预处理失败的提示放在「任务已提交」之后，避免被后者立刻覆盖
+    if (preprocessFailed) {
+      useStore.getState().showToast('输入图预处理失败，已按原图提交', 'error')
+    }
   }
 
   if (settings.clearInputAfterSubmit) {
@@ -2572,8 +2642,82 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   }
   useStore.getState().setReusedTaskApiProfile(null)
 
-  // 异步调用 API
-  executeTask(taskId)
+  if (batchPrompts.length) {
+    const limit = normalizedSettings.batchPromptMode === 'queue'
+      ? 1
+      : normalizedSettings.batchPromptConcurrencyLimited ? normalizedSettings.batchPromptConcurrency : batchPrompts.length
+    await runBatchPrompts(batchId, batchPrompts, limit, startTask)
+  }
+}
+
+// 当前批量的标识，停止或结束时递增使旧批量失效；批量任务不单独弹出完成提示和失败详情
+let activeBatchId = 0
+const batchTaskIds = new Set<string>()
+
+function beginBatch(total: number) {
+  activeBatchId += 1
+  useStore.getState().setBatchProgress({ total, started: 0, finished: 0 })
+  return activeBatchId
+}
+
+function endBatch(batchId: number) {
+  if (!batchId || batchId !== activeBatchId) return
+  activeBatchId += 1
+  // 停止后仍在运行的任务恢复单独的完成提示和失败详情
+  batchTaskIds.clear()
+  useStore.getState().setBatchProgress(null)
+}
+
+/** 等待任务结束（完成、失败或被删除）或批量被停止；断线待恢复的任务也视为结束，避免卡住队列 */
+function waitForTaskSettled(taskId: string, isCancelled: () => boolean) {
+  const isSettled = (tasks: TaskRecord[]) => isCancelled() || tasks.find((item) => item.id === taskId)?.status !== 'running'
+  return new Promise<void>((resolve) => {
+    if (isSettled(useStore.getState().tasks)) {
+      resolve()
+      return
+    }
+    const unsubscribe = useStore.subscribe((state) => {
+      if (!isSettled(state.tasks)) return
+      unsubscribe()
+      resolve()
+    })
+  })
+}
+
+async function runBatchPrompts(batchId: number, prompts: string[], limit: number, startTask: (taskPrompt: string) => Promise<string>) {
+  const isStopped = () => batchId !== activeBatchId
+  const total = prompts.length
+  let started = 0
+  let finished = 0
+  let failed = 0
+  await runWithConcurrency(prompts, limit, async (taskPrompt) => {
+    started += 1
+    useStore.getState().setBatchProgress({ total, started, finished })
+    try {
+      const taskId = await startTask(taskPrompt)
+      await waitForTaskSettled(taskId, isStopped)
+      if (useStore.getState().tasks.find((item) => item.id === taskId)?.status === 'error') failed += 1
+    } catch (err) {
+      failed += 1
+      console.error('批量提交任务失败', err)
+    }
+    finished += 1
+    if (!isStopped()) useStore.getState().setBatchProgress({ total, started, finished })
+  }, isStopped)
+  if (isStopped()) return
+
+  endBatch(batchId)
+  const message = failed > 0 ? `批量生成完成：成功 ${total - failed} 条，失败 ${failed} 条` : `批量生成完成，共 ${total} 条`
+  useStore.getState().showToast(message, failed > 0 ? 'error' : 'success')
+  showTaskCompletionNotification('批量生成完成', `${message}。`)
+}
+
+/** 停止批量提交：立即结束批量状态，不再启动剩余提示词，已开始的任务继续执行 */
+export function stopBatchPrompts() {
+  const progress = useStore.getState().batchProgress
+  if (!progress) return
+  endBatch(activeBatchId)
+  useStore.getState().showToast(`已停止批量提交，共提交 ${progress.started} / ${progress.total} 条，已开始的任务会继续完成`, 'info')
 }
 
 function addInputDraftReferencedImageIds(target: Set<string>, draft: AgentInputDraft | null) {
@@ -2877,8 +3021,11 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       : failedCount > 0
         ? `生成完成：成功 ${outputIds.length} 张，失败 ${failedCount} 张`
         : `生成完成，共 ${outputIds.length} 张图片`
-    useStore.getState().showToast(completionMessage, persistFailedCount > 0 || failedCount > 0 ? 'error' : 'success')
-    if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
+    // 批量任务只在整批结束时统一提示
+    if (!batchTaskIds.has(taskId)) {
+      useStore.getState().showToast(completionMessage, persistFailedCount > 0 || failedCount > 0 ? 'error' : 'success')
+      if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
+    }
     const currentMask = useStore.getState().maskDraft
     if (
       maskDataUrl &&
@@ -2939,7 +3086,8 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
         falRecoverable: false,
         customRecoverable: false,
       })
-      useStore.getState().setDetailTaskId(taskId)
+      // 批量任务不自动打开失败详情，避免连续弹窗打断
+      if (!batchTaskIds.has(taskId)) useStore.getState().setDetailTaskId(taskId)
     }
   } finally {
     // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）
@@ -3713,7 +3861,15 @@ export async function reuseConfig(task: TaskRecord) {
   const shouldTemporarilyReuseProfile = Boolean(matchedProfile && matchedProfile.id !== currentProfile.id)
   const missingReusedProfile = normalizedSettings.reuseTaskApiProfileTemporarily && !matchedProfile
   const taskProfileName = matchedProfile?.name ?? getTaskApiProfileName(task)
-  const paramsSettings = shouldTemporarilyReuseProfile && matchedProfile ? createSettingsForApiProfile(normalizedSettings, matchedProfile) : normalizedSettings
+  // 复用当前配置时，任务所用模型仍在模型列表中则同步切换首页选中的模型；临时复用其他配置时模型只随复用状态生效
+  const currentProfileRecord = normalizedSettings.profiles.find((item) => item.id === currentProfile.id)
+  if (!shouldTemporarilyReuseProfile && task.apiModel && currentProfileRecord && currentProfileRecord.selectedModel !== task.apiModel && splitModelList(currentProfileRecord.model).includes(task.apiModel)) {
+    useStore.getState().setSettings({
+      profiles: normalizedSettings.profiles.map((item) => item.id === currentProfile.id ? { ...item, selectedModel: task.apiModel } : item),
+    })
+  }
+  const reuseSettings = normalizeSettings(useStore.getState().settings)
+  const paramsSettings = shouldTemporarilyReuseProfile && matchedProfile ? createSettingsForApiProfile(reuseSettings, matchedProfile) : reuseSettings
 
   setParams(normalizeParamsForSettings(task.params, paramsSettings, {
     hasInputImages: task.inputImageIds.length > 0,
@@ -3723,6 +3879,7 @@ export async function reuseConfig(task: TaskRecord) {
     shouldTemporarilyReuseProfile && matchedProfile ? matchedProfile.id : null,
     missingReusedProfile,
     taskProfileName,
+    shouldTemporarilyReuseProfile && matchedProfile ? matchedProfile.model : null,
   )
   clearMaskDraft()
 
@@ -3766,7 +3923,8 @@ export async function reuseConfig(task: TaskRecord) {
     preserveExactSizeIntent: true,
   }))
   setInputImages(imgs)
-  setPrompt(task.prompt)
+  // 部分参考图可能已被删除，按图片 id 重新对齐提示词中的图片序号，避免评论和提及错位到其他图片
+  setPrompt(remapImageMentionsForOrder(task.prompt, task.inputImageIds.map((id) => ({ id, dataUrl: '' })), useStore.getState().inputImages))
   const maskTargetImageId = task.maskTargetImageId ?? (task.maskImageId ? task.inputImageIds[0] : null)
   if (maskTargetImageId && task.maskImageId && imgs.some((img) => img.id === maskTargetImageId)) {
     const maskDataUrl = await ensureImageCached(task.maskImageId)
@@ -3929,6 +4087,8 @@ export interface ClearOptions {
 /** 清空数据 */
 export async function clearData(options: ClearOptions = { clearConfig: true, clearTasks: true }) {
   const { setTasks, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
+  // 清空后剩余的批量提示词已没有对应的任务、配置或图片，直接结束批量
+  if (useStore.getState().batchProgress) endBatch(activeBatchId)
 
   // 先取消所有恢复轮询 / 超时监控，防止清空期间或清空后有数据被写回 IndexedDB
   if (options.clearTasks) {
@@ -4563,7 +4723,7 @@ export async function importData(input: File | File[], options: ImportOptions = 
     if (options.importConfig && settingsManifests.length) {
       const state = useStore.getState()
       const providerIds = new Set(settingsManifests.flatMap((part) =>
-        part.manifest.settings?.customProviders.map((provider) => provider.id) ?? [],
+        part.manifest.settings?.customProviders?.map((provider) => provider.id) ?? [],
       ))
       const profileIds = new Set(settingsManifests.flatMap((part) =>
         part.manifest.settings?.profiles.map((profile) => profile.id) ?? [],
