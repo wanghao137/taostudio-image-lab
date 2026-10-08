@@ -29,6 +29,8 @@ import {
   normalizeApiProfile,
   normalizeSettings,
   rememberOpenAIProfileModel,
+  resolveApiProfileModel,
+  splitModelList,
   switchApiProfileProvider,
   switchOpenAIProfileApiMode,
   validateApiProfile,
@@ -2396,5 +2398,49 @@ describe('场景生图服务商/模型覆盖（Fix C）', () => {
     // 缺省 sceneId 用 activeScene（general：无覆盖 → 引用 profile 本体）
     expect(getSceneImageApiProfile(s).provider).toBe('openai')
     expect(getSceneImageApiProfile(s).model).toBe(DEFAULT_RESPONSES_MODEL)
+  })
+})
+
+describe('model list', () => {
+  it('normalizes comma separated models', () => {
+    expect(splitModelList('a,b ，c, a,')).toEqual(['a', 'b', 'c'])
+    expect(normalizeApiProfile({ model: 'a,b ，c' }).model).toBe('a, b, c')
+  })
+
+  it('resolves selected model and falls back to the first one', () => {
+    const profile = normalizeApiProfile({ model: 'a, b', selectedModel: 'b' })
+    expect(resolveApiProfileModel(profile).model).toBe('b')
+    expect(resolveApiProfileModel(profile, 'a').model).toBe('a')
+    expect(resolveApiProfileModel({ ...profile, selectedModel: 'x' }).model).toBe('a')
+  })
+
+  it('returns the selected model for the active profile', () => {
+    const profile = normalizeApiProfile({ id: 'p1', model: 'a,b', selectedModel: 'b' })
+    expect(getActiveApiProfile({ profiles: [profile], activeProfileId: 'p1' }).model).toBe('b')
+  })
+
+  it('resolves model lists to a single model on scene image profiles and text routes', () => {
+    // responses 型 profile 可同时被场景的生图引用与文本引用
+    const sceneProfile = normalizeApiProfile({ id: 'scene-p', apiMode: 'responses', model: 'm1, m2', selectedModel: 'm2' })
+    const globalProfile = normalizeApiProfile({ id: 'global-p', model: 'g1' })
+    const settings = normalizeSettings({
+      profiles: [globalProfile, sceneProfile],
+      activeProfileId: 'global-p',
+    })
+    // 场景引用其他配置时，生图与文本解析都必须折叠为单模型，不能把 "m1, m2" 发给 body.model
+    const sceneSettings = normalizeSettings({
+      ...settings,
+      scenes: {
+        ...settings.scenes,
+        sticker: { ...settings.scenes.sticker, imageProfileId: 'scene-p', textProfileId: 'scene-p' },
+      },
+      activeScene: 'sticker',
+    })
+    expect(getSceneImageApiProfile(sceneSettings).model).toBe('m2')
+    const textResolution = getSceneTextApiProfileResolution(sceneSettings)
+    expect(textResolution.profile?.model).toBe('m2')
+    // 全局显式文本路由同样折叠
+    const explicitTextSettings = normalizeSettings({ ...settings, textApiProfileId: 'scene-p' })
+    expect(getTextApiProfileResolution(explicitTextSettings).profile?.model).toBe('m2')
   })
 })

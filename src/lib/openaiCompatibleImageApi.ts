@@ -19,6 +19,7 @@ import {
   isDataUrl,
   isHttpUrl,
   mergeActualParams,
+  maybeAppendImageToolDroppedHint,
   MIME_MAP,
   normalizeBase64Image,
   parseRetryAfterMs,
@@ -1406,7 +1407,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       if (!response.ok) {
         const errorMessage = await getApiErrorMessage(response)
         throw new ApiError({
-          message: maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages),
+          message: maybeAppendStreamingHint(maybeAppendImageToolDroppedHint(errorMessage), response.status, profile.streamImages),
           status: response.status,
           retryAfterMs: parseRetryAfterMs(response),
           stage: 'request',

@@ -85,7 +85,7 @@
       "baseUrl": "https://tu.9527.codes/",
       "model": "gpt-image-2.5-flare",
       "apiMode": "images",
-      "apiProxy": false
+      "transparentBackgroundMethod": "local"
     },
     {
       "id": "qiuqiutoken",

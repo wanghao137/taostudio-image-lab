@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useStore, submitTask, addImageFromFile } from '../store'
 import { DEFAULT_PARAMS } from '../types'
-import { getActiveApiProfile, normalizeSettings } from '../lib/apiProfiles'
+import { getSceneImageApiProfile, normalizeSettings, resolveApiProfileModel } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
 import { formatImageRatio, normalizeCodexCliImageSize, normalizeImageSize, type CommonImageRatio } from '../lib/size'
 import {
@@ -36,6 +36,7 @@ export function useImageComposer() {
   const setParams = useStore((s) => s.setParams)
   const settings = useStore((s) => s.settings)
   const reusedTaskApiProfileId = useStore((s) => s.reusedTaskApiProfileId)
+  const reusedTaskApiModel = useStore((s) => s.reusedTaskApiModel)
   const showToast = useStore((s) => s.showToast)
   const maskDraft = useStore((s) => s.maskDraft)
 
@@ -50,12 +51,14 @@ export function useImageComposer() {
   const [showAsset4KRatioOptions, setShowAsset4KRatioOptions] = useState(false)
 
   // --- Profile 派生 ---
-  const currentActiveProfile = useMemo(() => getActiveApiProfile(settings), [settings])
+  // 与 submitTask 同源走场景解析：场景引用其他配置时，首页模型切换/能力判断
+  // 绑定的才是真正用于提交的 profile（临时复用分支优先级同 submitTask）。
+  const currentActiveProfile = useMemo(() => getSceneImageApiProfile(settings), [settings])
   const activeProfile = useMemo(() => (
     settings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId
-      ? settings.profiles.find((profile) => profile.id === reusedTaskApiProfileId) ?? currentActiveProfile
+      ? resolveApiProfileModel(settings.profiles.find((profile) => profile.id === reusedTaskApiProfileId) ?? currentActiveProfile, reusedTaskApiModel ?? undefined)
       : currentActiveProfile
-  ), [currentActiveProfile, reusedTaskApiProfileId, settings])
+  ), [currentActiveProfile, reusedTaskApiModel, reusedTaskApiProfileId, settings])
   const hasSubmitApiConfig = Boolean(activeProfile.apiKey)
   const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig)
   const effectiveSettings = useMemo(() => (

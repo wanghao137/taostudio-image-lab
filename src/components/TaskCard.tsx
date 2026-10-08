@@ -5,6 +5,8 @@ import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imag
 import { formatImageRatio } from '../lib/size'
 import { getParamDisplay, ActualValueBadge } from '../lib/paramDisplay'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_FAL_MODEL } from '../lib/apiProfiles'
+import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
+import { getTaskPromptText } from '../lib/promptImageMentions'
 import { CodeIcon, TransparentBgIcon } from './icons'
 import ViewportTooltip from './ViewportTooltip'
 
@@ -315,6 +317,9 @@ function TaskCard({
       : 'bg-blue-500'
     : 'bg-gray-200 dark:bg-gray-700'
 
+  // Agent 任务提示词待接收状态：我们的 fork 已移除 Agent 模式，恒为 false，保留与上游一致的渲染分支。
+  const showPendingPrompt = isAgentTaskPromptPending(task)
+
   const qualityDisplay = getParamDisplay(task, 'quality')
   const showQuality = task.params.quality !== 'auto' || qualityDisplay.isMismatch
 
@@ -569,9 +574,16 @@ function TaskCard({
         {/* 右侧信息区域 */}
         <div className="flex-1 p-3 flex flex-col min-w-0">
           <div className="flex-1 min-h-0 mb-2 overflow-hidden">
-            <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed line-clamp-3">
-              {task.prompt || '(无提示词)'}
-            </p>
+            {showPendingPrompt ? (
+              <div className="leading-relaxed">
+                <p className="text-sm text-gray-700 dark:text-gray-300">正在生成……</p>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">输入内容将在响应完成时接收</p>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed line-clamp-3">
+                {getTaskPromptText(task.prompt, task.inputImageIds?.length ?? 0) || '(无提示词)'}
+              </p>
+            )}
           </div>
           <div className="mt-auto flex flex-col gap-1.5">
             {/* 参数与信息：横向滚动 */}
@@ -742,7 +754,7 @@ function TaskCard({
               <TaskActionButton
                 tooltip="删除任务"
                 onClick={onDelete}
-                className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
+                className="p-1.5 rounded-md hover:bg-red-500/[0.1] dark:hover:bg-red-500/[0.16] text-gray-400 hover:text-red-600 transition"
               >
                 <svg
                   className="w-4 h-4"

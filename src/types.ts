@@ -4,7 +4,11 @@ export type ApiMode = 'images' | 'responses'
 export const REASONING_EFFORT_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 export type ReasoningEffort = typeof REASONING_EFFORT_VALUES[number]
 export type AppMode = 'gallery' | 'engine'
-export type ReferenceImageEditAction = 'ask' | 'replace-reference' | 'add-mask'
+export type AgentApiConfigMode = 'off' | 'native' | 'hybrid'
+/** 接口允许的参考图数量上限 */
+export const MAX_INPUT_IMAGES = 16
+/** 参考图预览中“编辑图片”按钮的默认行为（v0.7.16 起对齐上游画板/遮罩语义；旧值 add-mask 迁移为 mask） */
+export type ReferenceImageEditAction = 'ask' | 'sketch' | 'mask'
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
   'favorite-collection-selection',
@@ -76,7 +80,10 @@ export interface ApiProfile {
   provider: ApiProvider
   baseUrl: string
   apiKey: string
+  /** 模型 ID 列表，多个模型以 `, ` 分隔 */
   model: string
+  /** 首页选中的模型；不在列表中时回退到第一个 */
+  selectedModel?: string
   /** Responses 模式下 image_generation 工具独立使用的图像模型 ID；留空时不发送工具模型 ID（走 API 默认）。 */
   imageGenerationModel?: string
   timeout: number
@@ -95,6 +102,34 @@ export interface ApiProfile {
    * 避免单一 model 字段被另一接口类型的模型覆盖。 */
   modelByApiMode?: { images?: string; responses?: string }
   providerDrafts?: Partial<Record<ApiProvider, Partial<Pick<ApiProfile, 'baseUrl' | 'apiKey' | 'model' | 'imageGenerationModel' | 'apiMode' | 'reasoningEffort' | 'codexCli' | 'apiProxy' | 'responseFormatB64Json' | 'streamImages' | 'streamPartialImages' | 'transparentBackgroundMethod'>>>>
+}
+
+export interface PresetConfig {
+  customProviders: CustomProviderDefinition[]
+  profiles: ApiProfile[]
+}
+
+/** 打开画板的请求：baseImageSrc 为空时是空白画板，replaceImageId 表示完成后替换该参考图 */
+export interface SketchBoardRequest {
+  baseImageSrc: string | null
+  replaceImageId?: string
+}
+
+/** 正在进行的批量提交进度 */
+export interface BatchProgress {
+  total: number
+  started: number
+  finished: number
+}
+
+/** 批量提交模式：排队逐条执行，或按并发数同时执行 */
+export type BatchPromptMode = 'queue' | 'concurrent'
+
+/** 参考图上的评论标注，x / y 为相对原图宽高的比例（0~1） */
+export interface ImageComment {
+  x: number
+  y: number
+  text: string
 }
 
 export type LocalAutoSaveStatus =
@@ -182,6 +217,14 @@ export interface AppSettings {
   enterSubmit: boolean
   /** 输出比例自动校正：非 exact_size 任务返回图比例与请求尺寸偏差 >5% 时本地 cover 裁切到目标比例 */
   ratioAutoCorrect: boolean
+  /** 偏好设置：是否在首页提供多提示词批量提交 */
+  showBatchPrompt: boolean
+  /** 多提示词批量提交，提示词之间空两行分隔 */
+  batchPromptEnabled: boolean
+  batchPromptMode: BatchPromptMode
+  /** 并发模式下是否限制并发数（默认开启），关闭时全部同时提交 */
+  batchPromptConcurrencyLimited: boolean
+  batchPromptConcurrency: number
   referenceImageEditAction: ReferenceImageEditAction
   zipDownloadRoutes: ZipDownloadRoute[]
   localAutoSave: LocalAutoSaveSettings
@@ -684,7 +727,7 @@ export interface ExportData {
     index: number
     total: number
   }
-  settings?: AppSettings
+  settings?: Omit<AppSettings, 'customProviders'> & { customProviders?: CustomProviderDefinition[] }
   tasks?: TaskRecord[]
   favoriteCollections?: FavoriteCollection[]
   defaultFavoriteCollectionId?: string | null

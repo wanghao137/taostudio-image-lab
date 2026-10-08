@@ -1,4 +1,4 @@
-import type { ApiProfile, AppSettings, CustomProviderDefinition } from '../types'
+import type { ApiProfile, AppSettings, CustomProviderDefinition, PresetConfig } from '../types'
 import { readRuntimeEnv } from './runtimeEnv'
 
 const RAW_SHOW_PRESET_CONFIG_ONLY = readRuntimeEnv(import.meta.env.VITE_SHOW_PRESET_CONFIG_ONLY)
@@ -11,7 +11,7 @@ let presetProviders: CustomProviderDefinition[] = []
 let presetProfileFields: Record<string, string[]> | undefined
 let defaultPresetProfileId: string | null = null
 
-export function setPresetConfig(settings: Pick<AppSettings, 'customProviders' | 'profiles'> & {
+export function setPresetConfig(settings: PresetConfig & {
   presetProfileFields?: Record<string, string[]>
 } | null) {
   presetProfiles = settings?.profiles.map((profile) => ({ ...profile })) ?? []
@@ -105,6 +105,7 @@ export function enforcePresetConfigPolicy(
     return {
       ...(paramsLocked ? preset : profile),
       apiKey: profile.apiKey,
+      selectedModel: profile.selectedModel,
       provider: paramsLocked || presetConfigOnly ? preset.provider : profile.provider,
       isDefault: profile.id === defaultPresetProfileId ? true : undefined,
     }

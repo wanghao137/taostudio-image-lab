@@ -48,3 +48,4 @@ docs/upstream-upgrade-report.md
 tools/imagemagick/*
 !tools/imagemagick/VERSION.md
 !tools/imagemagick/README.md
+.claude/

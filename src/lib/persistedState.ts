@@ -1,4 +1,4 @@
-import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PromptHistoryEntry, SceneDraft, SceneDraftSceneId, SceneDrafts, TaskParams } from '../types'
+import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PresetConfig, PromptHistoryEntry, SceneDraft, SceneDraftSceneId, SceneDrafts, TaskParams } from '../types'
 import { normalizeSettings } from './apiProfiles'
 import { clampSkillEntryCount, SKILL_ENTRY_COUNT_DEFAULT } from './skillWorkshop/expansion'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
@@ -6,7 +6,7 @@ import { getPersistableInputImage, isEmptyAgentInputDraft, normalizeAgentInputDr
 
 export interface PersistedAppState {
   settings: AppSettings
-  previousPresetConfig?: Pick<AppSettings, 'customProviders' | 'profiles'> | null
+  previousPresetConfig?: PresetConfig | null
   dismissedPresetProfileIds?: string[]
   dismissedPresetProviderIds?: string[]
   params: TaskParams
@@ -50,7 +50,7 @@ type PersistedStateFallback = Pick<
 >
 
 export type NormalizedPersistedAppState = PersistedAppState & {
-  previousPresetConfig: Pick<AppSettings, 'customProviders' | 'profiles'> | null
+  previousPresetConfig: PresetConfig | null
   dismissedPresetProfileIds: string[]
   dismissedPresetProviderIds: string[]
   prompt: string
