@@ -14,6 +14,7 @@ import type {
   CustomProviderTemplate,
   LocalAutoSaveSettings,
   ReferenceImageEditAction,
+  RetryMode,
   SceneId,
   SceneSettings,
 } from '../types'
@@ -37,8 +38,16 @@ const DEFAULT_API_URL_PATCH = isImportableConfigUrl(RAW_DEFAULT_API_URL)
 const DEFAULT_BASE_URL = DEFAULT_API_URL_PATCH?.baseUrl ?? ''
 export { DEFAULT_IMAGES_MODEL } from './imageModels'
 export const LEGACY_DEFAULT_IMAGES_MODEL = 'gpt-image-2'
-export const DEFAULT_RESPONSES_MODEL = 'gpt-5.6-sol'
+export const DEFAULT_RESPONSES_MODEL = 'gpt-6.1-sol'
 export const LEGACY_DEFAULT_RESPONSES_MODEL = 'gpt-5.5'
+/**
+ * 历代托管默认文本模型（用于 isManagedDefaultOpenAIModel 的切换升级语义）。
+ * 注意：gpt-5.6-sol 只进托管集不进强迁集（normalizeOpenAIModelForMode）——
+ * sub2api 等网关可能长期只认 5.6，存量配置必须粘住（与 Images 侧 gpt-image-2
+ * 的 b5e3f03 教训同构）；仅 gpt-5.5 保持自动迁移。
+ */
+export const LEGACY_RESPONSES_MODELS = ['gpt-5.5'] as const
+const MANAGED_RESPONSES_MODELS = ['gpt-5.5', 'gpt-5.6-sol'] as const
 export const DEFAULT_FAL_BASE_URL = 'https://fal.run'
 export const DEFAULT_FAL_MODEL = 'openai/gpt-image-2'
 export const DEFAULT_OPENAI_PROFILE_ID = 'default-openai'
@@ -53,14 +62,14 @@ export function isManagedDefaultOpenAIModel(model: string): boolean {
   return normalized === DEFAULT_IMAGES_MODEL ||
     normalized === LEGACY_DEFAULT_IMAGES_MODEL ||
     normalized === DEFAULT_RESPONSES_MODEL ||
-    normalized === LEGACY_DEFAULT_RESPONSES_MODEL
+    (MANAGED_RESPONSES_MODELS as readonly string[]).includes(normalized)
 }
 
 function normalizeOpenAIModelForMode(model: unknown, apiMode: ApiMode): string {
   const rawModel = typeof model === 'string' ? model : ''
   const normalized = rawModel.trim()
   if (!normalized) return getDefaultOpenAIModel(apiMode)
-  if (apiMode === 'responses' && normalized === LEGACY_DEFAULT_RESPONSES_MODEL) {
+  if (apiMode === 'responses' && (LEGACY_RESPONSES_MODELS as readonly string[]).includes(normalized)) {
     return DEFAULT_RESPONSES_MODEL
   }
   // 注意：Images 侧不做旧默认自动迁移。gpt-image-2 未被官方弃用，
@@ -68,7 +77,7 @@ function normalizeOpenAIModelForMode(model: unknown, apiMode: ApiMode): string {
   return rawModel
 }
 
-/** 多模型列表逐项应用模式归一（v0.7.16 上游 model 支持逗号分隔多模型，gpt-5.5 迁移逐项生效）。 */
+/** 多模型列表逐项应用模式归一（v0.7.16 上游 model 支持逗号分隔多模型，旧默认文本模型迁移逐项生效）。 */
 function normalizeOpenAIModelListForMode(value: string, apiMode: ApiMode): string {
   return splitModelList(value).map((item) => normalizeOpenAIModelForMode(item, apiMode)).join(', ')
 }
@@ -220,6 +229,11 @@ function normalizeReferenceImageEditAction(value: unknown): ReferenceImageEditAc
   // 旧持久化值迁移：add-mask 与 mask 同为打开遮罩编辑器；replace-reference 无对应行为，回落 ask。
   if (value === 'add-mask') return 'mask'
   return value === 'sketch' || value === 'mask' ? value : 'ask'
+}
+
+function normalizeRetryMode(value: unknown, alwaysShowRetryButton: boolean): RetryMode {
+  if (value === 'overwriteAll') return alwaysShowRetryButton ? value : 'overwriteFailed'
+  return value === 'overwriteFailed' ? value : 'new'
 }
 
 function normalizeZipDownloadRoutes(value: unknown) {
@@ -868,6 +882,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     persistInputOnRestart: typeof record.persistInputOnRestart === 'boolean' ? record.persistInputOnRestart : true,
     reuseTaskApiProfileTemporarily: typeof record.reuseTaskApiProfileTemporarily === 'boolean' ? record.reuseTaskApiProfileTemporarily : false,
     alwaysShowRetryButton: typeof record.alwaysShowRetryButton === 'boolean' ? record.alwaysShowRetryButton : false,
+    retryMode: normalizeRetryMode(record.retryMode, record.alwaysShowRetryButton === true),
     allowPromptRewrite: typeof record.allowPromptRewrite === 'boolean' ? record.allowPromptRewrite : false,
     taskCompletionNotification: typeof record.taskCompletionNotification === 'boolean' ? record.taskCompletionNotification : false,
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
@@ -1493,6 +1508,7 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   persistInputOnRestart: true,
   reuseTaskApiProfileTemporarily: false,
   alwaysShowRetryButton: false,
+  retryMode: 'new',
   allowPromptRewrite: false,
   taskCompletionNotification: false,
   enterSubmit: false,

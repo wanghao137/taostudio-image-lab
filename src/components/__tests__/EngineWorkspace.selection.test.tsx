@@ -88,7 +88,7 @@ const batch = {
   automation: {
     enabled: true,
     maxRevisions: 1,
-    revisionRoute: { provider: 'configured', model: 'gpt-5.6-sol', apiMode: 'responses' },
+    revisionRoute: { provider: 'configured', model: 'gpt-6.1-sol', apiMode: 'responses' },
   },
   acceptanceState: 'accepted',
   stats: {

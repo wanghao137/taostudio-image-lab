@@ -1211,7 +1211,9 @@ describe('mask draft lifecycle in store actions', () => {
 
   it('重试生成的新任务记录重试时的场景 sceneId', async () => {
     useStore.setState({ settings: { ...useStore.getState().settings, activeScene: 'sticker' } })
-    await retryTask(task())
+    const retrySource = task()
+    useStore.getState().setTasks([retrySource])
+    await retryTask(retrySource)
     await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
 
     expect(useStore.getState().tasks[0].sceneId).toBe('sticker')
@@ -2931,10 +2933,13 @@ describe('reused task API profile', () => {
       }),
     })
 
-    await retryTask(task({
+    // 新版 retryTask 要求任务已存在于 store（以最新记录为准）
+    const retrySource = task({
       apiProfileId: codexProfile.id,
       params: { ...DEFAULT_PARAMS, size: '2160x3840', exact_size: true, quality: 'high' },
-    }))
+    })
+    useStore.getState().setTasks([retrySource])
+    await retryTask(retrySource)
 
     expect(useStore.getState().tasks[0].params).toMatchObject({
       size: '2160x3840',
@@ -5954,3 +5959,70 @@ describe('sprite gif workshop（表情工坊·战斗 Sprite GIF）', () => {
   })
 })
 
+
+describe('task retry', () => {
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(putDbTask).mockClear()
+    const profile = createDefaultOpenAIProfile({ id: 'retry-profile', apiKey: 'test-key' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id }),
+      tasks: [],
+      showToast: vi.fn(),
+    })
+  })
+
+  it('creates a separate task by default and leaves the original untouched', async () => {
+    const failed = task({ id: 'failed-a', status: 'error', error: 'x', createdAt: 100 })
+    useStore.getState().setTasks([failed])
+
+    await retryTask(failed)
+
+    const tasks = useStore.getState().tasks
+    expect(tasks).toHaveLength(2)
+    expect(tasks.find((t) => t.id === 'failed-a')?.status).toBe('error')
+    await vi.waitFor(() => {
+      expect(useStore.getState().tasks.find((t) => t.id !== 'failed-a')?.status).toBe('done')
+    })
+  })
+
+  it('retries a failed task in place preserving createdAt and scene metadata (overwriteFailed)', async () => {
+    const failed = task({
+      id: 'inplace-a',
+      status: 'error',
+      error: 'x',
+      createdAt: 100,
+      sceneId: 'sticker',
+      skillId: 'skill-1',
+      outputImages: ['image-a'],
+    })
+    useStore.getState().setTasks([failed])
+    useStore.setState({ settings: normalizeSettings({ ...useStore.getState().settings, retryMode: 'overwriteFailed' }) })
+
+    await retryTask(failed)
+
+    expect(useStore.getState().tasks).toHaveLength(1)
+    await vi.waitFor(() => {
+      expect(useStore.getState().tasks[0].status).toBe('done')
+    })
+    const retried = useStore.getState().tasks[0]
+    expect(retried.id).toBe('inplace-a')
+    expect(retried.createdAt).toBe(100)
+    expect(retried.startedAt).toBeGreaterThanOrEqual(100)
+    expect(retried.sceneId).toBe('sticker')
+    expect(retried.skillId).toBe('skill-1')
+  })
+
+  it('ignores retry for running tasks', async () => {
+    const running = task({ id: 'running-a', status: 'running', finishedAt: null, elapsed: null })
+    useStore.getState().setTasks([running])
+
+    await retryTask(running)
+
+    expect(useStore.getState().tasks).toHaveLength(1)
+    expect(useStore.getState().tasks[0].status).toBe('running')
+    expect(vi.mocked(putDbTask)).not.toHaveBeenCalled()
+  })
+})

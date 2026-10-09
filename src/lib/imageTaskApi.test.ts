@@ -69,12 +69,12 @@ describe('Image Task API generation defaults', () => {
       provider: 'configured',
       model: 'gpt-image-2',
       apiMode: 'images',
-      fallback: { provider: 'configured', model: 'gpt-5.6-sol', apiMode: 'responses' },
+      fallback: { provider: 'configured', model: 'gpt-6.1-sol', apiMode: 'responses' },
     })).toEqual({
       provider: 'configured',
       model: 'gpt-image-2',
       apiMode: 'images',
-      fallback: { provider: 'configured', model: 'gpt-5.6-sol', apiMode: 'responses' },
+      fallback: { provider: 'configured', model: 'gpt-6.1-sol', apiMode: 'responses' },
     })
   })
 })

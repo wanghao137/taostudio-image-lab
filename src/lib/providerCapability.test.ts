@@ -18,8 +18,8 @@ const baseProfile = {
 describe('providerCapabilityKey', () => {
   it('groups by provider + host + apiMode + model', () => {
     expect(providerCapabilityKey(baseProfile)).toBe('openai|gw.example.com|images|gpt-image-2.5-flare')
-    expect(providerCapabilityKey({ ...baseProfile, apiMode: 'responses', imageGenerationModel: 'gpt-5.6-sol' }))
-      .toBe('openai|gw.example.com|responses|gpt-5.6-sol')
+    expect(providerCapabilityKey({ ...baseProfile, apiMode: 'responses', imageGenerationModel: 'gpt-6.1-sol' }))
+      .toBe('openai|gw.example.com|responses|gpt-6.1-sol')
   })
 
   it('normalizes host case and tolerates an invalid baseUrl', () => {
@@ -68,7 +68,7 @@ describe('resolveProviderRequestSizePolicy', () => {
     recordProviderSizeObservation({ profile: baseProfile, requestedWidth: 3456, requestedHeight: 2304, observedWidth: 1536, observedHeight: 1024 })
     recordProviderSizeObservation({ profile: baseProfile, requestedWidth: 3456, requestedHeight: 2304, observedWidth: 1536, observedHeight: 1024 })
     expect(resolveProviderRequestSizePolicy({ ...baseProfile, baseUrl: 'https://other.example.com/v1' })).toBe('full')
-    expect(resolveProviderRequestSizePolicy({ ...baseProfile, apiMode: 'responses', imageGenerationModel: 'gpt-5.6-sol' })).toBe('full')
+    expect(resolveProviderRequestSizePolicy({ ...baseProfile, apiMode: 'responses', imageGenerationModel: 'gpt-6.1-sol' })).toBe('full')
     expect(resolveProviderRequestSizePolicy({ ...baseProfile, model: 'gpt-image-2' })).toBe('full')
   })
 

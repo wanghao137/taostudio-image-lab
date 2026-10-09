@@ -21,7 +21,7 @@ export const DEFAULT_DRAFT: NewJobDraft = {
   model: '',
   apiMode: 'images',
   fallbackEnabled: true,
-  fallbackModel: 'gpt-5.6-sol',
+  fallbackModel: 'gpt-6.1-sol',
   fallbackApiMode: 'responses',
   autoRevise: false,
 }

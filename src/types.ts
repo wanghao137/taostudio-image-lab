@@ -9,6 +9,9 @@ export type AgentApiConfigMode = 'off' | 'native' | 'hybrid'
 export const MAX_INPUT_IMAGES = 16
 /** 参考图预览中“编辑图片”按钮的默认行为（v0.7.16 起对齐上游画板/遮罩语义；旧值 add-mask 迁移为 mask） */
 export type ReferenceImageEditAction = 'ask' | 'sketch' | 'mask'
+
+/** 重试任务时新建任务，还是覆盖原任务 */
+export type RetryMode = 'new' | 'overwriteFailed' | 'overwriteAll'
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
   'favorite-collection-selection',
@@ -212,6 +215,7 @@ export interface AppSettings {
   persistInputOnRestart: boolean
   reuseTaskApiProfileTemporarily: boolean
   alwaysShowRetryButton: boolean
+  retryMode: RetryMode
   allowPromptRewrite: boolean
   taskCompletionNotification: boolean
   enterSubmit: boolean
@@ -471,6 +475,8 @@ export interface TaskRecord {
   status: TaskStatus
   error: string | null
   createdAt: number
+  /** 本次生成开始时间，重试时不改变原始创建时间 */
+  startedAt?: number
   finishedAt: number | null
   /** 总耗时毫秒 */
   elapsed: number | null
