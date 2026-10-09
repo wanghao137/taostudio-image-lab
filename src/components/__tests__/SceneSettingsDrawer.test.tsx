@@ -186,13 +186,13 @@ describe('SceneSettingsDrawer 生图模型覆盖（Fix C）', () => {
     const responsesProfile = {
       ...createDefaultOpenAIProfile({
         id: 'image-resp', name: '生图Responses',
-        apiMode: 'responses', model: 'gpt-5.6-sol', imageGenerationModel: 'gpt-image-2.5',
+        apiMode: 'responses', model: 'gpt-6.1-sol', imageGenerationModel: 'gpt-image-2.5',
       }),
     }
     useStore.setState({ settings: buildSceneReferencingSettings([responsesProfile]) })
     render(<SceneSettingsDrawer scene="general" onClose={() => {}} />)
 
-    expect(screen.getByText('实际生效：OpenAI · responses · 模型 gpt-5.6-sol · 生图 gpt-image-2.5')).toBeTruthy()
+    expect(screen.getByText('实际生效：OpenAI · responses · 模型 gpt-6.1-sol · 生图 gpt-image-2.5')).toBeTruthy()
 
     const igmInput = screen.getByLabelText('图像生成模型') as HTMLInputElement
     expect(igmInput.placeholder).toBe('gpt-image-2.5')
@@ -200,7 +200,7 @@ describe('SceneSettingsDrawer 生图模型覆盖（Fix C）', () => {
     fireEvent.blur(igmInput)
     expect(useStore.getState().settings.scenes.general.imageGenerationModelOverride).toBe('scene-igm')
     // 摘要行反映覆盖后的解析值
-    expect(screen.getByText('实际生效：OpenAI · responses · 模型 gpt-5.6-sol · 生图 scene-igm')).toBeTruthy()
+    expect(screen.getByText('实际生效：OpenAI · responses · 模型 gpt-6.1-sol · 生图 scene-igm')).toBeTruthy()
   })
 
   it('模型 ID 输入 onBlur 提交（trim，空→null），placeholder 为当前解析值', () => {

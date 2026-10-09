@@ -120,6 +120,17 @@ describe('normalizeApiProfile', () => {
 })
 
 describe('normalizeSettings', () => {
+  it('falls back to creating a new task for unknown retry modes', () => {
+    expect(normalizeSettings({}).retryMode).toBe('new')
+    expect(normalizeSettings({ retryMode: 'bogus' }).retryMode).toBe('new')
+    expect(normalizeSettings({ retryMode: 'overwriteFailed' }).retryMode).toBe('overwriteFailed')
+  })
+
+  it('only keeps overwriting any task while successful tasks show the retry button', () => {
+    expect(normalizeSettings({ retryMode: 'overwriteAll' }).retryMode).toBe('overwriteFailed')
+    expect(normalizeSettings({ retryMode: 'overwriteAll', alwaysShowRetryButton: true }).retryMode).toBe('overwriteAll')
+  })
+
   it('preserves a non-empty profile description and removes an empty one', () => {
     const settings = normalizeSettings({
       profiles: [
@@ -203,10 +214,10 @@ describe('default API URL env', () => {
 })
 
 describe('OpenAI model defaults by API mode', () => {
-  it('uses gpt-image-2.5-flare for Images API and gpt-5.6-sol for Responses API', () => {
+  it('uses gpt-image-2.5-flare for Images API and gpt-6.1-sol for Responses API', () => {
     expect(createDefaultOpenAIProfile({ apiMode: 'images' }).model).toBe('gpt-image-2.5-flare')
-    expect(createDefaultOpenAIProfile({ apiMode: 'responses' }).model).toBe('gpt-5.6-sol')
-    expect(DEFAULT_RESPONSES_MODEL).toBe('gpt-5.6-sol')
+    expect(createDefaultOpenAIProfile({ apiMode: 'responses' }).model).toBe('gpt-6.1-sol')
+    expect(DEFAULT_RESPONSES_MODEL).toBe('gpt-6.1-sol')
   })
 
   it('preserves the legacy Images default model instead of auto-migrating it', () => {
@@ -238,7 +249,7 @@ describe('OpenAI model defaults by API mode', () => {
     // 用户在 Images 模式填 flare 后切到 Responses：存 images 记忆，Responses 无记忆 → 换托管默认
     const switched = switchOpenAIProfileApiMode({ ...imagesProfile }, 'responses')
     expect(switched.apiMode).toBe('responses')
-    expect(switched.model).toBe('gpt-5.6-sol')
+    expect(switched.model).toBe('gpt-6.1-sol')
     expect(switched.modelByApiMode).toEqual({ images: 'gpt-image-2.5-flare' })
 
     // 用户在 Responses 模式改填 gpt-6-astra 后提交：写入 responses 记忆
@@ -263,10 +274,14 @@ describe('OpenAI model defaults by API mode', () => {
     expect(normalized.profiles[0].modelByApiMode).toEqual({ images: 'gpt-image-2.5-flare', responses: 'gpt-6-astra' })
   })
 
-  it('migrates the legacy Responses default model while preserving custom models', () => {
+  it('migrates gpt-5.5 but keeps gpt-5.6-sol sticky while preserving custom models', () => {
     const legacyProfile = {
       ...createDefaultOpenAIProfile({ id: 'legacy-responses', apiMode: 'responses', model: 'custom-placeholder' }),
       model: 'gpt-5.5',
+    }
+    const legacy56Profile = {
+      ...createDefaultOpenAIProfile({ id: 'legacy-responses-56', apiMode: 'responses', model: 'custom-placeholder' }),
+      model: 'gpt-5.6-sol',
     }
     const customProfile = createDefaultOpenAIProfile({
       id: 'custom-responses',
@@ -276,12 +291,17 @@ describe('OpenAI model defaults by API mode', () => {
 
     const normalized = normalizeSettings({
       ...DEFAULT_SETTINGS,
-      profiles: [legacyProfile, customProfile],
+      profiles: [legacyProfile, legacy56Profile, customProfile],
       activeProfileId: legacyProfile.id,
     })
 
-    expect(normalized.profiles.find((profile) => profile.id === legacyProfile.id)?.model).toBe('gpt-5.6-sol')
+    // gpt-5.5 自动迁移到当前默认；gpt-5.6-sol 粘住（sub2api 等网关可能长期只认 5.6，
+    // 与 Images 侧 gpt-image-2 的 b5e3f03 教训同构）；自定义模型粘住。
+    expect(normalized.profiles.find((profile) => profile.id === legacyProfile.id)?.model).toBe('gpt-6.1-sol')
+    expect(normalized.profiles.find((profile) => profile.id === legacy56Profile.id)?.model).toBe('gpt-5.6-sol')
     expect(normalized.profiles.find((profile) => profile.id === customProfile.id)?.model).toBe('provider/custom-text-model')
+    // gpt-5.6-sol 仍属托管默认：切换 apiMode 时会升级到新默认 6.1
+    expect(isManagedDefaultOpenAIModel('gpt-5.6-sol')).toBe(true)
   })
 
   it('maps API modes and recognizes managed default model IDs', () => {

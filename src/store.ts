@@ -132,6 +132,8 @@ const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const customRecoveryAbortControllers = new Map<string, AbortController>()
 const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
+// 覆盖式重试的执行代际：同 id 重试后旧 executeTask 的迟到写入按 symbol 失效。
+const taskExecutions = new Map<string, symbol>()
 // 数据清除标志：clearData 成功清空任务后置为 true，用于阻止清除后仍在飞行中的
 // 异步写入（executeTask、recovery timer 等）把任务重新写回内存/IndexedDB。
 // 仅在 initStore（页面加载）和新的用户生成（submitTask/retryTask）时重置。
@@ -1863,7 +1865,7 @@ function failOpenAITaskIfStillRunning(taskId: string, error: string, now = Date.
   updateTaskInStore(taskId, {
     ...createTaskErrorPatch(task, error, now),
     falRecoverable: false,
-    elapsed: Math.max(0, now - task.createdAt),
+    elapsed: Math.max(0, now - (task.startedAt ?? task.createdAt)),
   })
   return true
 }
@@ -2758,13 +2760,13 @@ async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
   }
 }
 
-async function persistTaskStreamPartialImage(taskId: string, dataUrl: string) {
+async function persistTaskStreamPartialImage(taskId: string, dataUrl: string, execution?: symbol) {
   try {
     const imgId = await storeImage(dataUrl, 'generated')
     cacheImage(imgId, dataUrl)
 
     const latestTask = useStore.getState().tasks.find((task) => task.id === taskId)
-    if (!latestTask || latestTask.status === 'done') {
+    if (!latestTask || latestTask.status === 'done' || (execution && taskExecutions.get(taskId) !== execution)) {
       await deleteUnreferencedImageIds([imgId])
       return
     }
@@ -2798,6 +2800,9 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
   const { settings } = useStore.getState()
   const task = useStore.getState().tasks.find((t) => t.id === taskId)
   if (!task) return
+  // 执行代际：覆盖式重试复用任务 id，旧 executeTask 的迟到写入按 symbol 失效。
+  const execution = Symbol(taskId)
+  taskExecutions.set(taskId, execution)
   const taskProfile = getTaskApiProfile(settings, task)
   if (!taskProfile && task.apiProfileId) {
     updateTaskInStore(taskId, {
@@ -2805,6 +2810,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       falRecoverable: false,
       customRecoverable: false,
     })
+    taskExecutions.delete(taskId)
     return
   }
   const activeProfile = taskProfile ?? getSceneImageApiProfile(settings)
@@ -2890,6 +2896,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       maskDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
       onFalRequestEnqueued: (request) => {
+        if (taskExecutions.get(taskId) !== execution) return
         falRequestInfo = request
         updateTaskInStore(taskId, {
           falRequestId: request.requestId,
@@ -2900,6 +2907,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
         releaseSlot?.()
       },
       onCustomTaskEnqueued: (request) => {
+        if (taskExecutions.get(taskId) !== execution) return
         customTaskInfo = request
         updateTaskInStore(taskId, {
           customTaskId: request.taskId,
@@ -2908,12 +2916,14 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
         releaseSlot?.()
       },
       onPartialImage: (partial) => {
+        if (taskExecutions.get(taskId) !== execution) return
         useStore.getState().setTaskStreamPreview(taskId, partial.image, partial.requestIndex)
-        void persistTaskStreamPartialImage(taskId, partial.image)
+        void persistTaskStreamPartialImage(taskId, partial.image, execution)
       },
     })
 
     const latestBeforeSuccess = useStore.getState().tasks.find((t) => t.id === taskId)
+    if (taskExecutions.get(taskId) !== execution) return
     if (!latestBeforeSuccess || latestBeforeSuccess.status !== 'running') {
       useStore.getState().setTaskStreamPreview(taskId)
       return
@@ -2970,7 +2980,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== promptSentToApi.trim(),
     )
     const hasRevisedPromptValue = shouldStoreRevisedPrompts && revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
-    if (taskProvider === 'openai' && executionProfile.apiMode === 'responses' && !executionProfile.codexCli && !result.refusalRecovery) {
+    if (taskExecutions.get(taskId) === execution && taskProvider === 'openai' && executionProfile.apiMode === 'responses' && !executionProfile.codexCli && !result.refusalRecovery) {
       if (promptWasRevised) {
         showCodexCliPrompt()
       } else if (!hasRevisedPromptValue) {
@@ -2980,8 +2990,8 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
 
     // 更新任务
     const latestBeforeUpdate = useStore.getState().tasks.find((t) => t.id === taskId)
-    if (!latestBeforeUpdate || latestBeforeUpdate.status !== 'running') {
-      useStore.getState().setTaskStreamPreview(taskId)
+    if (taskExecutions.get(taskId) !== execution || !latestBeforeUpdate || latestBeforeUpdate.status !== 'running') {
+      if (taskExecutions.get(taskId) === execution) useStore.getState().setTaskStreamPreview(taskId)
       await deleteUnreferencedImageIds([
         ...outputIds,
         ...(transparentOriginalImageIds ?? []),
@@ -3036,6 +3046,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       useStore.getState().clearMaskDraft()
     }
   } catch (err) {
+    if (taskExecutions.get(taskId) !== execution) return
     clearOpenAIWatchdogTimer(taskId)
     const latestTask = useStore.getState().tasks.find((t) => t.id === taskId)
     if (!latestTask || latestTask.status !== 'running') return
@@ -3090,9 +3101,13 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       if (!batchTaskIds.has(taskId)) useStore.getState().setDetailTaskId(taskId)
     }
   } finally {
-    // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）
-    for (const imgId of task.inputImageIds) {
-      deleteCachedImage(imgId)
+    if (taskExecutions.get(taskId) === execution) taskExecutions.delete(taskId)
+    // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）。
+    // 覆盖式重试启动了新执行时保留缓存：新执行马上还要读这些输入图。
+    if (!taskExecutions.has(taskId)) {
+      for (const imgId of task.inputImageIds) {
+        deleteCachedImage(imgId)
+      }
     }
   }
 }
@@ -3798,16 +3813,27 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
   useStore.getState().showToast(`已删除收藏夹「${collection.name}」`, 'success')
 }
 
-/** 重试失败的任务：创建新任务并执行 */
+/** 按重试方式新建任务或覆盖原任务；Agent 对话中的任务始终新建 */
 export async function retryTask(task: TaskRecord) {
   // 用户重试生成：重置数据清除标志。
   tasksCleared = false
   await refreshTaskStorageGeneration()
-  const { settings } = useStore.getState()
-  const activeProfile = getSceneImageApiProfile(settings)
+  const { settings, tasks } = useStore.getState()
+  // 以最新任务记录为准：运行中/断线恢复中的任务不可重试（重试会与之竞态）。
+  const source = tasks.find((item) => item.id === task.id)
+  if (!source || source.status === 'running' || source.falRecoverable || source.customRecoverable) return
+  const overwrite = !isAgentTask(source) && (
+    settings.retryMode === 'overwriteAll' || (settings.retryMode === 'overwriteFailed' && source.status === 'error')
+  )
+  // 覆盖重试保留任务原场景溯源，打点必须与任务场景同源解析（执行链
+  // getSceneOverriddenTaskProfile 会按 task.sceneId 叠加场景覆盖，打点错场景
+  // 会让 provider 标签/错误提示/断线恢复解析全部错位）；新建重试用当前场景。
+  const activeProfile = overwrite && source.sceneId
+    ? getSceneImageApiProfile(settings, source.sceneId)
+    : getSceneImageApiProfile(settings)
   const requestSettings = createSettingsForApiProfile(settings, activeProfile)
-  const normalizedParams = normalizeParamsForSettings(task.params, requestSettings, {
-    hasInputImages: task.inputImageIds.length > 0,
+  const normalizedParams = normalizeParamsForSettings(source.params, requestSettings, {
+    hasInputImages: source.inputImageIds.length > 0,
     preserveExactSizeIntent: true,
   })
   const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
@@ -3815,38 +3841,81 @@ export async function retryTask(task: TaskRecord) {
     ? getTransparentRequestParams(normalizedParams)
     : { ...normalizedParams, transparent_output: false }
   const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
-    ? createTransparentOutputMeta(task.prompt.trim())
+    ? createTransparentOutputMeta(source.prompt.trim())
     : null
-  const taskId = genId()
+  const taskId = overwrite ? source.id : genId()
+  const startedAt = Date.now()
   const newTask: TaskRecord = {
+    ...(overwrite ? source : {}),
     id: taskId,
     storageGeneration: taskStorageGeneration,
-    prompt: task.prompt,
+    prompt: source.prompt,
     params: taskParams,
     apiProvider: activeProfile.provider,
     apiProfileId: activeProfile.id,
     apiProfileName: activeProfile.name,
     apiMode: activeProfile.apiMode,
     apiModel: activeProfile.model,
-    inputImageIds: [...task.inputImageIds],
-    maskTargetImageId: task.maskTargetImageId ?? null,
-    maskImageId: task.maskImageId ?? null,
-    inputPreprocess: task.inputPreprocess,
-    originalInputImageIds: task.originalInputImageIds ? [...task.originalInputImageIds] : undefined,
+    inputImageIds: [...source.inputImageIds],
+    maskTargetImageId: source.maskTargetImageId ?? null,
+    maskImageId: source.maskImageId ?? null,
+    inputPreprocess: source.inputPreprocess,
+    originalInputImageIds: source.originalInputImageIds ? [...source.originalInputImageIds] : undefined,
     transparentOutput: transparentMeta?.transparentOutput,
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
+    outputErrors: undefined,
+    transparentOriginalImages: undefined,
+    exactSizeOriginalImages: undefined,
+    exactSizeTransforms: undefined,
+    ratioCorrected: undefined,
+    outputPersistWarning: undefined,
+    refusalRecovery: undefined,
+    localAutoSave: undefined,
+    imageTask: undefined,
+    actualParams: undefined,
+    actualParamsByImage: undefined,
+    revisedPromptByImage: undefined,
+    rawImageUrls: undefined,
+    rawResponsePayload: undefined,
+    streamPartialImageIds: undefined,
+    falRequestId: undefined,
+    falEndpoint: undefined,
+    falRecoverable: false,
+    customTaskId: undefined,
+    customRecoverable: false,
     status: 'running',
     error: null,
-    sceneId: settings.activeScene,
-    createdAt: Date.now(),
+    // 覆盖重试保留任务原始场景溯源；新建重试记录当前场景。
+    sceneId: overwrite ? source.sceneId : settings.activeScene,
+    createdAt: overwrite ? source.createdAt : startedAt,
+    startedAt,
     finishedAt: null,
     elapsed: null,
   }
 
-  const latestTasks = useStore.getState().tasks
-  useStore.getState().setTasks([newTask, ...latestTasks])
+  if (overwrite) {
+    taskExecutions.delete(taskId)
+    // 覆盖后不再属于原批量，完成时应正常提示
+    batchTaskIds.delete(taskId)
+    clearOpenAIWatchdogTimer(taskId)
+    clearFalRecoveryTimer(taskId)
+    clearCustomRecoveryTimer(taskId)
+    useStore.getState().setTaskStreamPreview(taskId)
+  }
+  useStore.getState().setTasks(overwrite
+    ? tasks.map((item) => item.id === taskId ? newTask : item)
+    : [newTask, ...tasks])
   await putTask(newTask)
+  if (overwrite) {
+    // 先重置记录引用再 GC：exact_size 中间图/透明原图等只有解除记录引用后才能安全删除。
+    void deleteUnreferencedImageIds([
+      ...source.outputImages,
+      ...(source.transparentOriginalImages ?? []),
+      ...(source.exactSizeOriginalImages ?? []),
+      ...(source.streamPartialImageIds ?? []),
+    ])
+  }
 
   executeTask(taskId)
 }
@@ -4017,6 +4086,7 @@ async function removeTasks(taskIds: string[], updateState?: TaskDeletionStateUpd
     clearFalRecoveryTimer(task.id)
     clearCustomRecoveryTimer(task.id)
     clearOpenAIWatchdogTimer(task.id)
+    taskExecutions.delete(task.id)
   }
 
   if (updateState) {
@@ -4685,10 +4755,14 @@ export async function importData(input: File | File[], options: ImportOptions = 
       }
 
       let failedTaskImports = 0
-      for (const task of importedTasks) {
+      for (const importedTask of importedTasks) {
         try {
           // 导入走直写：putTask 的失败重试包装会把写失败吞成成功，
           // 导入场景必须如实感知（否则展示"导入成功"但任务缺失）。
+          // startedAt 非法值会让计时和「重试于」显示异常，导入时丢弃。
+          const task = Number.isFinite(importedTask.startedAt) || importedTask.startedAt === undefined
+            ? importedTask
+            : { ...importedTask, startedAt: undefined }
           await dbPutTask(normalizeImportedTaskLocalAutoSave(task), taskStorageGeneration)
         } catch {
           failedTaskImports += 1

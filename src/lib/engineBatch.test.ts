@@ -24,7 +24,7 @@ describe('Engine UI automated Batch requests', () => {
         model: 'gpt-image-2',
         apiMode: 'images',
         fallbackEnabled: true,
-        fallbackModel: 'gpt-5.6-sol',
+        fallbackModel: 'gpt-6.1-sol',
         fallbackApiMode: 'responses',
         autoRevise: false,
       },
@@ -39,7 +39,7 @@ describe('Engine UI automated Batch requests', () => {
         maxRevisions: 0,
         revisionRoute: {
           provider: 'configured',
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6.1-sol',
           apiMode: 'responses',
         },
       },
@@ -55,7 +55,7 @@ describe('Engine UI automated Batch requests', () => {
               apiMode: 'images',
               fallback: {
                 provider: 'configured',
-                model: 'gpt-5.6-sol',
+                model: 'gpt-6.1-sol',
                 apiMode: 'responses',
               },
             },
