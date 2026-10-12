@@ -256,7 +256,9 @@ async function embedDefaultConfig(value: string) {
 }
 
 export default defineConfig(async ({ command, mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
+  // 客户端构建只读取 src-tauri/ 下的 env 文件，与网页版部署配置隔离（上游 v0.8.0）
+  const envDir = process.env.TAURI_ENV_PLATFORM ? resolve('src-tauri') : process.cwd()
+  const env = loadEnv(mode, envDir, '')
   const defaultApiUrl = await embedDefaultConfig(process.env.VITE_DEFAULT_API_URL ?? env.VITE_DEFAULT_API_URL ?? '')
   if (defaultApiUrl.startsWith('embedded-config:')) process.env.VITE_DEFAULT_API_URL = defaultApiUrl
   const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
@@ -289,9 +291,11 @@ export default defineConfig(async ({ command, mode }) => {
       host: true,
       port: 9527,
       strictPort: true,
+      // Tauri 开发模式由 src-tauri 的 devUrl 固定端口，watcher 忽略 Rust 侧目录（上游 v0.8.0）
+      strictPortTauri: undefined,
       watch: {
         // 本地草稿目录里 E2E 会落盘下载产物，避免 watcher 盯到临时文件崩溃
-        ignored: ['**/.omc/**', '**/.omx/**'],
+        ignored: ['**/.omc/**', '**/.omx/**', '**/src-tauri/**'],
       },
     },
     test: {
@@ -307,7 +311,11 @@ export default defineConfig(async ({ command, mode }) => {
       ],
       exclude: ['**/node_modules/**', '.upstream/**', 'dist/**'],
       // Windows 上 forks 池偶发 worker 启动超时会静默丢整个测试文件；threads 池更稳。
+      // maxWorkers 限并发（Vitest 4 顶层选项，poolOptions 已移除）：满载并行下长测试
+      // 会 5s 超时假失败，多轮升级的 finalize verify 反复被挡，限并发后稳定。
       pool: 'threads',
+      maxWorkers: 4,
+      minWorkers: 1,
     },
   }
 })

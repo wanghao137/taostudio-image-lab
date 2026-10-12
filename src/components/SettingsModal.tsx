@@ -48,6 +48,8 @@ import ViewportTooltip from './ViewportTooltip'
 import MarkdownRenderer from './MarkdownRenderer'
 import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon } from './icons'
 import GeneralSettingsTab from './settings/GeneralSettingsTab'
+import AboutSettingsTab from './settings/AboutSettingsTab'
+import FontLicensesModal from './settings/FontLicensesModal'
 import CustomProviderModal from './settings/CustomProviderModal'
 import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/ProfileImportUrlModal'
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
@@ -178,6 +180,8 @@ export default function SettingsModal() {
   const [profileMenuMaxHeight, setProfileMenuMaxHeight] = useState(DEFAULT_DROPDOWN_MAX_HEIGHT)
   const [showCustomProviderImport, setShowCustomProviderImport] = useState(false)
   const [showZipDownloadRouteManager, setShowZipDownloadRouteManager] = useState(false)
+  const [showFontLicenses, setShowFontLicenses] = useState(false)
+  const fontLicensesScrollBoundaryRef = useRef<HTMLDivElement>(null)
   const [editingCustomProviderId, setEditingCustomProviderId] = useState<string | null>(null)
   const [customProviderJson, setCustomProviderJson] = useState(DEFAULT_CUSTOM_PROVIDER_JSON)
   const [customProviderImportError, setCustomProviderImportError] = useState<string | null>(null)
@@ -2033,6 +2037,13 @@ export default function SettingsModal() {
         </div>
       </div>
       </div>
+
+        {showFontLicenses && (
+          <FontLicensesModal
+            scrollBoundaryRef={fontLicensesScrollBoundaryRef}
+            onClose={() => setShowFontLicenses(false)}
+          />
+        )}
 
         {showZipDownloadRouteManager && (
           <ZipDownloadRouteModal

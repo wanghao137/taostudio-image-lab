@@ -26,6 +26,7 @@ import { normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApi
 import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './importableConfigUrl'
 import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
+import { normalizeFontMode } from './fonts'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -885,8 +886,14 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     retryMode: normalizeRetryMode(record.retryMode, record.alwaysShowRetryButton === true),
     allowPromptRewrite: typeof record.allowPromptRewrite === 'boolean' ? record.allowPromptRewrite : false,
     taskCompletionNotification: typeof record.taskCompletionNotification === 'boolean' ? record.taskCompletionNotification : false,
+    autoCheckUpdate: typeof record.autoCheckUpdate === 'boolean' ? record.autoCheckUpdate : true,
+    writeLogFile: typeof record.writeLogFile === 'boolean' ? record.writeLogFile : true,
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
     ratioAutoCorrect: typeof record.ratioAutoCorrect === 'boolean' ? record.ratioAutoCorrect : true,
+    uiFont: normalizeFontMode(record.uiFont),
+    uiFontName: typeof record.uiFontName === 'string' ? record.uiFontName.trim() : '',
+    monoFont: normalizeFontMode(record.monoFont),
+    monoFontName: typeof record.monoFontName === 'string' ? record.monoFontName.trim() : '',
     showBatchPrompt: typeof record.showBatchPrompt === 'boolean' ? record.showBatchPrompt : false,
     batchPromptEnabled: typeof record.batchPromptEnabled === 'boolean' ? record.batchPromptEnabled : false,
     batchPromptMode: record.batchPromptMode === 'concurrent' ? 'concurrent' : 'queue',
@@ -896,6 +903,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     zipDownloadRoutes: normalizeZipDownloadRoutes(record.zipDownloadRoutes),
     localAutoSave: normalizeLocalAutoSaveSettings(record.localAutoSave),
     textApiProfileId,
+    saveLocationMode: record.saveLocationMode === 'default' ? 'default' : 'ask',
     profiles,
     activeProfileId,
     scenes,
@@ -1511,9 +1519,12 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   retryMode: 'new',
   allowPromptRewrite: false,
   taskCompletionNotification: false,
+  autoCheckUpdate: true,
+  writeLogFile: true,
   enterSubmit: false,
   ratioAutoCorrect: true,
   referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
   localAutoSave: DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
+  saveLocationMode: 'ask',
 })

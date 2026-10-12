@@ -12,6 +12,12 @@ export type ReferenceImageEditAction = 'ask' | 'sketch' | 'mask'
 
 /** 重试任务时新建任务，还是覆盖原任务 */
 export type RetryMode = 'new' | 'overwriteFailed' | 'overwriteAll'
+
+/** 仅客户端：下载和导出时每次询问保存位置，还是直接保存到默认保存地址 */
+export type SaveLocationMode = 'ask' | 'default'
+
+/** 字体选择：default 表示使用部署默认（VITE_DEFAULT_UI_FONT / VITE_DEFAULT_MONO_FONT）；builtin 为内置字体，加载来源由 VITE_BUILTIN_FONT_SOURCE 决定 */
+export type FontMode = 'default' | 'builtin' | 'system' | 'custom'
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
   'favorite-collection-selection',
@@ -216,6 +222,18 @@ export interface AppSettings {
   reuseTaskApiProfileTemporarily: boolean
   alwaysShowRetryButton: boolean
   retryMode: RetryMode
+  /** 启动时检查 GitHub 上的新版本 */
+  autoCheckUpdate: boolean
+  /** 仅客户端：把警告和错误写入日志文件 */
+  writeLogFile: boolean
+  uiFont: FontMode
+  /** uiFont 为 custom 时使用的本机字体名称 */
+  uiFontName: string
+  monoFont: FontMode
+  /** monoFont 为 custom 时使用的本机字体名称 */
+  monoFontName: string
+  /** 仅客户端：默认保存地址本身由 Rust 侧保存，不在设置中 */
+  saveLocationMode: SaveLocationMode
   allowPromptRewrite: boolean
   taskCompletionNotification: boolean
   enterSubmit: boolean

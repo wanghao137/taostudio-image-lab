@@ -2,6 +2,7 @@ import { memo, useEffect, useState, useRef, type ReactNode } from 'react'
 import type { TaskRecord } from '../types'
 import { useStore, retryTask } from '../store'
 import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
+import { useNearViewport } from '../hooks/useNearViewport'
 import { formatImageRatio } from '../lib/size'
 import { getParamDisplay, ActualValueBadge } from '../lib/paramDisplay'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_FAL_MODEL } from '../lib/apiProfiles'
@@ -100,6 +101,8 @@ function TaskCard({
   const swipeDirectionRef = useRef<-1 | 0 | 1>(0)
   const swipeActionActiveRef = useRef(false)
   const cardRef = useRef<HTMLDivElement>(null)
+  // 虚拟列表会多渲染上下各一屏；仍等卡片接近可视区域再读缩略图，快速拖动滚动条时一闪而过的卡片不必读取
+  const nearViewport = useNearViewport(cardRef)
   const swipeOffsetRef = useRef(0)
   const pendingSwipeOffsetRef = useRef(0)
   const swipeFrameRef = useRef<number | null>(null)
@@ -261,6 +264,7 @@ function TaskCard({
 
   // 加载缩略图
   useEffect(() => {
+    if (!nearViewport) return
     setCoverRatio('')
     setCoverSize('')
     setThumbSrc('')
@@ -269,9 +273,9 @@ function TaskCard({
     const imageId = task.outputImages?.[0]
     let unsubscribe: (() => void) | undefined
 
-    const applyThumbnail = (thumbnail: { dataUrl: string; width?: number; height?: number }) => {
+    const applyThumbnail = (thumbnail: { src: string; width?: number; height?: number }) => {
       if (cancelled) return
-      setThumbSrc(thumbnail.dataUrl)
+      setThumbSrc(thumbnail.src)
       if (thumbnail.width && thumbnail.height) {
         setCoverRatio(formatImageRatio(thumbnail.width, thumbnail.height))
         setCoverSize(`${thumbnail.width}×${thumbnail.height}`)
@@ -292,7 +296,7 @@ function TaskCard({
       cancelled = true
       unsubscribe?.()
     }
-  }, [task.outputImages])
+  }, [nearViewport, task.outputImages])
 
   const duration = (() => {
     let seconds: number

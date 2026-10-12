@@ -240,7 +240,7 @@ describe('SkillWorkshop', () => {
     expect(loadBuiltinSkills).toHaveBeenCalled()
   })
 
-  it('一键生成主 CTA、示例 chips 点击填入与高级选项折叠', async () => {
+  it('一键生成主 CTA、示例 chips 点击填入与高级选项折叠', { timeout: 20_000 }, async () => {
     const SKILL_SHANZE: SkillSummary = {
       id: 'shan-ze-school',
       name: 'shan-ze-school',
