@@ -1,3 +1,5 @@
+import { isTauri } from '../lib/platform'
+import { LinkIcon } from './icons'
 import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
@@ -140,6 +142,22 @@ export default function HelpModal({ isFavoriteCollectionOverview = false, onClos
               </section>
             </>
           )}
+          <section>
+            <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+              <LinkIcon className="w-4 h-4 text-gray-400 dark:text-gray-500" />
+              导入配置链接
+            </h4>
+            <ul className="list-disc pl-4 space-y-2">
+              {isTauri ? (
+                <>
+                  <li>在浏览器或其他地方<strong className="text-blue-500 dark:text-blue-400 font-medium">复制导入链接</strong>后切回客户端，客户端会提示导入，确认后才会导入。</li>
+                  <li>点击 <code className="rounded bg-gray-100 px-1 py-0.5 text-[0.85em] text-gray-700 dark:bg-white/[0.06] dark:text-gray-200">gpt-image-playground://</code> 开头的链接可以直接唤起客户端并提示导入。</li>
+                </>
+              ) : (
+                <li>打开带有配置参数的<strong className="text-blue-500 dark:text-blue-400 font-medium">导入链接</strong>时，页面会先提示导入，确认后才会导入。</li>
+              )}
+            </ul>
+          </section>
         </div>
 
         <div className="pt-4 border-t border-gray-200 dark:border-white/[0.08] flex justify-center">

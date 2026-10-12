@@ -15,6 +15,15 @@ import Toast from './components/Toast'
 import ImageContextMenu from './components/ImageContextMenu'
 import MobileShell from './components/MobileShell'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
+import { useAppFonts } from './hooks/useAppFonts'
+import { useCloseConfirm } from './hooks/useCloseConfirm'
+import { useSaveLocationPrompt } from './hooks/useSaveLocationPrompt'
+import { useAutoUpdateCheck } from './hooks/useReleaseUpdates'
+import { useImportLinks } from './hooks/useImportLinks'
+import UpdateModal from './components/UpdateModal'
+import DataProgressDialog from './components/DataProgressDialog'
+import DbBlockedNotice from './components/DbBlockedNotice'
+import AnnouncementModal from './components/AnnouncementModal'
 import ErrorBoundary from './components/ErrorBoundary'
 
 // 移动端统计降级：仅保留这三项；桌面端 6 项不变。
@@ -185,9 +194,16 @@ export default function App() {
   const isMobile = useIsMobile()
   // composeOpen 由 Task 5 的 MobileComposeSheet 消费；setComposeOpen 由 FAB 触发。
   const [composeOpen, setComposeOpen] = useState(false)
+  const [startupImportDone, setStartupImportDone] = useState(false)
   // 场景设置抽屉：从画廊工作台头部齿轮打开，始终绑定当前 activeScene。
   const [sceneSettingsOpen, setSceneSettingsOpen] = useState(false)
   useDockerApiUrlMigrationNotice()
+  useAppFonts()
+  useCloseConfirm()
+  useSaveLocationPrompt()
+  useAutoUpdateCheck(useStore((s) => s.settings.autoCheckUpdate))
+  // 运行中的链接导入要等启动时的预置配置写入完，否则会被启动流程覆盖
+  useImportLinks(startupImportDone)
   useGlobalClickSuppression()
 
   useEffect(() => {
@@ -262,6 +278,7 @@ export default function App() {
           : current.settings
         current.setSettings(await applyUrlSettings(settings))
         clearAppliedUrlSettings()
+        setStartupImportDone(true)
       })
       .catch((error) => {
         console.warn('Failed to import preset config:', error)
@@ -270,6 +287,7 @@ export default function App() {
         void applyUrlSettings(state.settings).then((settings) => {
           useStore.getState().setSettings(settings)
           clearAppliedUrlSettings()
+          setStartupImportDone(true)
         })
       })
   }, [])
@@ -406,6 +424,10 @@ export default function App() {
         </Suspense>
       </ErrorBoundary>
       <Toast />
+      <DataProgressDialog />
+      <DbBlockedNotice />
+      <AnnouncementModal ready={startupImportDone} />
+      <UpdateModal />
       <ImageContextMenu />
     </>
   )

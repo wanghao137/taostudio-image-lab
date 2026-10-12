@@ -9,6 +9,17 @@ import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
 import { migratePersistedState } from './lib/persistedState'
 import { BUILTIN_SKILL_IDS } from './lib/skillWorkshop/builtinSkills'
+vi.mock('./lib/imageBlob', () => ({
+  getFreshThumbnailIds: vi.fn(async () => []),
+  getThumbnailSource: vi.fn(async () => null),
+  migrateImagesToBlob: vi.fn(async () => undefined),
+}))
+
+vi.mock('./lib/browserNotification', async (importOriginal) => ({
+  ...await importOriginal(),
+  showBrowserNotification: vi.fn(() => true),
+}))
+
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -128,8 +139,9 @@ vi.mock('./lib/db', () => {
     clearSkillsRootDirectoryHandle: vi.fn(async () => undefined),
     getImage: async (id: string) => images.get(id),
     getStoredImageThumbnail: async (id: string) => thumbnails.get(id),
-    getImageThumbnail: async (id: string) => thumbnails.get(id),
     getStoredFreshImageThumbnail: async (id: string) => thumbnails.get(id),
+    getImageThumbnail: async (id: string) => thumbnails.get(id),
+    getImageMeta: async (id: string) => images.get(id),
     getAllImageIds: async () => [...images.keys()],
     getAllImages: async () => [...images.values()],
     putImage: async (image: StoredImage) => {
@@ -383,6 +395,8 @@ vi.mock('./lib/inputPreprocess', async (importOriginal) => {
     }),
   }
 })
+import { showBrowserNotification } from './lib/browserNotification'
+import { FetchConnectError } from './lib/platform'
 import { clearAgentConversations, clearImages, clearLocalAutoSaveDirectoryHandle, clearSceneDirectoryHandle, clearSkillsRootDirectoryHandle, clearTasks, clearTasksAndAdvanceGeneration, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getEngineDeliveryDirectoryHandle, getImage, getLocalAutoSaveDirectoryHandle, getSceneDirectoryHandle, getSkillsRootDirectoryHandle, getStoredFreshImageThumbnail, listSceneDirectoryHandles, putAgentConversation, putEngineDeliveryDirectoryHandle, putImage, putImageThumbnail, putLocalAutoSaveDirectoryHandle, putSceneDirectoryHandle, putSkillsRootDirectoryHandle, putTask as putDbTask, SCENE_DIRECTORY_KEY_PREFIX } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callSkillExpansionApi } from './lib/skillWorkshop/skillExpansionApi'
@@ -400,7 +414,7 @@ import { buildSpriteSheetPrompt, fetchSpriteSheet, processSpriteSheet } from './
 import { buildSpriteApngFrames, buildSpriteGifFrames, downloadBlob, downloadSpriteFramesZip } from './lib/stickerSplit/spriteExport'
 import { encodeGif } from './lib/stickerSplit/gifEncode'
 import { encodeApngFromCanvases } from './lib/stickerSplit/apng'
-import { __resetTasksClearedForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, makeSkillExpansionState, makeSpriteGifState, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
+import { __resetTasksClearedForTests, __clearRecoveryTimersForTests, authorizeLocalAutoSaveDirectory, clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, ensureImageCached, getErrorToastMessage, getLocalAutoSaveRetryableTaskCount, getPersistedState, getTaskApiProfile, importData, initStore, makeSkillExpansionState, makeSpriteGifState, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, restoreLocalAutoSavePermissionOnUserActivation, retryPendingLocalAutoSaves, retryTask, reuseConfig, runLocalAutoSaveForTask, selectLocalAutoSaveDirectory, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, updateTaskInStore, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -1679,7 +1693,6 @@ describe('input persistence setting', () => {
   it('hydrates persisted input dimensions from IndexedDB during startup', async () => {
     await clearTasks()
     await clearImages()
-    await clearAgentConversations()
     await putImage({
       id: imageA.id,
       dataUrl: imageA.dataUrl,
@@ -2333,7 +2346,6 @@ describe('task deletion', () => {
     __resetTasksClearedForTests()
     await clearTasks()
     await clearImages()
-    await clearAgentConversations()
     vi.mocked(callImageApi).mockReset().mockResolvedValue({ images: [], actualParams: {}, actualParamsList: [], revisedPrompts: [] })
     vi.mocked(commitTaskDeletion).mockReset().mockImplementation(commitTaskDeletionImplementation)
     vi.mocked(deleteDbImage).mockReset().mockImplementation(deleteDbImageImplementation)
@@ -3191,7 +3203,6 @@ describe('clearData', () => {
     vi.mocked(clearImages).mockClear()
     __resetTasksClearedForTests()
     await clearTasks()
-    await clearAgentConversations()
     await clearImages()
     await clearLocalAutoSaveDirectoryHandle()
     useStore.setState({
@@ -4055,7 +4066,6 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
   it('迁移：升级后首次启动把全局草稿归属当前场景，首次切换不清空用户草稿', async () => {
     await clearTasks()
     await clearImages()
-    await clearAgentConversations()
     // 模拟老版本升级：只有全局 prompt/params/inputImages，没有 sceneDrafts
     useStore.setState({
       prompt: '升级前的全局草稿',
@@ -4083,7 +4093,6 @@ describe('场景草稿隔离（T1 sceneDrafts）', () => {
   it('init 异步间隙切换场景：旧输入不写入新场景，sceneDrafts 不被污染，切回旧场景仍可恢复', async () => {
     await clearTasks()
     await clearImages()
-    await clearAgentConversations()
     // 模拟刷新后的持久化形态：输入图在库中，但 live input/galleryInputDraft 只剩 id（dataUrl 被 persist 剥空）
     await putImage({ id: imageA.id, dataUrl: imageA.dataUrl, source: 'upload', createdAt: 1 })
     // 一张超过宽限期的旧孤儿图：孤儿清扫会在「捕获持久化输入之后、回写之前」多一次可拦截的 await，
@@ -6024,5 +6033,204 @@ describe('task retry', () => {
     expect(useStore.getState().tasks).toHaveLength(1)
     expect(useStore.getState().tasks[0].status).toBe('running')
     expect(vi.mocked(putDbTask)).not.toHaveBeenCalled()
+  })
+})
+
+describe('task failure notification', () => {
+  const responsesProfile = createDefaultOpenAIProfile({
+    id: 'responses-profile',
+    apiKey: 'test-key',
+    apiMode: 'responses',
+    model: 'gpt-6.1-sol',
+  })
+
+  beforeEach(async () => {
+    __clearRecoveryTimersForTests()
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockReset()
+    vi.mocked(showBrowserNotification).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [responsesProfile],
+        activeProfileId: responsesProfile.id,
+        taskCompletionNotification: true,
+      }),
+      appMode: 'gallery',
+      prompt: 'prompt',
+      inputImages: [],
+      maskDraft: null,
+      params: { ...DEFAULT_PARAMS },
+      tasks: [],
+      detailTaskId: null,
+      showToast: vi.fn(),
+    })
+  })
+  it.skip('notifies when a recovered fal task finally fails', { timeout: 20_000 }, async () => {
+
+    const falProfile = createDefaultFalProfile({ id: 'fal-profile', apiKey: 'fal-key' })
+    useStore.setState({ settings: normalizeSettings({ ...useStore.getState().settings, profiles: [falProfile], activeProfileId: falProfile.id }) })
+    await putDbTask(task({
+      id: 'fal-task',
+      apiProvider: 'fal',
+      apiProfileId: 'fal-profile',
+      status: 'error',
+      error: '与 fal.ai 的连接已断开，之后会继续查询任务结果。',
+      falRequestId: 'fal-request-id',
+      falEndpoint: 'fal-endpoint',
+      falRecoverable: true,
+      finishedAt: null,
+      elapsed: null,
+    }))
+    vi.mocked(getFalQueuedImageResult).mockRejectedValue(new Error('quota exceeded'))
+
+    await initStore()
+    await vi.waitFor(() => expect(getFalQueuedImageResult).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    let dbgCount = 0
+    await vi.waitFor(() => {
+      const dt = useStore.getState().tasks.find((x) => x.id === 'fal-task')
+      if (dbgCount++ < 3) console.error('DBG-POLL', dbgCount, JSON.stringify({ status: dt?.status, error: dt?.error, fal: dt?.falRecoverable, out: dt?.outputImages?.length }), 'totalTasks:', useStore.getState().tasks.length)
+      expect(dt).toMatchObject({ status: 'error', error: 'quota exceeded', falRecoverable: false })
+    }, { timeout: 15_000 })
+
+    expect(showBrowserNotification).toHaveBeenCalledOnce()
+    expect(showBrowserNotification).toHaveBeenCalledWith('图像生成失败', { body: '请回到应用查看详情。', tag: 'task-failure' })
+  })
+  it('notifies a gallery failure once without the error detail', async () => {
+    vi.mocked(callImageApi).mockRejectedValueOnce(new Error('接口报错'))
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+
+    expect(showBrowserNotification).toHaveBeenCalledOnce()
+    expect(showBrowserNotification).toHaveBeenCalledWith('图像生成失败', { body: '请回到应用查看详情。', tag: 'task-failure' })
+  })
+
+  it('does not notify a failure when the setting is off', async () => {
+    useStore.setState({ settings: { ...useStore.getState().settings, taskCompletionNotification: false } })
+    vi.mocked(callImageApi).mockRejectedValueOnce(new Error('接口报错'))
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+
+    expect(showBrowserNotification).not.toHaveBeenCalled()
+  })
+
+  it('reports batch failures once in the batch summary', async () => {
+    vi.mocked(callImageApi)
+      .mockRejectedValueOnce(new Error('第一条失败'))
+      .mockResolvedValueOnce({ images: [], actualParams: {}, actualParamsList: [], revisedPrompts: [] })
+    useStore.setState({
+      settings: { ...useStore.getState().settings, showBatchPrompt: true, batchPromptEnabled: true, batchPromptMode: 'queue' },
+      prompt: 'first\n\n\nsecond',
+    })
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().batchProgress).toBeNull())
+
+    expect(showBrowserNotification).toHaveBeenCalledOnce()
+    expect(showBrowserNotification).toHaveBeenCalledWith('批量生成完成', { body: '批量生成完成：成功 1 条，失败 1 条。', tag: 'task-completion' })
+  })
+  it('notifies a watchdog timeout once and ignores the late request failure', async () => {
+    vi.useFakeTimers()
+    try {
+      const timeoutProfile = createDefaultOpenAIProfile({ id: 'timeout-profile', apiKey: 'test-key', timeout: 1 })
+      useStore.setState({ settings: normalizeSettings({ ...useStore.getState().settings, profiles: [timeoutProfile], activeProfileId: timeoutProfile.id }) })
+      const request = deferred<Awaited<ReturnType<typeof callImageApi>>>()
+      vi.mocked(callImageApi).mockImplementationOnce(() => request.promise)
+
+      await submitTask()
+      await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+      await vi.advanceTimersByTimeAsync(1000 * 4 + 30_000 + 100)
+      expect(useStore.getState().tasks[0]).toMatchObject({ status: 'error' })
+      request.reject(new Error('late failure'))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(showBrowserNotification).toHaveBeenCalledOnce()
+      expect(showBrowserNotification).toHaveBeenCalledWith('图像生成失败', expect.objectContaining({ tag: 'task-failure' }))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  
+  })
+
+describe('client connection errors', () => {
+  beforeEach(async () => {
+    await clearTasks()
+    vi.mocked(callImageApi).mockReset()
+    const profile = createDefaultOpenAIProfile({ id: 'client-profile', apiKey: 'test-key', apiMode: 'images' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id }),
+      appMode: 'gallery',
+      prompt: 'prompt',
+      inputImages: [],
+      maskDraft: null,
+      params: { ...DEFAULT_PARAMS },
+      tasks: [],
+      showToast: vi.fn(),
+    })
+  })
+
+  it('shows an identified reason without the immediate failure hint', async () => {
+    vi.mocked(callImageApi).mockRejectedValueOnce(new FetchConnectError('无法解析域名，请检查 API 地址是否正确。（错误码 11001）'))
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+
+    expect(useStore.getState().tasks[0].error).toBe('无法解析域名，请检查 API 地址是否正确。（错误码 11001）')
+  })
+
+  it('keeps the immediate failure hint for the fallback reason', async () => {
+    vi.mocked(callImageApi).mockRejectedValueOnce(new FetchConnectError('无法连接到服务器。（unexpected eof）'))
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+
+    const error = useStore.getState().tasks[0].error!
+    expect(error.startsWith('无法连接到服务器。（unexpected eof）\n提示：请求立即失败，可能原因：')).toBe(true)
+    expect(error).not.toContain('Failed to fetch')
+  })
+
+  it('treats a connection error as recoverable for queued fal requests', async () => {
+    const falProfile = createDefaultFalProfile({ id: 'fal-profile', apiKey: 'fal-key' })
+    useStore.setState({ settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [falProfile], activeProfileId: falProfile.id }) })
+    vi.mocked(callImageApi).mockImplementationOnce(async (opts) => {
+      opts.onFalRequestEnqueued?.({ requestId: 'fal-request', endpoint: 'fal-endpoint' })
+      // 消息不含“连接”“断开”等字样，只能靠错误类型判断为可恢复
+      throw new FetchConnectError('无法解析域名，请检查 API 地址是否正确。（错误码 11001）')
+    })
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+
+    expect(useStore.getState().tasks[0]).toMatchObject({ falRecoverable: true, error: '与 fal.ai 的连接已断开，之后会继续查询任务结果。' })
+    await removeTask(useStore.getState().tasks[0])
+  })
+
+  it.each([
+    ['连接被服务器重置。（错误码 10054）', true],
+    ['无法解析域名，请检查 API 地址是否正确。（错误码 11001）', false],
+  ])('adds the gateway timeout hint after about 60 seconds only when the connection was dropped: %s', async (reason, hinted) => {
+    const now = Date.now()
+    const dateNow = vi.spyOn(Date, 'now')
+    vi.mocked(callImageApi).mockImplementationOnce(async () => {
+      dateNow.mockReturnValue(now + 60_000)
+      throw new FetchConnectError(reason)
+    })
+
+    try {
+      await submitTask()
+      await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+    } finally {
+      dateNow.mockRestore()
+    }
+
+    const error = useStore.getState().tasks[0].error!
+    if (hinted) expect(error.startsWith(`${reason}\n提示：请求等待约 60 秒后被断开`)).toBe(true)
+    else expect(error).toBe(reason)
   })
 })

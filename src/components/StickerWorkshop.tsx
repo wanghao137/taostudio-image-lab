@@ -498,11 +498,11 @@ function RecentTaskThumb({ task, onOpen }: { task: TaskRecord; onOpen: () => voi
 
     if (imageId) {
       unsubscribe = subscribeImageThumbnail(imageId, (thumbnail) => {
-        if (!cancelled) setThumbSrc(thumbnail.dataUrl)
+        if (!cancelled) setThumbSrc(thumbnail.src)
       })
       ensureImageThumbnailCached(imageId)
         .then((thumbnail) => {
-          if (!cancelled && thumbnail) setThumbSrc(thumbnail.dataUrl)
+          if (!cancelled && thumbnail) setThumbSrc(thumbnail.src)
         })
         .catch(() => {
           if (!cancelled) setThumbSrc('')

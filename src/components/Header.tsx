@@ -2,6 +2,10 @@ import { lazy, Suspense, useEffect, useState } from 'react'
 import { LayoutGrid, Monitor, Moon, Sun } from 'lucide-react'
 import { getFavoriteCollectionTitle, useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
+import { setUpdateModalOpen, useReleaseUpdates } from '../hooks/useReleaseUpdates'
+import { detectOs } from '../lib/announcements'
+import { isTauri } from '../lib/platform'
+import { DesktopDownloadIcon } from './icons'
 import { useTooltip } from '../hooks/useTooltip'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import ViewportTooltip from './ViewportTooltip'
@@ -64,6 +68,9 @@ export default function Header() {
   const favoriteCollectionTitle = activeFavoriteCollectionId ? getFavoriteCollectionTitle(activeFavoriteCollectionId, favoriteCollections) : ''
   const showFavoriteCollectionTitle = appMode === 'gallery' && Boolean(activeFavoriteCollectionId)
   const { hasUpdate, latestRelease, dismiss } = useVersionCheck()
+  // 客户端更新走应用内更新（useClientUpdate + UpdateModal），网页版走版本检查弹窗
+  const releaseHasUpdate = useReleaseUpdates((s) => Boolean(s.releases[0]))
+  const clientTooltip = useTooltip()
   const [showHelp, setShowHelp] = useState(false)
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const [isPwaInstalled, setIsPwaInstalled] = useState(isInstalledPwa)
@@ -284,6 +291,25 @@ export default function Header() {
                 </ViewportTooltip>
               </div>
             )}
+            {/* 客户端下载入口：仅网页版 Windows 用户显示（客户端本身即安装版） */}
+            {!isTauri && detectOs(navigator.userAgent, (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform, navigator.maxTouchPoints) === 'windows' && (
+              <div
+                className="relative hidden sm:block"
+                {...clientTooltip.handlers}
+              >
+                <button
+                  onClick={() => { window.open('https://github.com/wanghao137/taostudio-image-lab/releases/latest', '_blank', 'noopener') }}
+                  className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+                  aria-label="下载 Windows 客户端"
+                >
+                  <DesktopDownloadIcon className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                </button>
+                <ViewportTooltip visible={clientTooltip.visible} className="whitespace-nowrap">
+                  下载 Windows 客户端
+                </ViewportTooltip>
+              </div>
+            )}
+
             <div
               className="relative"
               {...helpTooltip.handlers}

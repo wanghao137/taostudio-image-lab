@@ -17,7 +17,7 @@
   --sidebar: 34 28% 93%;
   --sidebar-foreground: 28 13% 13%;
   --font-ui-sans: 'HarmonyOS Sans SC', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  --font-mono: 'Maple Mono', 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+  --font-mono: 'Maple Mono NF CN', 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
   --safe-area-top: env(safe-area-inset-top, 0px);
   --safe-area-right: env(safe-area-inset-right, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
@@ -536,4 +536,13 @@ input[type="number"] {
 .ios-rounded-scroll-fix {
   isolation: isolate;
   -webkit-mask-image: -webkit-radial-gradient(white, black);
+}
+
+/* 进度条：总量未知时来回滑动（上游 v0.8.0） */
+@keyframes progress-indeterminate {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(250%); }
+}
+.animate-progress-indeterminate {
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
 }

@@ -1,6 +1,7 @@
 import type { ApiProfile, AppSettings, RefusalRecoveryRecord, ResponsesApiResponse, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
+import { apiFetch, isTauri } from './platform'
 
 export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -113,7 +114,8 @@ export class NetworkFetchError extends ApiError {
  * 一律不自动重试，避免双重消费。 */
 export async function fetchWithRetryClassification(input: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(input, init)
+    // apiFetch：网页版等价 fetch，客户端走自写请求命令（网络错误带具体原因、超时可断开连接）
+    return await apiFetch(input, init)
   } catch (err) {
     if (err instanceof TypeError) {
       throw new NetworkFetchError(err.message || '网络请求失败', err)
@@ -300,6 +302,11 @@ export function maybeAppendImageToolDroppedHint(message: string): string {
   return `${message}\n${IMAGE_TOOL_DROPPED_HINT}`
 }
 
+/** 请求超时中止时使用的原因，替代浏览器默认的英文“signal is aborted without reason”；仍为 AbortError，不改变错误分类 */
+export function createRequestTimeoutError(timeoutSeconds: number) {
+  return new DOMException(`请求超时：超过 ${timeoutSeconds} 秒仍未完成，请稍后重试或提高超时时间。`, 'AbortError')
+}
+
 /** 排除明确与流式无关的状态码后追加提示 */
 export function maybeAppendStreamingHint(message: string, status: number, streamImages?: boolean): string {
   const transparentMessage = maybeAppendTransparentBackgroundHint(message)
@@ -335,12 +342,14 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
 
   let response: Response
   try {
-    response = await fetch(url, {
+    response = await apiFetch(url, {
       cache: 'no-store',
       signal,
     })
   } catch (err) {
     if (err instanceof TypeError) {
+      // 客户端由 Rust 侧发出请求，不存在跨域问题，也不需要 no-cors 探测
+      if (isTauri) throw new Error(`图片链接下载失败（可能因链接过期或网络异常）。${IMAGE_FETCH_CORS_HINT}`)
       const probe = await probeNoCorsReachability(url)
       if (probe === 'opaque') {
         throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)

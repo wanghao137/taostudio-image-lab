@@ -168,10 +168,10 @@ function readLocalGitModes(checkoutDir) {
   return modes
 }
 
-function assertNoIgnoredUpstreamAdditions(baseModes, upstreamModes, localModes, localRoot) {
+function assertNoIgnoredUpstreamAdditions(baseModes, upstreamModes, localModes, localRoot, isRemoved = () => false) {
   if (!fs.existsSync(path.join(localRoot, '.git'))) return
   const candidates = [...upstreamModes.keys()].filter((filePath) =>
-    !baseModes.has(filePath) && !localModes.has(filePath),
+    !baseModes.has(filePath) && !localModes.has(filePath) && !isRemoved(filePath),
   )
   if (!candidates.length) return
 
@@ -897,10 +897,13 @@ async function main() {
   const baseModes = readSupportedGitModes(baseDir)
   const upstreamModes = readSupportedGitModes(cacheDir)
   const localModes = readLocalGitModes(projectRoot)
+  // removedPaths 声明「明确不引入」的路径：gitignore 前置检查应放行这些上游新增文件
+  //（例如 src-tauri/.env 命中通用 .env 忽略规则，但整个 src-tauri 目录本就不引入）。
+  const preRemovedMatcher = createPreserveMatcher(cfg.removedPaths ?? [])
   assertNoGitPathCaseChanges(baseModes, upstreamModes)
   assertNoGitPathCaseChanges(localModes, upstreamModes)
   assertNoGitModeChanges(baseModes, upstreamModes)
-  assertNoIgnoredUpstreamAdditions(baseModes, upstreamModes, localModes, projectRoot)
+  assertNoIgnoredUpstreamAdditions(baseModes, upstreamModes, localModes, projectRoot, preRemovedMatcher)
   if (baseCommit !== state.lastAppliedCommit) {
     throw new Error(`Fetched base ${baseCommit} does not match recorded base ${state.lastAppliedCommit}.`)
   }

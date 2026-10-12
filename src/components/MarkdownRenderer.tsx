@@ -1,5 +1,5 @@
-import { memo, useEffect, useState } from 'react'
-import type { Components, MathPlugin, StreamdownTranslations } from 'streamdown'
+import { memo, useEffect, useState, type ComponentProps } from 'react'
+import type { Components, ExtraProps, MathPlugin, StreamdownTranslations } from 'streamdown'
 import type { Components as ReactMarkdownComponents } from 'react-markdown'
 // KaTeX 样式+字体（~380KB）跟随本组件懒加载：数学渲染 JS 已是动态 import，
 // CSS 此前在 main.tsx 无条件加载——大多数会话从不打开 Agent 聊天。
@@ -29,6 +29,23 @@ type MarkdownRendererState =
 
 const allowedUrlProtocols = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
+// streamdown 2.5 的图片组件自带下载按钮且没有关闭选项，这里渲染为普通图片；src 已经过 urlTransform 与 sanitize 处理
+function MarkdownImage({ node: _node, src, onError, ...props }: ComponentProps<'img'> & ExtraProps) {
+  const [failedSrc, setFailedSrc] = useState<typeof src>()
+  if (!src) return null
+  if (failedSrc === src) return <span className="text-muted-foreground text-xs italic">图片不可用</span>
+  return (
+    <img
+      {...props}
+      src={src}
+      onError={(event) => {
+        setFailedSrc(src)
+        onError?.(event)
+      }}
+    />
+  )
+}
+
 function safeUrl(url: string) {
   try {
     const parsed = new URL(url, window.location.origin)
@@ -52,6 +69,7 @@ const markdownComponents: Components = {
       </a>
     )
   },
+  img: MarkdownImage,
 }
 
 const legacyMarkdownComponents: ReactMarkdownComponents = {
@@ -200,6 +218,8 @@ const MarkdownRenderer = memo(function MarkdownRenderer({
 
   const StreamdownComponent = renderer.Component
 
+  // 原始 HTML 由 streamdown 默认的 rehype 链（raw → sanitize → harden）清洗，skipHtml 对已解析的 HTML 不起作用。
+  // 不要传入自定义 rehypePlugins（会替换默认链，sanitize 随之失效）或 allowedTags（会放宽 sanitize 白名单）。
   return (
     <StreamdownComponent
       className={`markdown-renderer ${className}`.trim()}
@@ -215,7 +235,6 @@ const MarkdownRenderer = memo(function MarkdownRenderer({
       mode={streaming ? 'streaming' : 'static'}
       parseIncompleteMarkdown={streaming}
       plugins={{ math: renderer.math.math }}
-      skipHtml
       translations={translations}
       urlTransform={safeUrl}
     >
