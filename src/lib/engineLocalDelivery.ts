@@ -17,6 +17,15 @@ import {
   getEngineDeliveryRecord,
   type EngineDeliveryRecord,
 } from './db'
+import {
+  ENGINE_DELIVERY_DIR_KEY,
+  pickNamedSaveDir,
+  saveDirBasename,
+  resolveNamedSaveDir,
+  writeDeliveryToNativeDir,
+  type SaveDir,
+} from './saveFile'
+import { isTauri } from './platform'
 import { isLocalAutoSaveSupported } from './localAutoSave'
 import {
   LocalAutoSavePermissionError,
@@ -36,7 +45,10 @@ export interface EngineDeliveryProgress {
 }
 
 export interface EngineDeliveryDirectory {
-  handle: WritableDirectoryHandle
+  /** 网页版句柄（客户端为空） */
+  handle?: WritableDirectoryHandle
+  /** 客户端 Rust 登记的原生目录（网页版为空） */
+  dir?: SaveDir
   name: string
 }
 
@@ -103,6 +115,14 @@ function errorText(error: unknown) {
 }
 
 async function getDirectory(): Promise<EngineDeliveryDirectory | null> {
+  if (isTauri) {
+    try {
+      const dir = await resolveNamedSaveDir(ENGINE_DELIVERY_DIR_KEY)
+      return { dir, name: saveDirBasename(dir.path) }
+    } catch {
+      return null
+    }
+  }
   const record = await getEngineDeliveryDirectoryHandle()
   if (!record?.handle) return null
   return { handle: record.handle as unknown as WritableDirectoryHandle, name: record.name || record.handle.name || '本地目录' }
@@ -113,10 +133,16 @@ export async function getEngineLocalDeliveryDirectory(): Promise<EngineDeliveryD
 }
 
 export function isEngineLocalDeliverySupported() {
-  return isLocalAutoSaveSupported()
+  // 客户端走 Rust 原生命名目录，不依赖 WebView2 的文件系统访问权限
+  return isTauri || isLocalAutoSaveSupported()
 }
 
 export async function chooseEngineLocalDeliveryDirectory(): Promise<EngineDeliveryDirectory> {
+  if (isTauri) {
+    const dir = await pickNamedSaveDir(ENGINE_DELIVERY_DIR_KEY)
+    if (!dir) throw new DOMException('已取消', 'AbortError')
+    return { dir, name: saveDirBasename(dir.path) }
+  }
   if (!isEngineLocalDeliverySupported()) throw new Error('当前浏览器不支持自动写入本地目录，请使用下载功能')
   const picker = (window as unknown as Window & {
     showDirectoryPicker: (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>
@@ -124,6 +150,12 @@ export async function chooseEngineLocalDeliveryDirectory(): Promise<EngineDelive
   const handle = await picker({ mode: 'readwrite' })
   await putEngineDeliveryDirectoryHandle(handle)
   return { handle: handle as unknown as WritableDirectoryHandle, name: handle.name || '本地目录' }
+}
+
+/** 按平台分流写入：网页版走句柄，客户端走 Rust 原生命名目录（幂等，重放不产生副本） */
+async function deliverFiles(directory: EngineDeliveryDirectory, folderName: string, files: LocalAutoSaveWriteFile[]) {
+  if (directory.dir) return await writeDeliveryToNativeDir(directory.dir, folderName, files)
+  return await writeLocalDeliveryFiles({ rootHandle: directory.handle!, folderName, files })
 }
 
 async function updateRecord(record: EngineDeliveryRecord, patch: Partial<EngineDeliveryRecord>) {
@@ -220,7 +252,7 @@ export async function saveEngineJobLocally(
   onProgress?.({ savedCount: 0, totalCount: 1, status: 'saving' })
   try {
     const files = await jobFiles(config, job)
-    const written = await writeLocalDeliveryFiles({ rootHandle: directory.handle, folderName: jobFolderName(job), files })
+    const written = await deliverFiles(directory, jobFolderName(job), files)
     record = await updateRecord(record, { status: 'saved', files: written.files, savedCount: 1, totalCount: 1, error: null })
     onProgress?.({ savedCount: 1, totalCount: 1, status: 'saved' })
     return { record }
@@ -292,7 +324,7 @@ export async function saveEngineBatchLocally(
   onProgress?.({ savedCount, totalCount: total, status: 'saving' })
   const manifest = buildBatchManifest(batch as ImageBatchV1, items, savedCount)
   try {
-    await writeLocalDeliveryFiles({ rootHandle: directory.handle, folderName, files: [jsonFile('batch-manifest.json', manifest)] })
+    await deliverFiles(directory, folderName, [jsonFile('batch-manifest.json', manifest)])
   } catch (error) {
     const permission = error instanceof LocalAutoSavePermissionError
     record = await updateRecord(record, { status: permission ? 'needs_permission' : 'failed', error: errorText(error), savedCount, savedItems: [...savedItems] })
@@ -310,7 +342,7 @@ export async function saveEngineBatchLocally(
     }
     try {
       const files = await jobFiles(config, item.job, `${itemFolderName(item, total)}/`)
-      await writeLocalDeliveryFiles({ rootHandle: directory.handle, folderName, files })
+      await deliverFiles(directory, folderName, files)
       savedItems.add(item.itemKey)
       savedCount += 1
       record = await updateRecord(record, { savedCount, savedItems: [...savedItems], totalCount: total, status: 'saving', error: failures.length ? failures.join('; ') : null })
@@ -333,11 +365,7 @@ export async function saveEngineBatchLocally(
   const error = failures.length ? failures.join('; ') : null
   record = await updateRecord(record, { status, savedCount, savedItems: [...savedItems], totalCount: total, error })
   try {
-    await writeLocalDeliveryFiles({
-      rootHandle: directory.handle,
-      folderName,
-      files: [jsonFile('batch-manifest.json', buildBatchManifest(batch as ImageBatchV1, items, savedCount))],
-    })
+    await deliverFiles(directory, folderName, [jsonFile('batch-manifest.json', buildBatchManifest(batch as ImageBatchV1, items, savedCount))])
   } catch {
     // The individual assets remain delivered; the aggregate manifest is best effort.
   }

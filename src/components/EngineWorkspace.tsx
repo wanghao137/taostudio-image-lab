@@ -26,6 +26,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { calculateImageSize } from '../lib/size'
+import { isTauri } from '../lib/platform'
 import {
   countEngineBatchOutputs,
   createEngineBatchRequest,
@@ -526,20 +527,22 @@ export default function EngineWorkspace() {
   // 浏览器重启后交付目录句柄的写权限会降级为 prompt；权限请求需要用户激活，
   // 因此挂一次性 pointerdown/keydown 监听器，用户下次点击页面时恢复授权并
   // 补交付。行为对齐画廊侧 restoreLocalAutoSavePermissionOnUserActivation。
+  // 客户端走 Rust 原生目录，没有授权生命周期，直接跳过。
   useEffect(() => {
+    if (isTauri) return
     let disposed = false
     let tryOnce: (() => void) | null = null
     void getEngineLocalDeliveryDirectory()
       .then(async (directory) => {
-        if (disposed || !directory) return
+        if (disposed || !directory?.handle) return
+        const handle = directory.handle
         try {
-          if (typeof directory.handle.queryPermission !== 'function') return
-          if (await directory.handle.queryPermission({ mode: 'readwrite' }) !== 'prompt') return
+          if (typeof handle.queryPermission !== 'function') return
+          if (await handle.queryPermission({ mode: 'readwrite' }) !== 'prompt') return
         } catch {
           return
         }
         if (disposed) return
-        const handle = directory.handle
         tryOnce = () => {
           if (tryOnce) {
             window.removeEventListener('pointerdown', tryOnce)

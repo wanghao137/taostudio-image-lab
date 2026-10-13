@@ -4,6 +4,7 @@ import { normalizeBaseUrl } from '../lib/api'
 import { hasActiveDataOperations } from '../lib/dataOperations'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
 import { isLocalAutoSaveSupported } from '../lib/localAutoSave'
+import { isTauri } from '../lib/platform'
 import { useStore, exportData, importData, clearData, getLocalAutoSaveRetryableTaskCount, type SettingsTab } from '../store'
 import {
   createDefaultOpenAIProfile,
@@ -1793,15 +1794,21 @@ export default function SettingsModal() {
                     <>
                       <div className="rounded-xl bg-gray-50/80 p-3 text-xs leading-relaxed text-gray-600 dark:bg-white/[0.04] dark:text-gray-300">
                         <div>保存位置：{localAutoSave.directoryName ?? '未选择'}</div>
-                        <div>状态：{localAutoSaveNeedsPermission ? '目录已保留，需要重新授权写入' : localAutoSave.directoryName ? '✓ 已授权（重启浏览器后下次点击页面会自动确认权限）' : '未选择'}</div>
+                        {isTauri ? (
+                          <div>状态：{localAutoSave.directoryName ? '✓ 已连接本地目录，重启应用后仍然有效' : '未选择'}</div>
+                        ) : (
+                          <>
+                            <div>状态：{localAutoSaveNeedsPermission ? '目录已保留，需要重新授权写入' : localAutoSave.directoryName ? '✓ 已授权（重启浏览器后下次点击页面会自动确认权限）' : '未选择'}</div>
+                            {!localAutoSaveNeedsPermission && localAutoSave.directoryName ? (
+                              <div className="text-gray-500 dark:text-gray-400">每次重启浏览器后，下次点击页面会自动恢复保存权限，无需重新选择文件夹。</div>
+                            ) : null}
+                          </>
+                        )}
                         {localAutoSave.lastSavedFolderName ? (
                           <div>最近保存：{localAutoSave.lastSavedFolderName}</div>
                         ) : null}
                         {localAutoSaveNeedsPermission ? (
                           <div className="text-yellow-700 dark:text-yellow-200">无需重新选择文件夹，点击下方按钮恢复授权即可。</div>
-                        ) : null}
-                        {!localAutoSaveNeedsPermission && localAutoSave.directoryName ? (
-                          <div className="text-gray-500 dark:text-gray-400">每次重启浏览器后，下次点击页面会自动恢复保存权限，无需重新选择文件夹。</div>
                         ) : null}
                         {pendingLocalAutoSaveCount > 0 ? (
                           <div>待补保存：{pendingLocalAutoSaveCount} 个</div>

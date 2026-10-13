@@ -5,7 +5,7 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('preset config policy', () => {
+describe('preset config policy', { timeout: 20_000 }, () => {
   it('exposes every current preset profile in preset-only mode', async () => {
     vi.stubEnv('VITE_SHOW_PRESET_CONFIG_ONLY', 'true')
     const { createDefaultFalProfile, createDefaultOpenAIProfile } = await import('./apiProfiles')

@@ -321,6 +321,11 @@ impl Storage {
         Ok(())
     }
 
+    pub fn meta_delete(&self, key: &str) -> Result<()> {
+        self.lock().execute("DELETE FROM meta WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// 原图大小取自数据库记录；缩略图表没有记录大小，直接统计目录中的文件
     pub fn info(&self) -> Result<StorageInfo> {
         let (image_bytes, image_count): (i64, i64) = self.lock().query_row(

@@ -143,3 +143,97 @@ export function migrateDefaultSaveDir() {
 export function openDefaultSaveDir() {
   return invoke<void>('download_dir_open')
 }
+
+// ===== 命名保存目录（仅客户端）：本地自动保存、场景保存目录、引擎交付目录。
+// 与网页版的句柄方案不同：WebView2 的文件系统访问权限不跨重启保留（实测重启后变 prompt，
+// 后台自动保存没有用户手势无法重新授权），所以客户端目录经目录选择框选择后由 Rust 记在
+// meta 表，重启后直接可用。目录名（basename）仍存设置字段，与网页版语义保持一致。
+
+export const AUTO_SAVE_DIR_KEY = 'autoSave'
+export const ENGINE_DELIVERY_DIR_KEY = 'engineDelivery'
+
+export function sceneSaveDirKey(sceneId: string) {
+  return `scene:${sceneId}`
+}
+
+/** 目录完整路径的最后一段，与设置里的目录名（网页版为句柄 name）对应 */
+export function saveDirBasename(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path
+}
+
+/** 弹出目录选择框为命名目录选择位置并记住；用户取消时返回 null */
+export async function pickNamedSaveDir(key: string): Promise<SaveDir | null> {
+  return await invoke<SaveDir | null>('named_save_dir_pick', { key })
+}
+
+/** 使用已记住的命名目录（目录缺失或未选择时抛错，交由调用方回落/提示） */
+export async function resolveNamedSaveDir(key: string): Promise<SaveDir> {
+  return await invoke<SaveDir>('named_save_dir_use', { key })
+}
+
+/** 读取命名目录的完整路径（用于显示）；未选择时返回 null */
+export async function getNamedSaveDirPath(key: string): Promise<string | null> {
+  return await invoke<string | null>('named_save_dir_get', { key })
+}
+
+export async function clearNamedSaveDir(key: string): Promise<void> {
+  await invoke('named_save_dir_clear', { key })
+}
+
+/** 在已登记目录中创建去重后的新文件夹（同名自动加序号），返回凭以写入的文件夹 */
+export async function createSaveFolder(dir: SaveDir, folderName: string): Promise<SaveDir> {
+  return await invoke<SaveDir>('save_dir_folder_create', { token: dir.token, name: folderName })
+}
+
+/** 在已登记目录中按相对路径就位文件夹（逐级创建，已存在则复用），用于交付类幂等写入 */
+export async function ensureSaveFolder(dir: SaveDir, path: string): Promise<SaveDir> {
+  return await invoke<SaveDir>('save_dir_folder_ensure', { token: dir.token, path })
+}
+
+/** 传给 Rust 的写入载荷：字符串按 UTF-8 编码 */
+function toBytes(data: Uint8Array | string | Blob): Uint8Array | Blob {
+  return typeof data === 'string' ? new TextEncoder().encode(data) : data
+}
+
+/**
+ * 客户端原生归档写入，等价于网页版 writeLocalAutoSaveArchive 的句柄路径：
+ * 在目录中创建去重文件夹，把文件逐个分块写入。文件名为不含子路径的单段名。
+ */
+export async function writeArchiveToNativeDir(
+  dir: SaveDir,
+  folderName: string,
+  files: Array<{ name: string, data: Uint8Array | string | Blob, type: string }>,
+): Promise<{ folderName: string, files: string[] }> {
+  const folder = await createSaveFolder(dir, folderName)
+  for (const file of files) {
+    await saveFileToDir(folder, toBytes(file.data), file.name)
+  }
+  return { folderName: saveDirBasename(folder.path), files: files.map((file) => file.name) }
+}
+
+/**
+ * 客户端原生交付写入，等价于网页版 writeLocalDeliveryFiles 的句柄路径：
+ * folderName 与文件名都可以带相对子路径，文件夹就位后覆盖式改写同一文件（幂等重放）。
+ */
+export async function writeDeliveryToNativeDir(
+  dir: SaveDir,
+  folderName: string,
+  files: Array<{ name: string, data: Uint8Array | string | Blob, type: string }>,
+): Promise<{ folderName: string, files: string[] }> {
+  const folder = await ensureSaveFolder(dir, folderName)
+  for (const file of files) {
+    const splitAt = Math.max(file.name.lastIndexOf('/'), file.name.lastIndexOf('\\'))
+    const sub = splitAt >= 0 ? file.name.slice(0, splitAt) : ''
+    const base = splitAt >= 0 ? file.name.slice(splitAt + 1) : file.name
+    const target = sub ? await ensureSaveFolder(folder, sub) : folder
+    // 覆盖式写入：与网页版交付语义一致，重放不产生副本
+    const id = await invoke<number>('save_dir_begin_replace', { token: target.token, name: base })
+    try {
+      await writeInChunks(id, toBytes(file.data))
+    } catch (err) {
+      await invoke('save_abort', { id }).catch((abortErr) => console.warn('丢弃临时文件失败', abortErr))
+      throw err
+    }
+  }
+  return { folderName, files: files.map((file) => file.name) }
+}

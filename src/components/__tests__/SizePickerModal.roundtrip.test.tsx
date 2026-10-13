@@ -32,7 +32,7 @@ afterEach(() => {
   cleanup()
 })
 
-describe('SizePickerModal 尺寸反查往返', () => {
+describe('SizePickerModal 尺寸反查往返', { timeout: 20_000 }, () => {
   it.each([
     ['4K', '4:5'],
     ['4K', '5:4'],

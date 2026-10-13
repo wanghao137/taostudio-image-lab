@@ -7,6 +7,10 @@ export default defineConfig([
   globalIgnores([
     'dist',
     'node_modules',
+    'src-tauri/target',
+    'src-tauri/target/**',
+    'src-tauri/gen',
+    'src-tauri/gen/**',
     '.wrangler',
     '.upstream',
     '.upstream/**',

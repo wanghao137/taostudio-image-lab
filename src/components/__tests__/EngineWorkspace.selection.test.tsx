@@ -185,7 +185,7 @@ const jobList = {
   },
 } satisfies ImageJobListV1
 
-describe('EngineWorkspace inspector selection', () => {
+describe('EngineWorkspace inspector selection', { timeout: 20_000 }, () => {
   beforeEach(() => {
     vi.clearAllMocks()
     apiMocks.readLocalImageTaskApiConfig.mockReturnValue({

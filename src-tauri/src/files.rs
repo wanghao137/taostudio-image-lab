@@ -351,6 +351,199 @@ pub async fn save_abort(writes: State<'_, Writes>, id: u32) -> Result<(), String
     Ok(())
 }
 
+// ===== 命名保存目录：本地自动保存、场景保存目录、引擎交付目录等。
+// 与网页版的句柄方案不同，客户端的目录经目录选择框选择后由 Rust 记在 meta 表，
+// 重启后直接可用，不依赖 WebView2 的文件系统访问权限（实测该权限不跨重启保留，
+// 后台自动保存没有用户手势，无法重新授权）。
+
+const SAVE_DIR_KEY_PREFIX: &str = "save_dir:";
+const SAVE_DIR_MISSING: &str = "尚未选择保存位置";
+
+/// key 只用于拼 meta 表键与前端回传（如 autoSave / scene:portrait / engineDelivery），
+/// 限制字符集，防止把 meta 表当成任意写入口
+fn validate_save_dir_key(key: &str) -> Result<(), String> {
+    let valid = !key.is_empty()
+        && key.chars().count() <= 64
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_'));
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("保存目录标识不合法：{key}"))
+    }
+}
+
+fn save_dir_meta_key(key: &str) -> String {
+    format!("{SAVE_DIR_KEY_PREFIX}{key}")
+}
+
+fn read_named_save_dir(storage: &Storage, data_dir: Option<&Path>, key: &str) -> Result<PathBuf, String> {
+    let raw = storage
+        .meta_get(&save_dir_meta_key(key))
+        .map_err(|err| format!("读取保存目录失败：{}", err.message))?
+        .ok_or(SAVE_DIR_MISSING)?;
+    let path = PathBuf::from(raw);
+    if !path.is_dir() {
+        return Err(format!("保存位置 {} 不存在或不可用，请重新选择", path.display()));
+    }
+    check_outside(&path, data_dir)?;
+    Ok(path)
+}
+
+fn registered_dir(dirs: &SaveDirs, token: usize) -> Result<PathBuf, String> {
+    dirs.0
+        .lock()
+        .ok()
+        .and_then(|list| list.get(token).cloned())
+        .ok_or_else(|| "保存目录无效".to_string())
+}
+
+/// 相对子路径段：逐段校验为单个合法文件名，禁止空段与越界写法（“..”含尾随点被拒绝）
+fn split_relative_segments(value: &str) -> Result<Vec<String>, String> {
+    let segments: Vec<String> = value
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if segments.is_empty() || segments.iter().any(|s| !is_plain_file_name(s)) {
+        return Err(format!("路径不合法：{value}"));
+    }
+    Ok(segments)
+}
+
+/// 在 dir 中创建名为 name 的新文件夹：同名时依次加“ (2)”“(3)”……，绝不覆盖已有文件夹
+fn create_unique_folder(dir: &Path, name: &str) -> io::Result<PathBuf> {
+    for n in 1..=999 {
+        let candidate = if n == 1 { name.to_string() } else { format!("{name} ({n})") };
+        let path = dir.join(&candidate);
+        match fs::create_dir(&path) {
+            Ok(_) => return Ok(path),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::new(ErrorKind::AlreadyExists, "同名文件夹过多"))
+}
+
+/// 在 root 下按相对路径逐级创建并就位文件夹（已存在则直接使用），用于交付类幂等写入
+fn ensure_folder(root: &Path, segments: &[String]) -> io::Result<PathBuf> {
+    let target = segments.iter().fold(root.to_path_buf(), |acc, s| acc.join(s));
+    fs::create_dir_all(&target)?;
+    Ok(target)
+}
+
+/// 弹出目录选择框，为命名保存目录选择并记住位置；用户取消时返回 None
+#[tauri::command]
+pub async fn named_save_dir_pick(
+    window: WebviewWindow,
+    state: State<'_, StorageState>,
+    dirs: State<'_, SaveDirs>,
+    key: String,
+) -> Result<Option<SaveDir>, String> {
+    validate_save_dir_key(&key)?;
+    let picked = tauri::async_runtime::spawn_blocking(move || pick_folder(window, None))
+        .await
+        .map_err(|err| format!("目录选择框异常结束：{err}"))??;
+    let Some(path) = picked else {
+        return Ok(None);
+    };
+    let data_dir = data_root(&state);
+    let storage = storage(&state)?;
+    tokio::task::block_in_place(|| {
+        check_outside(&path, data_dir.as_deref())?;
+        storage
+            .meta_set(&save_dir_meta_key(&key), &path.display().to_string())
+            .map_err(|err| format!("保存目录记录失败：{}", err.message))?;
+        register_dir(&dirs, path).map(Some)
+    })
+}
+
+/// 使用已记住的命名保存目录：读取 meta 记录，目录可用时登记并返回写入凭据
+#[tauri::command]
+pub async fn named_save_dir_use(
+    state: State<'_, StorageState>,
+    dirs: State<'_, SaveDirs>,
+    key: String,
+) -> Result<SaveDir, String> {
+    validate_save_dir_key(&key)?;
+    let storage = storage(&state)?;
+    let data_dir = data_root(&state);
+    let path = tokio::task::block_in_place(|| read_named_save_dir(storage, data_dir.as_deref(), &key))?;
+    register_dir(&dirs, path)
+}
+
+/// 读取命名保存目录的完整路径（用于设置界面显示）；未选择时返回 None
+#[tauri::command]
+pub async fn named_save_dir_get(state: State<'_, StorageState>, key: String) -> Result<Option<String>, String> {
+    validate_save_dir_key(&key)?;
+    let storage = storage(&state)?;
+    Ok(storage
+        .meta_get(&save_dir_meta_key(&key))
+        .map_err(|err| format!("读取保存目录失败：{}", err.message))?)
+}
+
+/// 清除命名保存目录记录（前端同时负责清掉设置里的目录名）
+#[tauri::command]
+pub async fn named_save_dir_clear(state: State<'_, StorageState>, key: String) -> Result<(), String> {
+    validate_save_dir_key(&key)?;
+    let storage = storage(&state)?;
+    storage
+        .meta_delete(&save_dir_meta_key(&key))
+        .map_err(|err| format!("清除保存目录失败：{}", err.message))
+}
+
+/// 在已登记目录中创建新文件夹作为归档目标，返回凭以写入的文件夹序号
+#[tauri::command]
+pub async fn save_dir_folder_create(
+    dirs: State<'_, SaveDirs>,
+    token: usize,
+    name: String,
+) -> Result<SaveDir, String> {
+    if !is_plain_file_name(&name) {
+        return Err(format!("文件夹名不合法：{name}"));
+    }
+    let dir = registered_dir(&dirs, token)?;
+    let folder = tokio::task::block_in_place(|| {
+        create_unique_folder(&dir, &name).map_err(|err| format!("创建文件夹失败：{err}"))
+    })?;
+    register_dir(&dirs, folder)
+}
+
+/// 在已登记目录中按相对路径就位文件夹（逐级创建，已存在则直接使用），返回文件夹序号
+#[tauri::command]
+pub async fn save_dir_folder_ensure(
+    dirs: State<'_, SaveDirs>,
+    token: usize,
+    path: String,
+) -> Result<SaveDir, String> {
+    let root = registered_dir(&dirs, token)?;
+    let segments = split_relative_segments(&path)?;
+    let folder =
+        tokio::task::block_in_place(|| ensure_folder(&root, &segments).map_err(|err| format!("创建文件夹失败：{err}")))?;
+    register_dir(&dirs, folder)
+}
+
+/// 在已登记目录（或其子文件夹）中开始一次覆盖式分块写入，用于交付类幂等写入；
+/// 与 save_dir_begin 的“同名加序号”不同，这里总是改写同一个文件
+#[tauri::command]
+pub async fn save_dir_begin_replace(
+    dirs: State<'_, SaveDirs>,
+    writes: State<'_, Writes>,
+    token: usize,
+    name: String,
+) -> Result<u32, String> {
+    let root = registered_dir(&dirs, token)?;
+    let segments = split_relative_segments(&name)?;
+    tokio::task::block_in_place(|| {
+        let target = segments.iter().fold(root, |acc, s| acc.join(s));
+        let parent = target.parent().unwrap_or(Path::new(".")).to_path_buf();
+        fs::create_dir_all(&parent).map_err(|err| format!("创建文件夹失败：{err}"))?;
+        writes
+            .begin(&parent, Target::Replace(target))
+            .map_err(|err| format!("创建 {name} 失败：{err}"))
+    })
+}
+
 const DOWNLOAD_DIR_KEY: &str = "download_dir";
 
 /// 用户未在设置中更改时的默认保存地址：优先使用安装程序写入 <数据目录>/download-dir.txt 的目录
@@ -1002,5 +1195,52 @@ mod tests {
         assert_eq!(save("noext", b""), "noext");
         assert_eq!(save("noext", b""), "noext (2)");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 5);
+    }
+
+    #[test]
+    fn create_unique_folder_numbers_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = create_unique_folder(dir.path(), "任务").unwrap();
+        assert_eq!(first.file_name().unwrap().to_string_lossy(), "任务");
+        let second = create_unique_folder(dir.path(), "任务").unwrap();
+        assert_eq!(second.file_name().unwrap().to_string_lossy(), "任务 (2)");
+        // 已有文件夹及其内容不受影响
+        fs::write(first.join("keep.txt"), b"1").unwrap();
+        assert!(create_unique_folder(dir.path(), "任务").is_ok());
+        assert_eq!(fs::read(first.join("keep.txt")).unwrap(), b"1");
+    }
+
+    #[test]
+    fn split_relative_segments_rejects_traversal_and_empty() {
+        assert!(split_relative_segments("a/b/c").is_ok());
+        assert!(split_relative_segments("a\\b").is_ok());
+        assert!(split_relative_segments("").is_err());
+        assert!(split_relative_segments(" / ").is_err());
+        assert!(split_relative_segments("..").is_err());
+        assert!(split_relative_segments("a/../b").is_err());
+        assert!(split_relative_segments("a/b:stream").is_err());
+        assert!(split_relative_segments("con").is_err());
+    }
+
+    #[test]
+    fn ensure_folder_creates_nested_and_reuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let segments = split_relative_segments("batches/001_任务").unwrap();
+        let created = ensure_folder(dir.path(), &segments).unwrap();
+        assert!(created.is_dir());
+        // 再次 ensure 直接复用，幂等
+        let again = ensure_folder(dir.path(), &segments).unwrap();
+        assert_eq!(created, again);
+    }
+
+    #[test]
+    fn validate_save_dir_key_bounds() {
+        assert!(validate_save_dir_key("autoSave").is_ok());
+        assert!(validate_save_dir_key("scene:portrait").is_ok());
+        assert!(validate_save_dir_key("engine-delivery_1").is_ok());
+        assert!(validate_save_dir_key("").is_err());
+        assert!(validate_save_dir_key("../etc").is_err());
+        assert!(validate_save_dir_key("空 格").is_err());
+        assert!(validate_save_dir_key(&"x".repeat(65)).is_err());
     }
 }

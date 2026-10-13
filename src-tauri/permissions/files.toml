@@ -1,10 +1,13 @@
 [[permission]]
 identifier = "files"
-description = "允许主窗口弹出保存对话框或目录选择框并分块写入用户所选的位置，读取、更改（仅经目录选择框）、使用和打开默认保存地址，并在更改后把原地址中的内容迁移到新地址"
+description = "允许主窗口弹出保存对话框或目录选择框并分块写入用户所选的位置，读取、更改（仅经目录选择框）、使用和打开默认保存地址，并在更改后把原地址中的内容迁移到新地址；另含命名保存目录（本地自动保存/场景保存目录/引擎交付目录）的选择、使用与文件夹级写入"
 commands.allow = [
   "save_file",
   "save_dir_pick",
   "save_dir_begin",
+  "save_dir_begin_replace",
+  "save_dir_folder_create",
+  "save_dir_folder_ensure",
   "save_write",
   "save_commit",
   "save_abort",
@@ -13,4 +16,8 @@ commands.allow = [
   "download_dir_use",
   "download_dir_open",
   "download_dir_migrate",
+  "named_save_dir_pick",
+  "named_save_dir_use",
+  "named_save_dir_get",
+  "named_save_dir_clear",
 ]

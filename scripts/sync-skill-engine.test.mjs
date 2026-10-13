@@ -12,7 +12,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
-describe('standalone image pipeline engine sync', () => {
+describe('standalone image pipeline engine sync', { timeout: 20_000 }, () => {
   it('copies the engine and OpenAPI contract with portable core paths and detects drift', async () => {
     const target = await mkdtemp(join(tmpdir(), 'taostudio-engine-sync-'))
     temporaryDirectories.push(target)

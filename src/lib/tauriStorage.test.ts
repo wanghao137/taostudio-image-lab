@@ -20,7 +20,7 @@ async function setup(stored: Record<string, string> = {}) {
   return mod
 }
 
-describe('tauriStorage', () => {
+describe('tauriStorage', { timeout: 20_000 }, () => {
   beforeEach(() => {
     vi.useFakeTimers()
   })

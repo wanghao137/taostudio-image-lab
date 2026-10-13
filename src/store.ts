@@ -126,7 +126,21 @@ import { buildSpriteApngFrames, buildSpriteGifFrames, downloadBlob, downloadSpri
 import { encodeGif } from './lib/stickerSplit/gifEncode'
 import { encodeApngFromCanvases } from './lib/stickerSplit/apng'
 import { apiFetch, FetchConnectError, isTauri } from './lib/platform'
-import { pickSaveDir, saveFile, saveFileToDir, type SaveOptions } from './lib/saveFile'
+import {
+  AUTO_SAVE_DIR_KEY,
+  clearNamedSaveDir,
+  getNamedSaveDirPath,
+  pickNamedSaveDir,
+  pickSaveDir,
+  saveDirBasename,
+  saveFile,
+  saveFileToDir,
+  sceneSaveDirKey,
+  resolveNamedSaveDir,
+  writeArchiveToNativeDir,
+  type SaveDir,
+  type SaveOptions,
+} from './lib/saveFile'
 import { endDataProgress, setDataProgressCancelable, startDataProgress, updateDataProgress } from './lib/dataProgress'
 import { throwIfAborted } from './lib/serverSentEvents'
 import { tauriStorage } from './lib/tauriStorage'
@@ -3195,6 +3209,20 @@ export async function selectLocalAutoSaveDirectory() {
   }
 
   try {
+    if (isTauri) {
+      // 客户端：目录由 Rust 记在 meta 表，重启后无需重新授权（WebView2 句柄权限不跨重启保留）
+      const dir = await pickNamedSaveDir(AUTO_SAVE_DIR_KEY)
+      if (!dir) return
+      useStore.getState().setSettings({
+        localAutoSave: {
+          ...useStore.getState().settings.localAutoSave,
+          enabled: true,
+          directoryName: saveDirBasename(dir.path),
+        },
+      })
+      useStore.getState().showToast('本地自动保存位置已设置', 'success')
+      return
+    }
     const handle = await (window as unknown as {
       showDirectoryPicker: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
     }).showDirectoryPicker({ mode: 'readwrite' })
@@ -3326,6 +3354,13 @@ export async function selectSceneSaveDirectory(sceneId: SceneId) {
   }
 
   try {
+    if (isTauri) {
+      const dir = await pickNamedSaveDir(sceneSaveDirKey(sceneId))
+      if (!dir) return
+      patchSceneSettings(sceneId, { saveDirectoryName: saveDirBasename(dir.path) })
+      useStore.getState().showToast('场景保存位置已设置', 'success')
+      return
+    }
     const handle = await (window as unknown as {
       showDirectoryPicker: (options: { mode: 'readwrite' }) => Promise<FileSystemDirectoryHandle>
     }).showDirectoryPicker({ mode: 'readwrite' })
@@ -3341,6 +3376,7 @@ export async function selectSceneSaveDirectory(sceneId: SceneId) {
 }
 
 export async function clearSceneSaveDirectory(sceneId: SceneId) {
+  if (isTauri) await clearNamedSaveDir(sceneSaveDirKey(sceneId)).catch(() => {})
   await clearSceneDirectoryHandle(sceneId)
   patchSceneSettings(sceneId, { saveDirectoryName: null })
 }
@@ -3423,6 +3459,17 @@ export async function clearSkillsRootDirectory() {
 }
 
 export async function authorizeLocalAutoSaveDirectory() {
+  if (isTauri) {
+    // 客户端原生命名目录没有授权生命周期，能使用即成功
+    try {
+      await resolveNamedSaveDir(AUTO_SAVE_DIR_KEY)
+      useStore.getState().showToast('原保存位置已重新授权', 'success')
+      return true
+    } catch (err) {
+      useStore.getState().showToast(`重新授权保存位置失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+      return false
+    }
+  }
   try {
     const handle = await getSelectedLocalAutoSaveDirectoryHandle() as PermissionCapableDirectoryHandle | null
     if (!handle) {
@@ -3456,6 +3503,20 @@ export async function authorizeLocalAutoSaveDirectory() {
  * 单把失败（如用户手势耗尽）只跳过该把，不影响其余句柄的授权结果。
  */
 export async function authorizeAllLocalAutoSaveDirectories() {
+  if (isTauri) {
+    // 客户端：逐个验证全局与场景命名目录可用性，任一可用即放行补保存（与网页版“任一 granted”同语义）
+    const sceneKeys = Object.entries(useStore.getState().settings.scenes)
+      .filter(([, scene]) => scene.saveDirectoryName)
+      .map(([id]) => sceneSaveDirKey(id))
+    for (const key of [AUTO_SAVE_DIR_KEY, ...sceneKeys]) {
+      try {
+        await resolveNamedSaveDir(key)
+        return true
+      } catch { /* 该目录不可用，尝试下一把 */ }
+    }
+    useStore.getState().showToast('未找到已保存的位置，请重新选择文件夹', 'error')
+    return false
+  }
   try {
     const targets: PermissionCapableDirectoryHandle[] = []
     const globalHandle = await getSelectedLocalAutoSaveDirectoryHandle() as PermissionCapableDirectoryHandle | null
@@ -3640,6 +3701,39 @@ async function resolveTaskSaveDirectoryHandle(task: TaskRecord): Promise<FileSys
   return getSelectedLocalAutoSaveDirectoryHandle()
 }
 
+/**
+ * 客户端任务落盘目录解析（原生命名目录，无网页版句柄的授权生命周期）：
+ * 场景任务优先用场景目录；设置里的目录名与 Rust meta 记录不一致或记录缺失时，
+ * 与网页版句柄校验同语义——清除记录与设置名后回落全局目录。
+ */
+async function resolveClientAutoSaveDir(task: TaskRecord): Promise<SaveDir | null> {
+  const state = useStore.getState()
+  if (task.sceneId) {
+    const sceneSettings = state.settings.scenes[task.sceneId]
+    if (sceneSettings?.saveDirectoryName) {
+      const key = sceneSaveDirKey(task.sceneId)
+      const path = await getNamedSaveDirPath(key).catch(() => null)
+      if (path && saveDirBasename(path) === sceneSettings.saveDirectoryName.trim()) {
+        return await resolveNamedSaveDir(key)
+      }
+      await clearNamedSaveDir(key).catch(() => {})
+      patchSceneSettings(task.sceneId, { saveDirectoryName: null })
+    }
+  }
+  const selectedName = state.settings.localAutoSave.directoryName?.trim()
+  if (!selectedName) return null
+  const path = await getNamedSaveDirPath(AUTO_SAVE_DIR_KEY).catch(() => null)
+  if (!path || saveDirBasename(path) !== selectedName) {
+    await clearNamedSaveDir(AUTO_SAVE_DIR_KEY).catch(() => {})
+    const settings = useStore.getState().settings.localAutoSave
+    if (settings.directoryName !== null) {
+      useStore.getState().setSettings({ localAutoSave: { ...settings, directoryName: null } })
+    }
+    return null
+  }
+  return await resolveNamedSaveDir(AUTO_SAVE_DIR_KEY)
+}
+
 export async function runLocalAutoSaveForTask(taskId: string) {
   const state = useStore.getState()
   const task = state.tasks.find((item) => item.id === taskId)
@@ -3671,8 +3765,9 @@ export async function runLocalAutoSaveForTask(taskId: string) {
       return
     }
 
-    const directoryHandle = await resolveTaskSaveDirectoryHandle(task)
-    if (!directoryHandle) {
+    const directoryHandle = isTauri ? null : await resolveTaskSaveDirectoryHandle(task)
+    const clientDir = isTauri ? await resolveClientAutoSaveDir(task) : null
+    if (!directoryHandle && !clientDir) {
       await updateTaskLocalAutoSave(taskId, {
         status: 'pending',
         error: '未选择保存位置',
@@ -3696,29 +3791,32 @@ export async function runLocalAutoSaveForTask(taskId: string) {
       fileName: getLocalAutoSaveImageFileName(index, image),
     }))
     const metadata = buildLocalAutoSaveMetadata(task, imageFiles)
+    const files = [
+      ...imageFiles.map(({ image, fileName }) => ({
+        name: fileName,
+        data: getLocalAutoSaveImageBytes(image),
+        type: image.dataUrl.match(/^data:([^;]+)/)?.[1] ?? 'image/png',
+      })),
+      {
+        name: 'prompt.txt',
+        data: buildLocalAutoSavePromptText(task, actualSize),
+        type: 'text/plain;charset=utf-8',
+      },
+      {
+        name: 'metadata.json',
+        data: `${JSON.stringify(metadata, null, 2)}\n`,
+        type: 'application/json;charset=utf-8',
+      },
+    ]
 
     await updateTaskLocalAutoSave(taskId, { status: 'saving' })
-    const result = await writeLocalAutoSaveArchive({
-      rootHandle: directoryHandle,
-      folderName,
-      files: [
-        ...imageFiles.map(({ image, fileName }) => ({
-          name: fileName,
-          data: getLocalAutoSaveImageBytes(image),
-          type: image.dataUrl.match(/^data:([^;]+)/)?.[1] ?? 'image/png',
-        })),
-        {
-          name: 'prompt.txt',
-          data: buildLocalAutoSavePromptText(task, actualSize),
-          type: 'text/plain;charset=utf-8',
-        },
-        {
-          name: 'metadata.json',
-          data: `${JSON.stringify(metadata, null, 2)}\n`,
-          type: 'application/json;charset=utf-8',
-        },
-      ],
-    })
+    const result = isTauri
+      ? await writeArchiveToNativeDir(clientDir!, folderName, files)
+      : await writeLocalAutoSaveArchive({
+          rootHandle: directoryHandle!,
+          folderName,
+          files,
+        })
 
     const savedAt = Date.now()
     await updateTaskLocalAutoSave(taskId, {
