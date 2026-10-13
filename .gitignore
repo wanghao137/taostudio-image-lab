@@ -49,3 +49,7 @@ tools/imagemagick/*
 !tools/imagemagick/VERSION.md
 !tools/imagemagick/README.md
 .claude/
+
+# Tauri desktop client build artifacts
+src-tauri/target/
+src-tauri/gen/

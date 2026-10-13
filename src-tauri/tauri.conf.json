@@ -45,7 +45,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYwODREMkY2Nzg0MzVBQjEKUldTeFdrTjQ5dEtFWU1sUzZwNDBSbEFjR3poRktsbjVnM1VPNUJQajh4S1N1aEplL1ZiTXBqSFYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVDNzUyMTUxRTgxRjIxQjEKUldTeElSL29VU0YxN0ZoY0lUNTQ1RzdrbmFpVS9lNzJWM0NDZ0M3aXNRZ1BtcDMrM3VhN0dhVXMK",
       "endpoints": ["https://github.com/wanghao137/taostudio-image-lab/releases/latest/download/latest.json"],
       "requireSignedVersion": true,
       "windows": {
