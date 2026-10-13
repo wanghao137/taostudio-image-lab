@@ -17,10 +17,10 @@ describe('parseImportLink', () => {
   })
 
   it('识别 deep link', () => {
-    expect(parseImportLink('gpt-image-playground://?apiUrl={address}&apiKey={key}&model={model}')?.get('model')).toBe('{model}')
-    expect(parseImportLink('gpt-image-playground://?apiKey=sk-1')).not.toBeNull()
-    expect(parseImportLink('gpt-image-playground://')).toBeNull()
-    expect(parseImportLink('gpt-image-playground://?foo=bar')).toBeNull()
+    expect(parseImportLink('taostudio-image-lab://?apiUrl={address}&apiKey={key}&model={model}')?.get('model')).toBe('{model}')
+    expect(parseImportLink('taostudio-image-lab://?apiKey=sk-1')).not.toBeNull()
+    expect(parseImportLink('taostudio-image-lab://')).toBeNull()
+    expect(parseImportLink('taostudio-image-lab://?foo=bar')).toBeNull()
   })
 
   it('普通网址和文本不视为导入链接', () => {
@@ -62,7 +62,7 @@ describe('describeImportLink', () => {
   const allText = (desc: ReturnType<typeof describeImportLink>) => JSON.stringify(desc)
 
   it('新增配置时列出内容，不显示 API Key 明文', () => {
-    const params = parseImportLink('gpt-image-playground://?apiUrl=https://api.example.com/v1&apiKey=sk-secret&model=gpt-image-2&profileName=我的配置')!
+    const params = parseImportLink('taostudio-image-lab://?apiUrl=https://api.example.com/v1&apiKey=sk-secret&model=gpt-image-2&profileName=我的配置')!
     const desc = describeImportLink(params, current())
     const title = '新增配置「我的配置」'
     expect(desc.summary).toBe('请只导入来源可信的链接。')
@@ -301,9 +301,9 @@ describe('getProfileImportBaseUrl', () => {
   })
 
   it('客户端未配置网页版地址时改用 deep link', () => {
-    expect(getProfileImportBaseUrl(true, 'http://tauri.localhost/', '')).toBe('gpt-image-playground://')
+    expect(getProfileImportBaseUrl(true, 'http://tauri.localhost/', '')).toBe('taostudio-image-lab://')
     const url = createCustomProfileImportUrl(getProfileImportBaseUrl(true, 'http://tauri.localhost/', ''), profile, undefined, options)
-    expect(url.startsWith('gpt-image-playground://?settings=')).toBe(true)
+    expect(url.startsWith('taostudio-image-lab://?settings=')).toBe(true)
     expect(parseImportLink(url)).not.toBeNull()
   })
 

@@ -36,7 +36,7 @@ export const handledImportLinks = new Set<string>()
 /** 客户端分享链接使用的网页版地址，构建时由 VITE_WEB_APP_URL 注入（客户端读取 src-tauri/.env），未设置时为空 */
 export const WEB_APP_URL = readRuntimeEnv(import.meta.env.VITE_WEB_APP_URL).replace(/\/+$/, '')
 
-export const DEEP_LINK_PROTOCOL = 'gpt-image-playground:'
+export const DEEP_LINK_PROTOCOL = 'taostudio-image-lab:'
 
 /** 客户端页面地址是 http://tauri.localhost，复制的导入链接改用网页版地址；未配置网页版地址时改用 deep link，其他客户端可直接打开或复制后切回客户端导入 */
 export function getProfileImportBaseUrl(client: boolean, href: string, webAppUrl = WEB_APP_URL) {
