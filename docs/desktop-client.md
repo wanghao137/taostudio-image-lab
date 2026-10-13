@@ -67,4 +67,20 @@ npm run tauri:build
 
 - 客户端数据走 Rust SQLite（`dbTauri`），图片落应用数据目录文件系统；网页版仍走 IndexedDB（`dbWeb`）。
   两者通过 `src/lib/db.ts` 平台门面按 `isTauri` 路由，新增存储 API 必须两侧都实现或显式声明平台。
-- 应用数据目录：`%APPDATA%/com.taostudio.image-lab/`。
+- 应用数据目录：`%APPDATA%/com.taostudio.image-lab/`（便携安装为安装目录下 `data/`，可迁移）。
+
+## 保存目录体系（客户端 vs 网页版）
+
+| 设置 | 网页版 | 客户端 |
+| --- | --- | --- |
+| 手动保存/导出 | 浏览器下载 | 「习惯配置 → 默认保存地址」（Rust `download_dir`，meta 表） |
+| 本地自动保存（画廊 4K） | FS Access 句柄（IndexedDB） | 命名目录 `save_dir:autoSave`（meta 表） |
+| 场景独立保存目录 | 每场景一把句柄 | 命名目录 `save_dir:scene:<id>`（meta 表） |
+| 引擎批量交付 | 交付根句柄 | 命名目录 `save_dir:engineDelivery`（meta 表） |
+
+**为什么客户端不用句柄**：WebView2 的 FS Access 权限实测不跨重启保留（重启后 `queryPermission`
+变 `prompt`，写入 `NotAllowedError`），后台自动保存没有用户手势无法重新授权。客户端目录经
+目录选择框（`named_save_dir_pick`）选择后由 Rust 记在 meta 表，重启后 `named_save_dir_use`
+直接可用，无授权生命周期。设置里存的目录名（basename）与网页版字段一致，名称与 meta 记录
+不一致时清除回落全局（与网页版句柄校验同语义）。写入复用分块管线：归档走 `folder_create`+
+`save_dir_begin`（同名加序号），交付走 `folder_ensure`+`save_dir_begin_replace`（幂等覆盖）。
