@@ -37,6 +37,7 @@ import {
   getAllTasks,
   putTask as dbPutTask,
   deleteTask as dbDeleteTask,
+  clearTasks as dbClearTasks,
   commitTaskDeletion,
   clearTasksAndAdvanceGeneration,
   getTaskGeneration,
@@ -4313,6 +4314,10 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
   if (options.clearTasks) {
     try {
       taskStorageGeneration = await clearTasksAndAdvanceGeneration()
+      // 代际清空只覆盖网页版 IndexedDB 存储；客户端任务存放在 Rust SQLite，
+      // 必须再经平台路由清空真正的任务后端，否则客户端清空报"部分失败"且重启后
+      // 旧任务连同已删图片一起回来。网页端此调用对刚被原子清空的 store 是幂等清空。
+      await dbClearTasks()
       setTasks([])
       taskClearChannel?.postMessage({ type: 'tasks-cleared', generation: taskStorageGeneration })
       const remaining = await getAllTasks()
@@ -4593,12 +4598,22 @@ export async function runImageCleanup(tasks: TaskRecord[]): Promise<number> {
  * 而不是假成功——被阻止时数据库并未删除。
  */
 export async function rebuildDatabase(): Promise<void> {
-  if (typeof indexedDB === 'undefined') throw new Error('当前环境不支持 IndexedDB')
-  // 停掉本页写入器，避免删除请求被本页新事务持续阻塞/复活
+  // 停掉本页写入器，避免删除请求被本页新事务持续阻塞/复活（两个平台一致）
   tasksCleared = true
   clearTaskPersistRetryTimers()
   clearImageCaches()
 
+  if (isTauri) {
+    // 客户端数据在 Rust SQLite：重建 = 经平台路由清空全部业务存储（任务/会话/图片）。
+    // 只删 IndexedDB 对客户端任务是空操作，逃生门会假成功。
+    await dbClearTasks()
+    await dbClearAgentConversations()
+    await clearImages()
+    useStore.setState({ tasks: [] })
+    return
+  }
+
+  if (typeof indexedDB === 'undefined') throw new Error('当前环境不支持 IndexedDB')
   await new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase('gpt-image-playground')
     request.onsuccess = () => resolve()

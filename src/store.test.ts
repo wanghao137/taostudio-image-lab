@@ -3250,6 +3250,36 @@ describe('clearData', () => {
     expect(useStore.getState().showToast).toHaveBeenCalledWith('所选数据已清空', 'success')
   })
 
+  it('客户端分域后端：代际清空未覆盖平台任务表时，clearData 必须再清平台后端并报成功', async () => {
+    await putDbTask(task({ id: 'task-1' }))
+    useStore.setState({ tasks: [task({ id: 'task-1' })] })
+
+    // 模拟桌面端（Tauri）分域：clearTasksAndAdvanceGeneration 只推进/清空网页侧代际存储，
+    // 任务真正的后端（Rust SQLite）由门面 getAllTasks/clearTasks 读写。故意让该函数
+    // 不清理 getAllTasks 读写的存储，复现「部分数据清空失败 + 重启后残留无图任务」缺陷。
+    vi.mocked(clearTasksAndAdvanceGeneration).mockImplementationOnce(async () => 1)
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    // 平台后端必须经门面 clearTasks 清空：代际机制覆盖不到它
+    expect(vi.mocked(clearTasks)).toHaveBeenCalled()
+    expect((await getAllTasks()).length).toBe(0)
+    expect(useStore.getState().tasks.length).toBe(0)
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('所选数据已清空', 'success')
+  })
+
+  it('平台后端（客户端 SQLite）清空抛错时报部分失败', async () => {
+    await putDbTask(task({ id: 'task-1' }))
+    vi.mocked(clearTasks).mockRejectedValueOnce(new Error('SQLite busy'))
+
+    await clearData({ clearTasks: true, clearConfig: false })
+
+    expect(useStore.getState().showToast).toHaveBeenCalledWith(
+      '部分数据清空失败，可重试清空；若持续失败请使用「重建数据库」',
+      'error',
+    )
+  })
+
   it('initStore finds nothing after full clear (simulated page reload)', async () => {
     // Populate data via IndexedDB
     await putDbTask(task({ id: 'task-1', prompt: 'test prompt' }))
