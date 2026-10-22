@@ -3757,7 +3757,12 @@ export async function runLocalAutoSaveForTask(taskId: string) {
       if (image) storedImages.push(image)
     }
 
-    const eligibility = getLocalAutoSaveEligibility(task, storedImages)
+    // 场景目录归档不限尺寸（编辑任务会锁参考图原尺寸，如 1776x3840，不是 4K 预设档）；
+    // 回落全局目录的任务维持“仅 4K”语义。目录解析失败回落全局属罕见自愈路径，最多一次按全局语义跳过。
+    const sceneDirConfigured = Boolean(
+      task.sceneId && state.settings.scenes[task.sceneId]?.saveDirectoryName?.trim(),
+    )
+    const eligibility = getLocalAutoSaveEligibility(task, storedImages, { requireConfirmed4k: !sceneDirConfigured })
     if (!eligibility.eligible) {
       await updateTaskLocalAutoSave(taskId, {
         status: eligibility.status,

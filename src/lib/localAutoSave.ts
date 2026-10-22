@@ -143,15 +143,21 @@ function isAgentTask(task: Pick<TaskRecord, 'sourceMode' | 'agentConversationId'
   return task.sourceMode === 'agent' || Boolean(task.agentConversationId || task.agentRoundId)
 }
 
-export function getLocalAutoSaveEligibility(task: TaskRecord, images: StoredImage[]): LocalAutoSaveEligibility {
+export function getLocalAutoSaveEligibility(
+  task: TaskRecord,
+  images: StoredImage[],
+  options: { requireConfirmed4k?: boolean } = {},
+): LocalAutoSaveEligibility {
+  // 仅 4K 是全局目录的归档语义；配置了场景目录的场景任务不限尺寸，成功出图全部归档
+  const requireConfirmed4k = options.requireConfirmed4k ?? true
   if (isAgentTask(task)) return { eligible: false, status: 'not_applicable', reason: 'agent_task' }
   if (task.status !== 'done') return { eligible: false, status: 'not_applicable', reason: 'not_done' }
   if (!task.outputImages.length) return { eligible: false, status: 'not_applicable', reason: 'no_outputs' }
   if (task.outputErrors?.length) return { eligible: false, status: 'not_applicable', reason: 'partial_failure' }
-  if (!getLocalAutoSaveIntentSize(task)) return { eligible: false, status: 'not_applicable', reason: 'not_4k_intent' }
+  if (requireConfirmed4k && !getLocalAutoSaveIntentSize(task)) return { eligible: false, status: 'not_applicable', reason: 'not_4k_intent' }
   if (images.length !== task.outputImages.length) return { eligible: false, status: 'failed', reason: 'missing_image' }
   if (!images.every((img, index) => img.id === task.outputImages[index])) return { eligible: false, status: 'failed', reason: 'missing_image' }
-  if (!images.every((img) => isConfirmed4kSize(img))) return { eligible: false, status: 'not_applicable', reason: 'not_4k_actual' }
+  if (requireConfirmed4k && !images.every((img) => isConfirmed4kSize(img))) return { eligible: false, status: 'not_applicable', reason: 'not_4k_actual' }
   return { eligible: true }
 }
 

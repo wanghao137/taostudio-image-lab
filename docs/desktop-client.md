@@ -74,9 +74,13 @@ npm run tauri:build
 | 设置 | 网页版 | 客户端 |
 | --- | --- | --- |
 | 手动保存/导出 | 浏览器下载 | 「习惯配置 → 默认保存地址」（Rust `download_dir`，meta 表） |
-| 本地自动保存（画廊 4K） | FS Access 句柄（IndexedDB） | 命名目录 `save_dir:autoSave`（meta 表） |
-| 场景独立保存目录 | 每场景一把句柄 | 命名目录 `save_dir:scene:<id>`（meta 表） |
+| 本地自动保存（全局目录，仅 4K） | FS Access 句柄（IndexedDB） | 命名目录 `save_dir:autoSave`（meta 表） |
+| 场景独立保存目录（不限尺寸） | 每场景一把句柄 | 命名目录 `save_dir:scene:<id>`（meta 表） |
 | 引擎批量交付 | 交付根句柄 | 命名目录 `save_dir:engineDelivery`（meta 表） |
+
+自动保存尺寸语义：配置了场景独立目录的场景任务，成功出图全部归档（编辑任务会锁参考图
+原尺寸，如 1776x3840，不是 4K 预设档，也照存）；未配置场景目录回落全局目录的任务维持
+「仅 4K」语义（`getLocalAutoSaveEligibility` 的 `requireConfirmed4k`）。
 
 **为什么客户端不用句柄**：WebView2 的 FS Access 权限实测不跨重启保留（重启后 `queryPermission`
 变 `prompt`，写入 `NotAllowedError`），后台自动保存没有用户手势无法重新授权。客户端目录经

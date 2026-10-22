@@ -295,7 +295,7 @@ export function SceneSettingsDrawer({ scene, onClose }: { scene: SceneId; onClos
                         清除
                       </button>
                     </div>
-                    <p className={SECTION_HINT_CLASS_NAME}>设置后本场景生成的 4K 图片自动保存到场景目录，清除后跟随全局目录。</p>
+                    <p className={SECTION_HINT_CLASS_NAME}>设置后本场景生成的图片全部自动保存到场景目录（不限尺寸），清除后跟随全局目录（仅 4K）。</p>
                   </div>
                 ) : (
                   <div className="rounded-xl border border-yellow-200/70 bg-yellow-50 px-3 py-2 text-xs leading-relaxed text-yellow-700 dark:border-yellow-500/20 dark:bg-yellow-500/10 dark:text-yellow-200">

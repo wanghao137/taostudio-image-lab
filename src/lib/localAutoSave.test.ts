@@ -137,6 +137,42 @@ describe('local auto-save pure helpers', () => {
     })
   })
 
+  it('saves any successful size when the task lands in a configured scene directory', () => {
+    // 编辑任务锁参考图原尺寸（如 1776x3840），不是任何 4K 预设档
+    const editTask = task({ params: { ...DEFAULT_PARAMS, size: '1776x3840', exact_size: true } })
+    const editImage = image({ width: 1776, height: 3840 })
+
+    // 全局目录（默认）：维持“仅 4K”语义不变
+    expect(getLocalAutoSaveEligibility(editTask, [editImage])).toEqual({
+      eligible: false,
+      status: 'not_applicable',
+      reason: 'not_4k_intent',
+    })
+    // 场景目录：场景内成功出图全部归档，不限尺寸
+    expect(getLocalAutoSaveEligibility(editTask, [editImage], { requireConfirmed4k: false })).toEqual({ eligible: true })
+    // 意图为 4K 但实际尺寸异常的场景任务也照存（归档语义以成功出图为准）
+    expect(getLocalAutoSaveEligibility(task(), [image({ width: 1024, height: 1024 })], {
+      requireConfirmed4k: false,
+    })).toEqual({ eligible: true })
+
+    // 场景目录不放宽其余门槛：Agent 任务、部分失败、缺图仍然排除
+    expect(getLocalAutoSaveEligibility(task({ sourceMode: 'agent' }), [editImage], {
+      requireConfirmed4k: false,
+    })).toEqual({ eligible: false, status: 'not_applicable', reason: 'agent_task' })
+    expect(getLocalAutoSaveEligibility(task({
+      outputErrors: [{ requestIndex: 1, error: 'rate limit' }],
+    }), [editImage], { requireConfirmed4k: false })).toEqual({
+      eligible: false,
+      status: 'not_applicable',
+      reason: 'partial_failure',
+    })
+    expect(getLocalAutoSaveEligibility(editTask, [], { requireConfirmed4k: false })).toEqual({
+      eligible: false,
+      status: 'failed',
+      reason: 'missing_image',
+    })
+  })
+
   it('requires supplied images to match task outputs by id and order', () => {
     const multiOutputTask = task({ outputImages: ['image-a', 'image-b'] })
 

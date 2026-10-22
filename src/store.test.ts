@@ -700,6 +700,59 @@ describe('local auto-save store integration', () => {
     expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
   })
 
+  it('auto-saves non-4K scene outputs into the configured scene directory', async () => {
+    const sceneHandle = fakeDirectoryHandle('通用创作')
+    await clearSceneDirectoryHandle('general')
+    await putSceneDirectoryHandle('general', sceneHandle)
+    await putImage(localAutoSaveImage({ width: 1776, height: 3840 }))
+    const base = localAutoSaveSettings()
+    useStore.setState({
+      settings: {
+        ...base,
+        scenes: {
+          ...base.scenes,
+          general: { ...base.scenes.general, saveDirectoryName: '通用创作' },
+        },
+      },
+    })
+    useStore.getState().setTasks([localAutoSaveTask({
+      id: 'scene-edit-task',
+      sceneId: 'general',
+      // 编辑任务锁参考图原尺寸：非任何 4K 预设档（真实 bug 样本为 1776x3840）
+      params: { ...DEFAULT_PARAMS, size: '1776x3840', exact_size: true, quality: 'high', output_format: 'png' },
+    })])
+
+    try {
+      await runLocalAutoSaveForTask('scene-edit-task')
+
+      expect(useStore.getState().tasks[0].localAutoSave).toMatchObject({ status: 'saved' })
+      expect(vi.mocked(writeLocalAutoSaveArchive).mock.calls[0]?.[0]).toMatchObject({
+        rootHandle: sceneHandle,
+        folderName: expect.stringContaining('1776x3840'),
+      })
+    } finally {
+      await clearSceneDirectoryHandle('general')
+    }
+  })
+
+  it('keeps the global-directory 4K-only rule for scene tasks without a scene directory', async () => {
+    await putLocalAutoSaveDirectoryHandle(fakeDirectoryHandle('Archive'))
+    await putImage(localAutoSaveImage({ width: 1776, height: 3840 }))
+    useStore.getState().setTasks([localAutoSaveTask({
+      id: 'scene-fallback-task',
+      sceneId: 'general',
+      params: { ...DEFAULT_PARAMS, size: '1776x3840', exact_size: true, quality: 'high', output_format: 'png' },
+    })])
+
+    await runLocalAutoSaveForTask('scene-fallback-task')
+
+    expect(useStore.getState().tasks[0].localAutoSave).toEqual({
+      status: 'not_applicable',
+      error: 'not_4k_intent',
+    })
+    expect(writeLocalAutoSaveArchive).not.toHaveBeenCalled()
+  })
+
   it('marks missing stored images as failed', async () => {
     useStore.getState().setTasks([localAutoSaveTask({
       id: 'missing-image-task',
