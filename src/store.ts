@@ -103,7 +103,7 @@ import {
 } from './lib/localAutoSave'
 import { LocalAutoSavePermissionError, writeLocalAutoSaveArchive } from './lib/localAutoSaveWriter'
 import { isEmptyAgentInputDraft, restoreGalleryInputDraftState, restoreInputImageFromStoredImage, saveGalleryInputDraft, syncActiveInputDraft, updateInputDraftImages } from './lib/inputDraftState'
-import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_NAME, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
+import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_NAME, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getNewTaskFavoritePatch, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
 import { createPersistedState, migratePersistedState, normalizePersistedState } from './lib/persistedState'
 import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveFinalGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks, resolveFinalActualParams } from './lib/taskState'
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
@@ -2729,11 +2729,24 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     // 剥离图片提及标记：历史回填后 @图N 若按索引绑定到当前不相关的图，
     // 会对错误的图发起计费编辑请求；纯文本化最安全。批量提交只记一次完整原文。
     useStore.getState().recordPromptHistory(stripImageMentionMarkers(prompt), taskParams)
+    // 收藏夹自动收藏（上游 v0.8.4）
+    const saveToFavorite = normalizedSettings.saveTasksToActiveFavoriteCollection
   const startTask = async (taskPrompt: string) => {
     const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
       ? createTransparentOutputMeta(taskPrompt)
       : null
+    const state = useStore.getState()
+    // 按点击提交时所在的收藏夹页决定；创建时该收藏夹已被删除则加入默认收藏夹
+    const favoritePatch = saveToFavorite
+      ? getNewTaskFavoritePatch({
+        filterFavorite: state.filterFavorite,
+        activeFavoriteCollectionId: state.activeFavoriteCollectionId,
+        favoriteCollections: state.favoriteCollections,
+        defaultFavoriteCollectionId: state.defaultFavoriteCollectionId,
+      })
+      : null
     const task: TaskRecord = {
+      ...favoritePatch,
       id: genId(),
       storageGeneration: taskStorageGeneration,
       prompt: taskPrompt,
@@ -2759,6 +2772,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       createdAt: Date.now(),
       finishedAt: null,
       elapsed: null,
+      ...favoritePatch,
     }
 
     useStore.getState().setTasks([task, ...useStore.getState().tasks])
@@ -4050,10 +4064,11 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 
 /** 按重试方式新建任务或覆盖原任务；Agent 对话中的任务始终新建 */
 export async function retryTask(task: TaskRecord) {
+  const state = useStore.getState()
   // 用户重试生成：重置数据清除标志。
   tasksCleared = false
   await refreshTaskStorageGeneration()
-  const { settings, tasks } = useStore.getState()
+  const { settings, tasks } = state
   // 以最新任务记录为准：运行中/断线恢复中的任务不可重试（重试会与之竞态）。
   const source = tasks.find((item) => item.id === task.id)
   if (!source || source.status === 'running' || source.falRecoverable || source.customRecoverable) return
@@ -4080,8 +4095,12 @@ export async function retryTask(task: TaskRecord) {
     : null
   const taskId = overwrite ? source.id : genId()
   const startedAt = Date.now()
+  const favoritePatch = !overwrite && settings.saveTasksToActiveFavoriteCollection && state.appMode === 'gallery'
+    ? getNewTaskFavoritePatch(state, getTaskFavoriteCollectionIdsForState(source, state.defaultFavoriteCollectionId))
+    : null
   const newTask: TaskRecord = {
     ...(overwrite ? source : {}),
+    ...favoritePatch,
     id: taskId,
     storageGeneration: taskStorageGeneration,
     prompt: source.prompt,

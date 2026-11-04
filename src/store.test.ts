@@ -4,7 +4,9 @@ import { DEFAULT_PARAMS } from './types'
 import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, getCustomProviderDefinition, getSceneImageApiProfile, normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
 import type { AgentConversation, AppSettings, ExportData, SkillSummary, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
 import { getSelectedImageMentionLabel } from './lib/promptImageMentions'
-import { hasActiveDataOperations } from './lib/dataOperations'
+import { hasActiveDataOperations, hasInterruptibleOperations, trackDataTransfer } from './lib/dataOperations'
+import { cancelDataProgress, useDataProgress } from './lib/dataProgress'
+import { ALL_FAVORITES_COLLECTION_ID } from './lib/favoriteState'
 import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
 import { migratePersistedState } from './lib/persistedState'
@@ -733,6 +735,7 @@ describe('local auto-save store integration', () => {
     } finally {
       await clearSceneDirectoryHandle('general')
     }
+
   })
 
   it('keeps the global-directory 4K-only rule for scene tasks without a scene directory', async () => {
@@ -6238,7 +6241,7 @@ describe('task failure notification', () => {
     }
   })
 
-  
+
   })
 
 describe('client connection errors', () => {

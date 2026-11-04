@@ -222,6 +222,8 @@ export interface AppSettings {
   persistInputOnRestart: boolean
   reuseTaskApiProfileTemporarily: boolean
   alwaysShowRetryButton: boolean
+  /** 在收藏夹页新建的任务自动加入当前收藏夹 */
+  saveTasksToActiveFavoriteCollection: boolean
   retryMode: RetryMode
   /** 启动时检查 GitHub 上的新版本 */
   autoCheckUpdate: boolean

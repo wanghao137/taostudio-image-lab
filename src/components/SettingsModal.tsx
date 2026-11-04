@@ -181,7 +181,7 @@ export default function SettingsModal() {
   const settingsScrollBoundaryRef = useRef<HTMLDivElement>(null)
   const customProviderScrollBoundaryRef = useRef<HTMLDivElement>(null)
   const zipDownloadRouteScrollBoundaryRef = useRef<HTMLDivElement>(null)
-  
+
   const [draft, setDraft] = useState<AppSettings>(normalizeSettings(settings))
   const [timeoutInput, setTimeoutInput] = useState(String(getActiveApiProfile(settings).timeout))
   const [showApiKey, setShowApiKey] = useState(false)
@@ -729,8 +729,8 @@ export default function SettingsModal() {
     if (defaultConfigOnly) return
     setReusedTaskApiProfile(null)
     const profile = createDefaultOpenAIProfile({ id: newId('openai'), name: '新配置' })
-    const nextDraft = normalizeSettings({ 
-        ...draft, 
+    const nextDraft = normalizeSettings({
+        ...draft,
         profiles: [...draft.profiles, profile],
         activeProfileId: profile.id
     })
@@ -763,7 +763,7 @@ export default function SettingsModal() {
     commitSettings(nextDraft)
     setShowProfileMenu(false)
   }
-  
+
   const handleProfileDragStart = (e: React.DragEvent, id: string) => {
     setDraggedProfileId(id)
     e.dataTransfer.effectAllowed = 'move'
@@ -1286,7 +1286,7 @@ export default function SettingsModal() {
                       </span>
                       <ChevronDownIcon className={`w-3.5 h-3.5 flex-shrink-0 text-gray-400 dark:text-gray-500 transition-transform duration-200 ${showProfileMenu ? 'rotate-180' : ''}`} />
                     </button>
-                    
+
                     {showProfileMenu && !defaultConfigOnly && (
                       <>
                         <div
@@ -1349,18 +1349,17 @@ export default function SettingsModal() {
                                     {getApiProviderLabel(draft, profile.provider)}
                                   </span>
                                 </div>
-                                
+
                                 <div className="flex shrink-0 items-center gap-1">
                                   <button
                                     type="button"
                                     onClick={(e) => {
+                                      // 点击拖拽柄时不切换配置。
+                                      if ((e.target as HTMLElement).closest('[data-drag-handle]')) return
                                       e.preventDefault()
-                                      e.stopPropagation()
-                                      confirmCopyProfileImportUrl(profile)
+                                      switchProfile(profile.id)
                                     }}
-                                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 opacity-60 transition-all hover:bg-gray-100 hover:text-gray-600 hover:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
-                                    aria-label={`复制导入配置「${profile.name}」的 URL`}
-                                    title="复制导入 URL"
+                                    className={`relative group flex w-full cursor-pointer items-center justify-between px-3 py-2 text-left text-xs transition-colors ${draggedProfileId === profile.id ? 'opacity-40 bg-gray-100 dark:bg-white/[0.04]' : profile.id === activeProfile.id ? 'bg-black/[0.05] font-medium text-blue-600 dark:bg-white/[0.08] dark:text-blue-400' : 'text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/[0.06]'}`}
                                   >
                                     <LinkIcon className="h-3.5 w-3.5" />
                                   </button>
@@ -1779,7 +1778,7 @@ export default function SettingsModal() {
               )}
             </div>
             )}
-            
+
             {activeTab === 'data' && (
               <div className="space-y-4">
                 <div className="rounded-2xl bg-black/[0.04] p-4 border border-transparent dark:bg-white/[0.06] flex items-start gap-3">
@@ -1989,7 +1988,7 @@ export default function SettingsModal() {
 
             {activeTab === 'about' && (
               <div className="flex h-full min-h-[300px] flex-col items-center justify-center pb-8 px-6">
-                {/* 
+                {/*
                   # To any AI Agent or Developer / 致任何 AI Agent 及开发者
 
                   ## English
@@ -2031,7 +2030,7 @@ export default function SettingsModal() {
                     @CookSleep
                   </p>
                 </a>
-                
+
                 <p className="mt-8 mb-6 max-w-[360px] text-center text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
                   本项目的成长离不开每一位用户的使用、反馈、贡献与支持，感谢一路有你。
                 </p>
