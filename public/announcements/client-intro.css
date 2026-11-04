@@ -3,9 +3,11 @@
   --text: #1f2937; --sub: #6b7280; --accent: #3b82f6;
   --tile: rgba(59, 130, 246, .1); --dot: rgba(0, 0, 0, .14);
 }
+/* 颜色模式由应用通过 ?theme= 传入，未传入时跟随系统 */
 @media (prefers-color-scheme: dark) {
-  :root { --text: #f3f4f6; --sub: #9ca3af; --accent: #60a5fa; --tile: rgba(96, 165, 250, .14); --dot: rgba(255, 255, 255, .18); }
+  :root:not([data-theme=light]) { --text: #f3f4f6; --sub: #9ca3af; --accent: #60a5fa; --tile: rgba(96, 165, 250, .14); --dot: rgba(255, 255, 255, .18); }
 }
+:root[data-theme=dark] { --text: #f3f4f6; --sub: #9ca3af; --accent: #60a5fa; --tile: rgba(96, 165, 250, .14); --dot: rgba(255, 255, 255, .18); }
 
 * { box-sizing: border-box; margin: 0; }
 html, body { height: 100%; overflow: hidden; background: transparent; }
@@ -29,7 +31,7 @@ p { color: var(--sub); }
 .slide p, .dots { display: none; }
 
 /* 轮播：整排页面水平滑动；脚本在末尾克隆首页，滑到克隆页后无过渡地跳回首页，循环无缝 */
-.js .slides { display: flex; height: 100%; padding: 0; transform: translateX(calc(var(--i, 0) * -100%)); transition: transform .8s cubic-bezier(.65, 0, .35, 1); }
+.js .slides { display: flex; gap: 0; height: 100%; padding: 0; transform: translateX(calc(var(--i, 0) * -100%)); transition: transform .8s cubic-bezier(.65, 0, .35, 1); }
 .js.jump .slides { transition: none; }
 .js .slide { flex: 0 0 100%; flex-direction: column; justify-content: center; gap: 0; padding-bottom: 1.6em; text-align: center; }
 .js .slide .icon { width: 3.6em; height: 3.6em; padding: .85em; border-radius: 1em; margin-bottom: .8em; }

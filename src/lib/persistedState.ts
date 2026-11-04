@@ -2,6 +2,7 @@ import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputIm
 import { normalizeSettings } from './apiProfiles'
 import { clampSkillEntryCount, SKILL_ENTRY_COUNT_DEFAULT } from './skillWorkshop/expansion'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
+import { isHttpUrl } from './imageApiShared'
 import { getPersistableInputImage, isEmptyAgentInputDraft, normalizeAgentInputDraft, saveGalleryInputDraft } from './inputDraftState'
 
 export interface PersistedAppState {
@@ -27,6 +28,8 @@ export interface PersistedAppState {
   supportPromptSkippedForImportedData: boolean
   /** Skill 工坊扩写偏好（严格模式/期望条数）；旧持久化数据缺失时按默认值兜底 */
   skillExpansionPrefs?: SkillExpansionPrefs
+  /** 链接添加的参考图：图片 id -> 原链接（仅「+ → 添加链接」来源），自定义服务商 $inputImages.urls 用 */
+  imageSourceUrls: Record<string, string>
 }
 
 /** Skill 工坊扩写偏好：与运行态无关的轻量用户设置，跨会话记忆 */
@@ -186,6 +189,7 @@ export function createPersistedState(state: PersistedStateSource): PersistedAppS
     supportPromptDismissed: state.supportPromptDismissed,
     supportPromptOpen: state.supportPromptOpen,
     supportPromptSkippedForImportedData: state.supportPromptSkippedForImportedData,
+    imageSourceUrls: state.imageSourceUrls,
   }
 }
 
@@ -259,6 +263,9 @@ export function normalizePersistedState(
     supportPromptDismissed: Boolean(persistedState.supportPromptDismissed),
     supportPromptOpen: Boolean(persistedState.supportPromptOpen),
     supportPromptSkippedForImportedData: Boolean(persistedState.supportPromptSkippedForImportedData),
+    imageSourceUrls: isRecord(persistedState.imageSourceUrls)
+      ? Object.fromEntries(Object.entries(persistedState.imageSourceUrls).filter((entry): entry is [string, string] => isHttpUrl(entry[1])))
+      : {},
     prompt: galleryInputDraft?.prompt ?? '',
     inputImages: galleryInputDraft?.inputImages ?? [],
     maskDraft: galleryInputDraft?.maskDraft ?? null,

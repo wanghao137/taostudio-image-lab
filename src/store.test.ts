@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import { DEFAULT_PARAMS } from './types'
-import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, getCustomProviderDefinition, getSceneImageApiProfile, normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
+import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, getCustomProviderDefinition, getSceneImageApiProfile, normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
 import type { AgentConversation, AppSettings, ExportData, SkillSummary, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
 import { getSelectedImageMentionLabel } from './lib/promptImageMentions'
 import { hasActiveDataOperations } from './lib/dataOperations'
@@ -6315,5 +6315,97 @@ describe('client connection errors', () => {
     const error = useStore.getState().tasks[0].error!
     if (hinted) expect(error.startsWith(`${reason}\n提示：请求等待约 60 秒后被断开`)).toBe(true)
     else expect(error).toBe(reason)
+  })
+})
+
+describe('privacy mode', () => {
+  const responsesProfile = createDefaultOpenAIProfile({
+    id: 'responses-profile',
+    apiKey: 'test-key',
+    apiMode: 'responses',
+    model: DEFAULT_RESPONSES_MODEL,
+  })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    vi.mocked(callImageApi).mockReset()
+    vi.mocked(showBrowserNotification).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [responsesProfile],
+        activeProfileId: responsesProfile.id,
+        taskCompletionNotification: true,
+      }),
+      privacyMode: null,
+      appMode: 'gallery',
+      prompt: 'secret prompt',
+      inputImages: [imageA],
+      maskDraft: null,
+      maskEditorImageId: null,
+      galleryInputDraft: null,
+      params: { ...DEFAULT_PARAMS },
+      tasks: [task({ id: 'old-task', createdAt: 1 })],
+      searchQuery: 'secret',
+      filterFavorite: true,
+      showSettings: true,
+      detailTaskId: 'old-task',
+      confirmDialog: { title: '确认', message: '内容' },
+      showToast: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    useStore.setState({ privacyMode: null })
+  })
+
+  it('clears views and input on entry, keeps the previous input persisted, and restores it on exit', () => {
+    const epoch = useStore.getState().privacyModeEpoch
+    useStore.getState().togglePrivacyMode()
+
+    const state = useStore.getState()
+    expect(state.privacyMode).not.toBeNull()
+    expect(state.privacyModeEpoch).toBe(epoch + 1)
+    expect(state).toMatchObject({
+      prompt: '',
+      inputImages: [],
+      searchQuery: '',
+      filterFavorite: false,
+      showSettings: false,
+      detailTaskId: null,
+      confirmDialog: null,
+    })
+    const persisted = getPersistedState(state)
+    expect(persisted.prompt).toBe('secret prompt')
+
+    useStore.getState().setPrompt('typed in privacy mode')
+    useStore.getState().togglePrivacyMode()
+
+    expect(useStore.getState().privacyMode).toBeNull()
+    expect(useStore.getState().prompt).toBe('secret prompt')
+    expect(useStore.getState().inputImages).toEqual([imageA])
+  })
+
+  it('drops notifications of tasks started before entry and keeps those of new tasks', async () => {
+    const pending = deferred<never>()
+    vi.mocked(callImageApi).mockReturnValueOnce(pending.promise)
+    useStore.setState({ tasks: [], inputImages: [] })
+    await submitTask()
+    const oldTaskId = useStore.getState().tasks[0].id
+
+    useStore.getState().togglePrivacyMode()
+    pending.reject(new Error('接口报错'))
+    await vi.waitFor(() => expect(useStore.getState().tasks.find((item) => item.id === oldTaskId)?.status).toBe('error'))
+    expect(showBrowserNotification).not.toHaveBeenCalled()
+    expect(useStore.getState().detailTaskId).toBeNull()
+
+    vi.mocked(callImageApi).mockRejectedValueOnce(new Error('接口报错'))
+    useStore.getState().setPrompt('new prompt')
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('error'))
+    expect(showBrowserNotification).toHaveBeenCalledOnce()
+    expect(useStore.getState().detailTaskId).toBe(useStore.getState().tasks[0].id)
   })
 })

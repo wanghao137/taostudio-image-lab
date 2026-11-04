@@ -18,6 +18,7 @@ export type SaveLocationMode = 'ask' | 'default'
 
 /** 字体选择：default 表示使用部署默认（VITE_DEFAULT_UI_FONT / VITE_DEFAULT_MONO_FONT）；builtin 为内置字体，加载来源由 VITE_BUILTIN_FONT_SOURCE 决定 */
 export type FontMode = 'default' | 'builtin' | 'system' | 'custom'
+export type ColorMode = 'system' | 'light' | 'dark'
 export const ZIP_DOWNLOAD_ROUTE_VALUES = [
   'task-selection',
   'favorite-collection-selection',
@@ -237,6 +238,9 @@ export interface AppSettings {
   allowPromptRewrite: boolean
   taskCompletionNotification: boolean
   enterSubmit: boolean
+  /** 切换隐私模式的快捷键，如 Ctrl+Shift+H；空字符串表示禁用 */
+  privacyModeShortcut: string
+  colorMode: ColorMode
   /** 输出比例自动校正：非 exact_size 任务返回图比例与请求尺寸偏差 >5% 时本地 cover 裁切到目标比例 */
   ratioAutoCorrect: boolean
   /** 偏好设置：是否在首页提供多提示词批量提交 */
@@ -763,6 +767,8 @@ export interface ExportData {
     source?: 'upload' | 'generated' | 'mask'
     width?: number
     height?: number
+    /** 通过链接添加时的原链接 */
+    sourceUrl?: string
   }>
   /** imageId → 缩略图信息 */
   thumbnailFiles?: Record<string, {

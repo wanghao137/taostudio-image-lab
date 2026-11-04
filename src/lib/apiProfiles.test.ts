@@ -150,6 +150,13 @@ describe('normalizeSettings', () => {
     expect(settings.profiles[1].description).toBeUndefined()
   })
 
+  it('keeps valid color modes and falls back to following the system', () => {
+    expect(normalizeSettings({ enterSubmit: true }).colorMode).toBe('system')
+    expect(normalizeSettings({ colorMode: 'light' }).colorMode).toBe('light')
+    expect(normalizeSettings({ colorMode: 'dark' }).colorMode).toBe('dark')
+    expect(normalizeSettings({ colorMode: 'bogus' }).colorMode).toBe('system')
+  })
+
   it('defaults font settings to following the deployment for old data', () => {
     const settings = normalizeSettings({ enterSubmit: true })
 
@@ -1745,23 +1752,17 @@ describe('custom providers', () => {
     expect(openAIProfile.transparentBackgroundMethod).toBe('api')
   })
 
-  it('synthesizes a default editSubmit for custom providers without one', () => {
+  it('keeps editSubmit undefined for custom providers without one (submit carries $inputImages variables)', () => {
     const provider = importCustomProviderDefinitionFromJson(JSON.stringify({
       name: 'Custom Provider',
       template: 'http-image',
       submit: { path: 'images/generations' },
     }))
 
-    // editSubmit was not configured, but must be defaulted so image-edit
-    // requests (reference images) don't silently fall back to text-to-image.
-    expect(provider.editSubmit).toBeDefined()
-    expect(provider.editSubmit?.path).toBe('images/edits')
-    expect(provider.editSubmit?.contentType).toBe('multipart')
-    expect(provider.editSubmit?.files).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ field: 'image[]', source: 'inputImages' }),
-      ]),
-    )
+    // 上游 v0.8.1 语义：editSubmit 可选。未配置时图生图走 submit 的
+    // $inputImages.dataUrls/base64/urls 模板变量，不再回退到内置官方 edit 映射，
+    // 否则会劫持纯 submit 服务商（把参考图发到错误的官方端点）。
+    expect(provider.editSubmit).toBeUndefined()
   })
 
   it('uses API-mode specific streaming defaults and preserves partial image count', () => {

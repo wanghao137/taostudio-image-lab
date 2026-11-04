@@ -72,7 +72,7 @@ getImageThumbnail,
 } from './lib/db'
 import { callImageApi } from './lib/api'
 import { showBrowserNotification } from './lib/browserNotification'
-import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
+import { IMAGE_FETCH_CORS_HINT, isHttpUrl } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
@@ -145,6 +145,7 @@ import {
 import { endDataProgress, setDataProgressCancelable, startDataProgress, updateDataProgress } from './lib/dataProgress'
 import { throwIfAborted } from './lib/serverSentEvents'
 import { tauriStorage } from './lib/tauriStorage'
+import { createPrivacyModeState, getPrivacySnapshotImageIds, isPrivacyHiddenTask, restorePrivacyInputState, type PrivacyModeState } from './lib/privacyMode'
 
 export { ensureImageCached, getCachedImage } from './lib/imageCache'
 export { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_NAME } from './lib/favoriteState'
@@ -247,7 +248,7 @@ function isErrorToastTitle(title: string): boolean {
   return /(?:失败|错误|异常|报错|无法|不能|超时|中断|断开|请先|请输入|已达上限|不存在|已丢失)$/.test(title)
 }
 
-export type SettingsTab = 'general' | 'api' | 'data' | 'about'
+export type SettingsTab = 'general' | 'appearance' | 'api' | 'data' | 'about'
 
 const TIMEOUT_STREAMING_HINT = '也可尝试打开「流式传输」，并提高「请求中间步骤图像数」来维持连接。'
 const TIMEOUT_PARTIAL_IMAGES_ZERO_HINT = '官方流式接口不发送心跳，当前「请求中间步骤图像数」为 0，连接可能因无数据传输而断开。建议提高到 2 或 3。'
@@ -304,9 +305,17 @@ function showTaskCompletionNotification(title: string, body: string, tag = 'task
   showBrowserNotification(title, { body, tag })
 }
 
+// 隐私模式中丢弃进入前已开始的任务和对话的提示与通知，退出后也不补发
+function isTaskHiddenByPrivacyMode(task: TaskRecord | null) {
+  // 隐私模式隐藏判定只用到 id 与 createdAt；任务已被删除时视为不可见
+  if (!task) return true
+  return isPrivacyHiddenTask(useStore.getState().privacyMode, task)
+}
+
+
 function showTaskFailureNotification(task: TaskRecord) {
   // Agent 任务由所在回合统一通知，批量任务在整批结束时汇总失败数量
-  if (isAgentTask(task) || batchTaskIds.has(task.id)) return
+  if (isAgentTask(task) || batchTaskIds.has(task.id) || isTaskHiddenByPrivacyMode(task)) return
   showTaskCompletionNotification('图像生成失败', '请回到应用查看详情。', 'task-failure')
 }
 
@@ -354,7 +363,9 @@ function maybeOpenSupportPrompt(previousTasks: TaskRecord[], nextTasks: TaskReco
 }
 
 export function getPersistedState(state: AppState) {
-  return createPersistedState(state)
+  // 隐私模式中输入框已清空，仍保存进入前的输入快照，刷新后不丢失
+  const source = state.privacyMode ? { ...state, ...state.privacyMode.inputSnapshot } : state
+  return createPersistedState(source)
 }
 
 function mergePersistedState(persistedState: unknown, currentState: AppState): AppState {
@@ -679,6 +690,8 @@ interface AppState {
   supportPromptOpen: boolean
   supportPromptDismissed: boolean
   supportPromptSkippedForImportedData: boolean
+  /** 通过链接添加的参考图 id 到原链接，供只接受链接参考图的自定义服务商使用 */
+  imageSourceUrls: Record<string, string>
   setSupportPromptOpen: (v: boolean) => void
   dismissSupportPrompt: () => void
 
@@ -717,15 +730,23 @@ interface AppState {
     cancelAction?: (checkboxChecked?: boolean) => void
   } | null
   setConfirmDialog: (d: AppState['confirmDialog']) => void
+
+  // 隐私模式：不持久化，刷新页面后自然退出
+  privacyMode: PrivacyModeState | null
+  /** 每次进入隐私模式时递增，作为弹窗组件的 key，丢弃组件内部打开的弹窗和未保存内容 */
+  privacyModeEpoch: number
+  /** 设置弹窗的 key；导入导出中进入隐私模式时不变，保留进行中的传输状态 */
+  settingsModalEpoch: number
+  togglePrivacyMode: () => void
 }
 
 function isImageReferencedByState(state: AppState, imageId: string) {
   if (state.promptReverseSource?.imageId === imageId) return true
   if (state.inputImages.some((img) => img.id === imageId)) return true
   if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId)) return true
-  // 其他场景的草稿仍引用该图（草稿隔离后输入图按场景成套），不能当作孤儿回收
-  if (Object.values(state.sceneDrafts).some((draft) => draft?.inputImageIds.includes(imageId))) return true
-  return state.tasks.some((task) =>
+    if (Object.values(state.sceneDrafts).some((draft) => draft?.inputImageIds.includes(imageId))) return true
+    if (getPrivacySnapshotImageIds(state.privacyMode).includes(imageId)) return true
+    return state.tasks.some((task) =>
     task.inputImageIds.includes(imageId) ||
     task.outputImages.includes(imageId) ||
     task.transparentOriginalImages?.includes(imageId) ||
@@ -746,6 +767,15 @@ export async function deleteImageIfUnreferenced(imageId: string) {
   }
 }
 
+function forgetImageSourceUrl(imageId: string) {
+  if (!(imageId in useStore.getState().imageSourceUrls)) return
+  useStore.setState((s) => {
+    const imageSourceUrls = { ...s.imageSourceUrls }
+    delete imageSourceUrls[imageId]
+    return { imageSourceUrls }
+  })
+}
+
 async function deleteStoredImageIfUnreferenced(imageId: string) {
   if (isImageReferencedByState(useStore.getState(), imageId)) return
   const [image, thumbnail] = await Promise.all([getImage(imageId), getStoredImageThumbnail(imageId)])
@@ -754,6 +784,7 @@ async function deleteStoredImageIfUnreferenced(imageId: string) {
   await deleteImage(imageId)
   if (!isImageReferencedByState(useStore.getState(), imageId)) {
     deleteImageCacheEntry(imageId)
+    forgetImageSourceUrl(imageId)
     return
   }
 
@@ -1765,6 +1796,7 @@ export const useStore = create<AppState>()(
       supportPromptOpen: false,
       supportPromptDismissed: false,
       supportPromptSkippedForImportedData: false,
+      imageSourceUrls: {},
       setSupportPromptOpen: (supportPromptOpen) => set({ supportPromptOpen }),
       dismissSupportPrompt: () => set({ supportPromptOpen: false, supportPromptDismissed: true }),
 
@@ -1784,6 +1816,63 @@ export const useStore = create<AppState>()(
       setConfirmDialog: (confirmDialog) => {
         if (confirmDialog) dismissAllTooltips()
         set({ confirmDialog })
+      },
+
+      privacyMode: null,
+      privacyModeEpoch: 0,
+      settingsModalEpoch: 0,
+      togglePrivacyMode: () => {
+        const state = get()
+        if (state.privacyMode) {
+          set({
+            privacyMode: null,
+            ...restorePrivacyInputState(state.privacyMode.inputSnapshot, state),
+          })
+          const stopped = state.privacyMode.stoppedBatchPrompts
+          if (stopped > 0) get().showToast(`进入隐私模式时停止了批量提交，${stopped} 条提示词未提交`, 'info')
+          return
+        }
+
+        const privacyMode = createPrivacyModeState(state, Date.now())
+        // 继续批量会用旧提示词创建新的可见任务；已开始的任务继续执行
+        if (state.batchProgress) endBatch(activeBatchId)
+        dismissAllTooltips()
+        // 导入导出进行中保留设置弹窗和其中的确认框，传输期间的限制与提示照旧，其余照常进入隐私模式
+        const keepSettings = false
+        set({
+          privacyMode,
+          privacyModeEpoch: state.privacyModeEpoch + 1,
+          appMode: 'gallery',
+          prompt: '',
+          inputImages: [],
+          maskDraft: null,
+          galleryInputDraft: null,
+          reusedTaskApiProfileId: null,
+          reusedTaskApiProfileName: null,
+          reusedTaskApiProfileMissing: false,
+          reusedTaskApiModel: null,
+          searchQuery: '',
+          filterStatus: 'all',
+          filterFavorite: false,
+          activeFavoriteCollectionId: null,
+          selectedTaskIds: [],
+          selectedFavoriteCollectionIds: [],
+          // 直接关闭，不经过各弹窗的关闭流程，不保存草稿也不弹出确认
+          ...(keepSettings ? {} : {
+            showSettings: false,
+            settingsTabRequest: null,
+            confirmDialog: null,
+            settingsModalEpoch: state.settingsModalEpoch + 1,
+          }),
+          detailTaskId: null,
+          lightboxImageId: null,
+          lightboxImageList: [],
+          lightboxCommentPrompt: null,
+          sketchBoard: null,
+          favoritePickerTaskIds: null,
+          isManageCollectionsModalOpen: false,
+          toast: null,
+        })
       },
     }),
     {
@@ -1930,7 +2019,7 @@ function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number, profile?
   const timer = setTimeout(() => {
     openAIWatchdogTimers.delete(taskId)
     const failed = failOpenAITaskIfStillRunning(taskId, createOpenAITimeoutError(timeoutSeconds, profile))
-    if (failed) useStore.getState().showToast('OpenAI 任务请求超时', 'error')
+    if (failed && !isTaskHiddenByPrivacyMode(task)) useStore.getState().showToast('OpenAI 任务请求超时', 'error')
   }, remainingMs)
   openAIWatchdogTimers.set(taskId, timer)
 }
@@ -2037,6 +2126,7 @@ function createSettingsForApiProfile(settings: AppSettings, profile: ApiProfile)
     activeProfileId: profile.id,
   })
 }
+
 
 function getReusedTaskApiProfile(settings: AppSettings, profileId: string | null, model: string | null): ApiProfile | null {
   if (!profileId) return null
@@ -2248,12 +2338,14 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
     ...createTaskDonePatch(task, Date.now()),
     falRecoverable: false,
   })
-  if (persistFailedCount > 0) {
-    useStore.getState().showToast(`fal.ai 任务已恢复，但存储空间不足，${persistFailedCount} 张图片仅保留在内存中，请立即导出。`, 'error')
-  } else {
-    useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
-  }
-  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
+    if (!isTaskHiddenByPrivacyMode(task)) {
+      if (persistFailedCount > 0) {
+        useStore.getState().showToast(`fal.ai 任务已恢复，但存储空间不足，${persistFailedCount} 张图片仅保留在内存中，请立即导出。`, 'error')
+      } else {
+        useStore.getState().showToast(`fal.ai 任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+      }
+      if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `fal.ai 任务已恢复，共 ${outputIds.length} 张图片。`)
+    }
 }
 
 async function recoverFalTask(taskId: string) {
@@ -2393,6 +2485,10 @@ export async function initStore() {
   if (skippedFreshOrphans > 0) {
     console.info(`孤儿清扫跳过 ${skippedFreshOrphans} 张新鲜/不可读图片（将在下次启动时复查）`)
   }
+  const imageSourceUrls = useStore.getState().imageSourceUrls
+  if (Object.keys(imageSourceUrls).some((id) => !referencedIds.has(id))) {
+    useStore.setState({ imageSourceUrls: Object.fromEntries(Object.entries(imageSourceUrls).filter(([id]) => referencedIds.has(id))) })
+  }
   void scheduleMissingThumbnailBackfill(referencedImageIds)
   // 网页版旧数据的原图和缩略图以 dataUrl 字符串保存，首屏加载后在后台逐条转成 Blob
   if (!isTauri) setTimeout(() => void migrateImagesToBlob(), 2_000)
@@ -2493,7 +2589,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
         void submitTask({ ...options, useCurrentApiProfileWhenReusedMissing: true })
       },
         })
-        return
+        return []
       }
     } else {
       activeProfile = reusedProfile
@@ -2504,20 +2600,22 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   if (validateApiProfile(activeProfile)) {
     showToast(`请先完善请求 API 配置：${validateApiProfile(activeProfile)}`, 'error')
     useStore.getState().setShowSettings(true)
-    return
+    return []
   }
 
   if (!prompt.trim()) {
     showToast('请输入提示词', 'error')
-    return
+    return []
   }
 
-  // 程序化逐条提交（Skill 工坊/表情工坊）不走批量管线：批量会使 submitTask 阻塞至
-  // 每条任务完成，把循环退化为串行并产生成倍的批量开始/完成提示。
-  const batchPrompts = !options.ignoreBatchPrompt && normalizedSettings.showBatchPrompt && normalizedSettings.batchPromptEnabled ? splitBatchPrompts(prompt) : []
+    // 程序化逐条提交（Skill 工坊/表情工坊）不走批量管线：批量会使 submitTask 阻塞至
+    // 每条任务完成，把循环退化为串行并产生成倍的批量开始/完成提示。
+    const batchPrompts = !options.ignoreBatchPrompt && normalizedSettings.showBatchPrompt && normalizedSettings.batchPromptEnabled
+      ? splitBatchPrompts(prompt)
+      : []
   if (useStore.getState().batchProgress) {
     showToast('批量任务进行中，请等待完成或停止后再提交', 'error')
-    return
+    return []
   }
   // 检查通过后立即占位，避免后续 await 期间重复提交启动第二批
   const batchId = batchPrompts.length ? beginBatch(batchPrompts.length) : 0
@@ -2541,7 +2639,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
           },
         })
         endBatch(batchId)
-        return
+        return []
       }
       maskImageId = await storeImage(maskDraft.maskDataUrl, 'mask')
       cacheImage(maskImageId, maskDraft.maskDataUrl)
@@ -2552,7 +2650,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       }
       showToast(err instanceof Error ? err.message : String(err), 'error')
       endBatch(batchId)
-      return
+      return []
     }
   }
 
@@ -2565,7 +2663,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     console.error('保存参考图失败', err)
     endBatch(batchId)
     showToast(`保存参考图失败：${err instanceof Error ? err.message : String(err)}`, 'error')
-    return
+    return []
   }
 
   const normalizedParams = normalizeParamsForSettings(params, requestSettings, {
@@ -2627,11 +2725,10 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     useStore.getState().setParams(normalizedParamPatch)
   }
 
-  // 记录提示词历史（画廊模式的一键回填来源）。
-  // 剥离图片提及标记：历史回填后 @图N 若按索引绑定到当前不相关的图，
-  // 会对错误的图发起计费编辑请求；纯文本化最安全。批量提交只记一次完整原文。
-  useStore.getState().recordPromptHistory(stripImageMentionMarkers(prompt), taskParams)
-
+    // 记录提示词历史（画廊模式的一键回填来源）。
+    // 剥离图片提及标记：历史回填后 @图N 若按索引绑定到当前不相关的图，
+    // 会对错误的图发起计费编辑请求；纯文本化最安全。批量提交只记一次完整原文。
+    useStore.getState().recordPromptHistory(stripImageMentionMarkers(prompt), taskParams)
   const startTask = async (taskPrompt: string) => {
     const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
       ? createTransparentOutputMeta(taskPrompt)
@@ -2716,7 +2813,7 @@ function endBatch(batchId: number) {
 }
 
 /** 等待任务结束（完成、失败或被删除）或批量被停止；断线待恢复的任务也视为结束，避免卡住队列 */
-function waitForTaskSettled(taskId: string, isCancelled: () => boolean) {
+export function waitForTaskSettled(taskId: string, isCancelled: () => boolean) {
   const isSettled = (tasks: TaskRecord[]) => isCancelled() || tasks.find((item) => item.id === taskId)?.status !== 'running'
   return new Promise<void>((resolve) => {
     if (isSettled(useStore.getState().tasks)) {
@@ -2792,8 +2889,8 @@ async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
   const candidates = Array.from(new Set(Array.from(imageIds).filter(Boolean)))
   if (candidates.length === 0) return
 
-  const { tasks, inputImages, galleryInputDraft, sceneDrafts } = useStore.getState()
-  const stillUsed = new Set<string>()
+    const { tasks, inputImages, galleryInputDraft, sceneDrafts, privacyMode } = useStore.getState()
+    const stillUsed = new Set<string>(getPrivacySnapshotImageIds(privacyMode))
   for (const task of tasks) addTaskReferencedImageIds(stillUsed, task)
   addInputDraftReferencedImageIds(stillUsed, galleryInputDraft)
   addSceneDraftReferencedImageIds(stillUsed, sceneDrafts)
@@ -2940,6 +3037,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       params: providerParams,
       nativeTransparentBackground: nativeTransparentRequested,
       inputImageDataUrls: inputDataUrls,
+      inputImageUrls: task.inputImageIds.map((id) => useStore.getState().imageSourceUrls[id] ?? null),
       maskDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
       onFalRequestEnqueued: (request) => {
@@ -3079,8 +3177,8 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
         ? `生成完成：成功 ${outputIds.length} 张，失败 ${failedCount} 张`
         : `生成完成，共 ${outputIds.length} 张图片`
     // 批量任务只在整批结束时统一提示
-    if (!batchTaskIds.has(taskId)) {
-      useStore.getState().showToast(completionMessage, persistFailedCount > 0 || failedCount > 0 ? 'error' : 'success')
+      if (!batchTaskIds.has(taskId) && !isTaskHiddenByPrivacyMode(task)) {
+        useStore.getState().showToast(completionMessage, persistFailedCount > 0 || failedCount > 0 ? 'error' : 'success')
       if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `${completionMessage}。`)
     }
     const currentMask = useStore.getState().maskDraft
@@ -3145,7 +3243,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
         customRecoverable: false,
       })
       // 批量任务不自动打开失败详情，避免连续弹窗打断
-      if (!batchTaskIds.has(taskId)) useStore.getState().setDetailTaskId(taskId)
+      if (!batchTaskIds.has(taskId) && !isTaskHiddenByPrivacyMode(useStore.getState().tasks.find((item) => item.id === taskId) ?? null)) useStore.getState().setDetailTaskId(taskId)
       showTaskFailureNotification(task)
     }
   } finally {
@@ -4366,7 +4464,8 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     useStore.setState({
       supportPromptOpen: false,
       supportPromptSkippedForImportedData: false,
-      sceneDrafts: {},
+        sceneDrafts: {},
+        imageSourceUrls: {},
     })
     clearInputImages()
     clearMaskDraft()
@@ -4677,12 +4776,14 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
     ...createTaskDonePatch(task, Date.now()),
     customRecoverable: false,
   })
-  if (persistFailedCount > 0) {
-    useStore.getState().showToast(`自定义异步任务已恢复，但存储空间不足，${persistFailedCount} 张图片仅保留在内存中，请立即导出。`, 'error')
-  } else {
-    useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
-  }
-  if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
+    if (!isTaskHiddenByPrivacyMode(task)) {
+      if (persistFailedCount > 0) {
+        useStore.getState().showToast(`自定义异步任务已恢复，但存储空间不足，${persistFailedCount} 张图片仅保留在内存中，请立即导出。`, 'error')
+      } else {
+        useStore.getState().showToast(`自定义异步任务已恢复，共 ${outputIds.length} 张图片`, 'success')
+      }
+      if (!isAgentTask(task)) showTaskCompletionNotification('图像生成完成', `自定义异步任务已恢复，共 ${outputIds.length} 张图片。`)
+    }
 }
 
 async function recoverCustomTask(taskId: string) {
@@ -4752,6 +4853,7 @@ export async function exportData(options: ExportOptions = { exportConfig: true, 
       settings,
       tasks,
       imageTasks: tasks,
+      imageSourceUrls: state.imageSourceUrls,
       favoriteCollections,
       defaultFavoriteCollectionId,
     }
@@ -4944,6 +5046,11 @@ export async function importData(input: File | File[], options: ImportOptions = 
             height: info.height,
           })
           cacheImage(id, dataUrl)
+          // 备份文件来自外部，只接受 http(s) 链接
+          if (isHttpUrl(info.sourceUrl)) {
+            const sourceUrl = info.sourceUrl
+            useStore.setState((s) => ({ imageSourceUrls: { ...s.imageSourceUrls, [id]: sourceUrl } }))
+          }
           importedImageIds.push(id)
         }
 
@@ -5072,18 +5179,23 @@ export async function addImageFromFile(file: File): Promise<void> {
 export async function createInputImageFromFile(file: File): Promise<InputImage | null> {
   if (!file.type.startsWith('image/')) return null
   const dataUrl = await fileToDataUrl(file)
-  const stored = await storeImageWithSize(dataUrl, 'upload')
-  cacheImage(stored.id, dataUrl)
-  return { id: stored.id, dataUrl, width: stored.width, height: stored.height }
+    const stored = await storeImageWithSize(dataUrl, 'upload')
+    cacheImage(stored.id, dataUrl)
+    // 本地添加的图片即使与链接添加的内容相同，也不再沿用当时的链接，以免提交已过期的链接
+    forgetImageSourceUrl(stored.id)
+    return { id: stored.id, dataUrl, width: stored.width, height: stored.height }
 }
 
-/** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
+/** 添加图片到输入（右键菜单、添加链接）—— 支持 data/blob/http URL */
 export async function addImageFromUrl(src: string): Promise<void> {
   const res = await apiFetch(src)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const blob = await res.blob()
   if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
   const dataUrl = await blobToDataUrl(blob)
-  const stored = await storeImageWithSize(dataUrl, 'upload')
-  cacheImage(stored.id, dataUrl)
-  useStore.getState().addInputImage({ id: stored.id, dataUrl, width: stored.width, height: stored.height })
+    const stored = await storeImageWithSize(dataUrl, 'upload')
+    cacheImage(stored.id, dataUrl)
+    // 内容相同的图片共用一个 id，记录最近一次添加的链接
+    if (isHttpUrl(src)) useStore.setState((s) => ({ imageSourceUrls: { ...s.imageSourceUrls, [stored.id]: src } }))
+    useStore.getState().addInputImage({ id: stored.id, dataUrl, width: stored.width, height: stored.height })
 }

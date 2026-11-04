@@ -30,16 +30,18 @@ import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
 import { getSafeBoundingClientRect } from '../lib/domRect'
 import { useHintTooltip } from '../hooks/useHintTooltip'
+import { useVisibleTasks } from '../hooks/usePrivacyMode'
 import { useTooltip } from '../hooks/useTooltip'
 import { useIsMobile } from '../hooks/useIsMobile'
 import { useImageComposer } from '../hooks/useImageComposer'
 import { downloadImageEntriesAsZip, downloadImageIds, formatExportFileTime, getTaskOutputImageZipEntries } from '../lib/downloadImages'
 import Select from './Select'
 import ViewportTooltip from './ViewportTooltip'
-import { CloseIcon, SketchIcon } from './icons'
+import { CloseIcon, LinkIcon, SketchIcon } from './icons'
 import { CommentBadge } from './CommentMarks'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
+const AddImageUrlsModal = lazy(() => import('./input/addImageUrlsModal'))
 const PromptHistoryPopoverLazy = lazy(() => import('./input/PromptHistoryPopover'))
 
 function getTaskFavoriteCollectionIds(task: TaskRecord) {
@@ -170,6 +172,7 @@ export default function InputBar() {
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
   const openFavoritePicker = useStore((s) => s.openFavoritePicker)
   const searchQuery = useStore((s) => s.searchQuery)
+  const privacyMode = useStore((s) => Boolean(s.privacyMode))
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
 
   const {
@@ -438,6 +441,7 @@ export default function InputBar() {
   const [submitHover, setSubmitHover] = useState(false)
   const [attachHover, setAttachHover] = useState(false)
   const [showUploadMenu, setShowUploadMenu] = useState(false)
+  const [showAddImageUrls, setShowAddImageUrls] = useState(false)
   const [reverseUploadHover, setReverseUploadHover] = useState(false)
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
@@ -2053,6 +2057,8 @@ export default function InputBar() {
         </div>
       )}
 
+      {showAddImageUrls && <AddImageUrlsModal onClose={() => setShowAddImageUrls(false)} />}
+
       {showSizePicker && (
         <Suspense fallback={null}>
           <SizePickerModal
@@ -2482,6 +2488,17 @@ export default function InputBar() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                       </svg>
                       上传图片
+                    </button>
+                    <button
+                      type="button"
+                      className="w-full px-4 py-2.5 text-left text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center gap-2 transition-colors"
+                      onClick={() => {
+                        setShowUploadMenu(false)
+                        setShowAddImageUrls(true)
+                      }}
+                    >
+                      <LinkIcon className="w-4 h-4" />
+                      添加链接
                     </button>
                     <button
                       type="button"

@@ -15,7 +15,11 @@ import Toast from './components/Toast'
 import ImageContextMenu from './components/ImageContextMenu'
 import MobileShell from './components/MobileShell'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
+import { useColorMode } from './hooks/useColorMode'
+import { usePrivacyModeShortcut } from './hooks/usePrivacyMode'
 import { useAppFonts } from './hooks/useAppFonts'
+import TitleBar from './components/TitleBar'
+import { isTauri, TITLEBAR_HEIGHT } from './lib/platform'
 import { useCloseConfirm } from './hooks/useCloseConfirm'
 import { useSaveLocationPrompt } from './hooks/useSaveLocationPrompt'
 import { useAutoUpdateCheck } from './hooks/useReleaseUpdates'
@@ -76,6 +80,8 @@ export function GalleryWorkspaceHeader({ onOpenSceneSettings }: { onOpenSceneSet
   const gallerySceneFilter = useStore((s) => s.gallerySceneFilter)
   const setGallerySceneFilter = useStore((s) => s.setGallerySceneFilter)
   const isMobile = useIsMobile()
+  const privacyModeEpoch = useStore((s) => s.privacyModeEpoch)
+  const settingsModalEpoch = useStore((s) => s.settingsModalEpoch)
 
   const stats = useMemo(() => {
     return tasks.reduce(
@@ -191,6 +197,8 @@ export default function App() {
   const favoritePickerTaskIds = useStore((s) => s.favoritePickerTaskIds)
   const isManageCollectionsModalOpen = useStore((s) => s.isManageCollectionsModalOpen)
   const activeScene = useStore((s) => s.settings.activeScene)
+  const privacyModeEpoch = useStore((s) => s.privacyModeEpoch)
+  const settingsModalEpoch = useStore((s) => s.settingsModalEpoch)
   const isMobile = useIsMobile()
   // composeOpen 由 Task 5 的 MobileComposeSheet 消费；setComposeOpen 由 FAB 触发。
   const [composeOpen, setComposeOpen] = useState(false)
@@ -204,6 +212,8 @@ export default function App() {
   useAutoUpdateCheck(useStore((s) => s.settings.autoCheckUpdate))
   // 运行中的链接导入要等启动时的预置配置写入完，否则会被启动流程覆盖
   useImportLinks(startupImportDone)
+  useColorMode()
+  usePrivacyModeShortcut()
   useGlobalClickSuppression()
 
   useEffect(() => {
@@ -305,6 +315,7 @@ export default function App() {
 
   return (
     <>
+      {TITLEBAR_HEIGHT > 0 && <TitleBar />}
       {isMobile ? (
         <MobileShell composeHidden={appMode === 'gallery' && (activeScene === 'skill' || activeScene === 'sticker')} onOpenCompose={() => setComposeOpen(true)}>
           <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? '表情与头像工作台' : '画廊'}>
@@ -390,7 +401,7 @@ export default function App() {
                 </div>
               </main>
             )}
-            {appMode === 'gallery' && activeScene !== 'skill' && activeScene !== 'sticker' && <InputBar />}
+            {appMode === 'gallery' && activeScene !== 'skill' && activeScene !== 'sticker' && <InputBar key={`input-${privacyModeEpoch}`} />}
           </ErrorBoundary>
         </>
       )}
@@ -405,7 +416,7 @@ export default function App() {
       {/* 模态层：移动/桌面两端共用，保持在 Suspense 里；崩溃只炸单个模态不炸整页。
           key 随活动模态变化：切换查看对象时重置错误态，不让上一个崩溃污染下一个。 */}
       <ErrorBoundary
-        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (promptReverseSource ? 'prompt-reverse' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : null) ?? (sceneSettingsOpen ? 'scene-settings' : null) ?? 'none'}
+        key={detailTaskId ?? lightboxImageId ?? maskEditorImageId ?? (stickerSplitSource ? stickerSplitSource.imageId ?? stickerSplitSource.url ?? 'sticker' : null) ?? (promptReverseSource ? 'prompt-reverse' : null) ?? (showSettings ? 'settings' : isManageCollectionsModalOpen ? 'collections' : null) ?? (sceneSettingsOpen ? 'scene-settings' : null) ?? (privacyModeEpoch ? `pm-${privacyModeEpoch}` : 'none')}
         sectionLabel="弹窗"
       >
         <Suspense fallback={null}>

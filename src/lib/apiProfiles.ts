@@ -27,6 +27,7 @@ import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './importableConfigUrl'
 import { DEFAULT_BATCH_PROMPT_CONCURRENCY, normalizeBatchPromptConcurrency } from './batchPrompts'
 import { normalizeFontMode } from './fonts'
+import { DEFAULT_PRIVACY_MODE_SHORTCUT, normalizeShortcutSetting } from './keyboardShortcut'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -443,14 +444,20 @@ export function normalizeCustomProviderDefinition(input: unknown, usedIds = new 
       body: DEFAULT_GENERATE_BODY,
       result: DEFAULT_OPENAI_RESULT,
     }),
-    editSubmit: normalizeSubmitMapping(isRecord(record.editSubmit) ? record.editSubmit : {}, {
-      path: DEFAULT_CUSTOM_PROVIDER_PATHS.editPath,
-      method: 'POST',
-      contentType: 'multipart',
-      body: DEFAULT_EDIT_BODY,
-      files: DEFAULT_EDIT_FILES,
-      result: DEFAULT_OPENAI_RESULT,
-    }),
+    // 与上游一致：editSubmit 可选——未配置时图生图走 submit 的模板变量
+    // （$inputImages.dataUrls/base64/urls），不再回退到内置官方 edit 映射
+    ...(isRecord(record.editSubmit)
+      ? {
+          editSubmit: normalizeSubmitMapping(record.editSubmit, {
+            path: DEFAULT_CUSTOM_PROVIDER_PATHS.editPath,
+            method: 'POST',
+            contentType: 'multipart',
+            body: DEFAULT_EDIT_BODY,
+            files: DEFAULT_EDIT_FILES,
+            result: DEFAULT_OPENAI_RESULT,
+          }),
+        }
+      : {}),
     poll: normalizePollMapping(record.poll),
   }
 }
@@ -890,6 +897,8 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown): AppSet
     writeLogFile: typeof record.writeLogFile === 'boolean' ? record.writeLogFile : true,
     enterSubmit: typeof record.enterSubmit === 'boolean' ? record.enterSubmit : false,
     ratioAutoCorrect: typeof record.ratioAutoCorrect === 'boolean' ? record.ratioAutoCorrect : true,
+    privacyModeShortcut: normalizeShortcutSetting(record.privacyModeShortcut, DEFAULT_PRIVACY_MODE_SHORTCUT),
+    colorMode: record.colorMode === 'light' || record.colorMode === 'dark' ? record.colorMode : 'system',
     uiFont: normalizeFontMode(record.uiFont),
     uiFontName: typeof record.uiFontName === 'string' ? record.uiFontName.trim() : '',
     monoFont: normalizeFontMode(record.monoFont),
@@ -1523,6 +1532,12 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   writeLogFile: true,
   enterSubmit: false,
   ratioAutoCorrect: true,
+  privacyModeShortcut: DEFAULT_PRIVACY_MODE_SHORTCUT,
+  showBatchPrompt: false,
+  batchPromptEnabled: false,
+  batchPromptMode: 'queue',
+  batchPromptConcurrencyLimited: true,
+  batchPromptConcurrency: DEFAULT_BATCH_PROMPT_CONCURRENCY,
   referenceImageEditAction: 'ask',
   zipDownloadRoutes: DEFAULT_ZIP_DOWNLOAD_ROUTES,
   localAutoSave: DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,

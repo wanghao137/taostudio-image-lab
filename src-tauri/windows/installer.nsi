@@ -78,6 +78,16 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+; GPT Image Playground：“添加到 PATH”的选择（1 添加，0 不添加）及安装目录页上的复选框
+Var AddToPath
+Var AddToPathCheckbox
+
+; GPT Image Playground：结束正在运行的命令行程序，不询问。它只是等待主程序回复，主程序已由 CheckIfAppIsRunning 询问后结束，
+; 这时还在运行的只有正在启动或读取输入的进程
+!macro KillCliProcesses
+  !insertmacro RestartManager_ShutdownFile "$INSTDIR\bin\gpt-image-playground.exe" $0
+  ${IfThen} $0 <> 0 ${|} DetailPrint "无法结束 ${PRODUCTNAME} CLI（错误码 $0）。" ${|}
+!macroend
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -389,19 +399,150 @@ FunctionEnd
 
 ; 5. Choose install directory page
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfPassive
-; GPT Image Playground：所选目录下已有不属于本应用的 data 文件夹（没有 data.db、download-dir.txt 和 webview）时阻止继续。
-; 应用数据固定在 <安装目录>\data，误用用户自己的 data 文件夹会混入应用数据，卸载勾选删除数据时也会把它删掉
+; GPT Image Playground：所选目录下已有不属于本应用的 data 文件夹（非空，且没有 data.db、download-dir.txt 和 webview）时阻止继续。
+; 应用数据固定在 <安装目录>\data，误用用户自己的 data 文件夹会混入应用数据，卸载勾选删除数据时也会把它删掉。
+; 本页另加“添加到 PATH”复选框
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW InstallDirPageShow
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE InstallDirPageLeave
 !insertmacro MUI_PAGE_DIRECTORY
-Function InstallDirPageLeave
-  ${If} ${FileExists} "$INSTDIR\data\*.*"
-  ${AndIfNot} ${FileExists} "$INSTDIR\data\data.db"
-  ${AndIfNot} ${FileExists} "$INSTDIR\data\download-dir.txt"
-  ${AndIfNot} ${FileExists} "$INSTDIR\data\webview\*.*"
-    MessageBox MB_ICONEXCLAMATION "所选目录中已有名为 data 的文件夹（$INSTDIR\data），它不是本应用的数据。应用数据会保存在安装目录的 data 文件夹中，请改选一个新的子文件夹，例如 $INSTDIR\${PRODUCTNAME}。"
-    Abort
+Function InstallDirPageShow
+  ; 放在“目标文件夹”分组框（1020）正上方，说明文字下面的空白处；位置按分组框和窗口 DPI 计算
+  FindWindow $1 "#32770" "" $HWNDPARENT
+  System::Call "user32::GetDpiForWindow(p r1) i .r2"
+  GetDlgItem $3 $1 1020
+  System::Call "*(i,i,i,i) p .r4"
+  System::Call "user32::GetWindowRect(p r3, p r4)"
+  System::Call "user32::MapWindowPoints(p 0, p r1, p r4, i 2)"
+  System::Call "*$4(i, i .r5, i .r6, i)"
+  System::Free $4
+  IntOp $7 25 * $2
+  IntOp $7 $7 / 96
+  IntOp $8 6 * $2
+  IntOp $8 $8 / 96
+  IntOp $5 $5 - $7
+  IntOp $5 $5 - $8
+  ; 说明文字（1006）的区域原本一直延伸到分组框，收短到复选框上方，避免重叠时互相覆盖
+  GetDlgItem $0 $1 1006
+  System::Call "user32::SetWindowPos(p r0, p 0, i 0, i 0, i r6, i r5, i 0x16)"
+  System::Call 'user32::CreateWindowEx(i ${__NSD_CheckBox_EXSTYLE}, w "${__NSD_CheckBox_CLASS}", w "添加到 PATH（可在命令行中直接运行 gpt-image-playground）", i ${__NSD_CheckBox_STYLE}, i 0, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
+  Pop $AddToPathCheckbox
+  SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $0
+  SendMessage $AddToPathCheckbox ${WM_SETFONT} $0 1
+  ${If} $AddToPath = 1
+    SendMessage $AddToPathCheckbox ${BM_SETCHECK} ${BST_CHECKED} 0
   ${EndIf}
 FunctionEnd
+Function InstallDirPageLeave
+  SendMessage $AddToPathCheckbox ${BM_GETCHECK} 0 0 $AddToPath
+  ${If} ${FileExists} "$INSTDIR\data\data.db"
+  ${OrIf} ${FileExists} "$INSTDIR\data\download-dir.txt"
+  ${OrIf} ${FileExists} "$INSTDIR\data\webview\*.*"
+    Return
+  ${EndIf}
+  ; *.* 也匹配 . 和 ..，跳过它们才能判断是否为空
+  ClearErrors
+  FindFirst $0 $1 "$INSTDIR\data\*.*"
+  ${DoUntil} ${Errors}
+    ${If} $1 != "."
+    ${AndIf} $1 != ".."
+      FindClose $0
+      MessageBox MB_ICONEXCLAMATION "所选文件夹中已有一个不属于 ${PRODUCTNAME} 的 data 文件夹，请改选其他文件夹。"
+      Abort
+    ${EndIf}
+    FindNext $0 $1
+  ${Loop}
+  FindClose $0
+FunctionEnd
+
+; GPT Image Playground：把 <安装目录>\bin 加入当前用户的 PATH（$AddToPath 为 1），或移除之前加入的条目（为 0）。
+; 只改 HKCU\Environment 的 Path，保持原有类型（通常为 REG_EXPAND_SZ，不展开其中的 %变量%），
+; 其他条目原样保留；条目与该目录逐条比较（不区分大小写），已有时不重复添加。
+; NSIS 字符串最长 ${NSIS_MAX_STRLEN} 个字符，Path 再长读出来会被截断，这时不修改，避免写回残缺的 Path
+!macro UpdateUserPathFunction un
+Function ${un}UpdateUserPath
+  ; $R0 类型，$R1 字节数（含结尾的 NUL）；RRF_RT_ANY | RRF_NOEXPAND
+  System::Call 'advapi32::RegGetValueW(p 0x80000001, w "Environment", w "Path", i 0x1000ffff, *i .R0, p 0, *i .R1) i .R2'
+  StrCpy $R3 ""
+  ${If} $R2 = 2
+    ; 没有 Path 时新建，类型与系统默认一致
+    StrCpy $R0 2
+  ${ElseIf} $R2 <> 0
+    DetailPrint "无法读取 PATH（错误码 $R2），未修改。"
+    Return
+  ${ElseIf} $R0 <> 1
+  ${AndIf} $R0 <> 2
+    DetailPrint "PATH 不是字符串类型，未修改。"
+    Return
+  ${Else}
+    StrLen $R4 "$INSTDIR\bin"
+    IntOp $R5 $R1 / 2
+    IntOp $R5 $R5 + $R4
+    IntOp $R5 $R5 + 2
+    ${If} $R5 > ${NSIS_MAX_STRLEN}
+      DetailPrint "PATH 过长，未修改。"
+      Return
+    ${EndIf}
+    ReadRegStr $R3 HKCU "Environment" "Path"
+  ${EndIf}
+
+  ; $R4 去掉该目录后的 Path，$R5 是否找到，$R6 未处理的部分，$R9 $R4 中是否已有条目
+  StrCpy $R4 ""
+  StrCpy $R5 0
+  StrCpy $R6 $R3
+  StrCpy $R9 0
+  ${Do}
+    StrCpy $R7 0
+    ${Do}
+      StrCpy $R8 $R6 1 $R7
+      ${If} $R8 == ""
+      ${OrIf} $R8 == ";"
+        ${ExitDo}
+      ${EndIf}
+      IntOp $R7 $R7 + 1
+    ${Loop}
+    StrCpy $0 $R6 $R7
+    IntOp $R7 $R7 + 1
+    StrCpy $R6 $R6 "" $R7
+    ${If} $0 == "$INSTDIR\bin"
+    ${OrIf} $0 == "$INSTDIR\bin\"
+      StrCpy $R5 1
+    ${ElseIf} $R9 = 1
+      StrCpy $R4 "$R4;$0"
+    ${Else}
+      StrCpy $R4 $0
+      StrCpy $R9 1
+    ${EndIf}
+  ${LoopUntil} $R8 == ""
+
+  ${If} $AddToPath = 1
+    ${IfThen} $R5 = 1 ${|} Return ${|}
+    ; 原 Path 以分号结尾时新条目后也加分号，移除时才能恢复成原样
+    StrCpy $R8 $R3 1 -1
+    ${If} $R3 == ""
+      StrCpy $R4 "$INSTDIR\bin"
+    ${ElseIf} $R8 == ";"
+      StrCpy $R4 "$R3$INSTDIR\bin;"
+    ${Else}
+      StrCpy $R4 "$R3;$INSTDIR\bin"
+    ${EndIf}
+  ${Else}
+    ${IfThen} $R5 = 0 ${|} Return ${|}
+  ${EndIf}
+
+  ${If} $R4 == ""
+    DeleteRegValue HKCU "Environment" "Path"
+  ${ElseIf} $R0 = 1
+    WriteRegStr HKCU "Environment" "Path" $R4
+  ${Else}
+    WriteRegExpandStr HKCU "Environment" "Path" $R4
+  ${EndIf}
+  ; 通知资源管理器等重新读取环境变量；SMTO_ABORTIFHUNG 跳过无响应的窗口
+  System::Call 'user32::SendMessageTimeoutW(p ${HWND_BROADCAST}, i ${WM_SETTINGCHANGE}, p 0, w "Environment", i 0x2, i 5000, *p .s)'
+  Pop $R9
+FunctionEnd
+!macroend
+!insertmacro UpdateUserPathFunction ""
+!insertmacro UpdateUserPathFunction "un."
 
 ; GPT Image Playground：默认保存地址页。
 ; 客户端“文件保存位置”为“默认地址”时使用该目录，安装时写入 <安装目录>\data\download-dir.txt。
@@ -487,7 +628,7 @@ Function DownloadDirPageLeave
   ${If} $6 == $5
     ${If} $7 == ""
     ${OrIf} $7 == "\"
-      MessageBox MB_ICONEXCLAMATION "不能选择应用数据目录（$5）或其中的文件夹，请选择其他位置。"
+      MessageBox MB_ICONEXCLAMATION "不能选择 ${PRODUCTNAME} 的 data 文件夹或其中的文件夹，请改选其他文件夹。"
       Abort
     ${EndIf}
   ${EndIf}
@@ -627,6 +768,14 @@ Function .onInit
   !if "${INSTALLMODE}" == "both"
     !insertmacro MULTIUSER_INIT
   !endif
+
+  ; GPT Image Playground：“添加到 PATH”默认勾选；已安装过时沿用上次的选择，应用内更新与静默覆盖安装都保持不变
+  StrCpy $AddToPath 1
+  ClearErrors
+  ReadRegDWORD $0 SHCTX "${UNINSTKEY}" "AddToPath"
+  ${IfNot} ${Errors}
+    StrCpy $AddToPath $0
+  ${EndIf}
 FunctionEnd
 
 
@@ -749,6 +898,7 @@ Section Install
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro KillCliProcesses
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -765,6 +915,13 @@ Section Install
   {{#each binaries}}
     File /a "/oname={{this}}" "{{no-escape @key}}"
   {{/each}}
+
+  ; GPT Image Playground：上面装到安装目录的命令行程序 gpt-image-playground-cli.exe（Cargo.toml 中的 [[bin]]）
+  ; 移到 bin\gpt-image-playground.exe：与主程序同名，所以单独放在 bin 中，加入 PATH 的也是 bin
+  IfFileExists "$INSTDIR\gpt-image-playground-cli.exe" 0 +4
+    CreateDirectory "$INSTDIR\bin"
+    Delete "$INSTDIR\bin\gpt-image-playground.exe"
+    Rename "$INSTDIR\gpt-image-playground-cli.exe" "$INSTDIR\bin\gpt-image-playground.exe"
 
   ; Create file associations
   {{#each file_associations as |association| ~}}
@@ -803,6 +960,23 @@ Section Install
   ; Save current MAINBINARYNAME for future updates
   WriteRegStr SHCTX "${UNINSTKEY}" "MainBinaryName" "${MAINBINARYNAME}.exe"
 
+  ; GPT Image Playground：不卸载直接装到别的目录时，先从 PATH 中移除旧安装目录的条目，再按本次的选择处理新目录
+  ReadRegStr $1 SHCTX "${UNINSTKEY}" "InstallLocation"
+  StrCpy $2 $1 1
+  ${If} $2 == '"'
+    StrCpy $1 $1 -1 1
+  ${EndIf}
+  ${If} $1 != ""
+  ${AndIf} $1 != $INSTDIR
+    StrCpy $2 $INSTDIR
+    StrCpy $3 $AddToPath
+    StrCpy $INSTDIR $1
+    StrCpy $AddToPath 0
+    Call UpdateUserPath
+    StrCpy $INSTDIR $2
+    StrCpy $AddToPath $3
+  ${EndIf}
+
   ; Registry information for add/remove programs
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\""
@@ -812,6 +986,10 @@ Section Install
   WriteRegStr SHCTX "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoModify" "1"
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoRepair" "1"
+
+  ; GPT Image Playground：按选择把 bin 加入 PATH，取消勾选时移除之前添加的条目；记下选择，以后更新时沿用
+  Call UpdateUserPath
+  WriteRegDWORD SHCTX "${UNINSTKEY}" "AddToPath" $AddToPath
 
   ${GetSize} "$INSTDIR" "/M=uninstall.exe /S=0K /G=0" $0 $1 $2
   IntOp $0 $0 + ${ESTIMATEDSIZE}
@@ -901,6 +1079,50 @@ Function un.onInit
   ${EndIf}
 FunctionEnd
 
+; GPT Image Playground：递归删除目录，遇到目录联接、符号链接只删除链接本身；RMDir /r 会进入目录联接删除目标中的文件
+Function un.RmDirSafe
+  Exch $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  System::Call 'kernel32::GetFileAttributesW(w R0) i .R1'
+  ${If} $R1 <> -1
+    IntOp $R2 $R1 & 0x400 ; FILE_ATTRIBUTE_REPARSE_POINT
+    ${If} $R2 <> 0
+      RMDir $R0
+    ${Else}
+      ClearErrors
+      FindFirst $R2 $R3 "$R0\*.*"
+      ${DoUntil} ${Errors}
+        ${If} $R3 != "."
+        ${AndIf} $R3 != ".."
+          System::Call 'kernel32::GetFileAttributesW(w "$R0\$R3") i .R1'
+          IntOp $R1 $R1 & 0x10 ; FILE_ATTRIBUTE_DIRECTORY
+          ${If} $R1 <> 0
+            Push "$R0\$R3"
+            Call un.RmDirSafe
+          ${Else}
+            Delete "$R0\$R3"
+          ${EndIf}
+        ${EndIf}
+        ClearErrors
+        FindNext $R2 $R3
+      ${Loop}
+      FindClose $R2
+      RMDir $R0
+    ${EndIf}
+  ${EndIf}
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+FunctionEnd
+
+!macro RmDirSafe path
+  Push "${path}"
+  Call un.RmDirSafe
+!macroend
+
 Section Uninstall
 
   !ifmacrodef NSIS_HOOK_PREUNINSTALL
@@ -908,6 +1130,7 @@ Section Uninstall
   !endif
 
   !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro KillCliProcesses
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -922,6 +1145,10 @@ Section Uninstall
   {{#each binaries}}
     Delete "$INSTDIR\\{{this}}"
   {{/each}}
+
+  ; GPT Image Playground：命令行程序
+  Delete "$INSTDIR\bin\gpt-image-playground.exe"
+  RMDir "$INSTDIR\bin"
 
   ; Delete app associations
   {{#each file_associations as |association| ~}}
@@ -949,6 +1176,10 @@ Section Uninstall
 
   ; Remove shortcuts if not updating
   ${If} $UpdateMode <> 1
+    ; GPT Image Playground：从 PATH 中移除 bin；更新时保留，由新版安装程序按上次的选择处理
+    StrCpy $AddToPath 0
+    Call un.UpdateUserPath
+
     !insertmacro DeleteAppUserModelId
 
     ; Remove start menu shortcut
@@ -1009,73 +1240,123 @@ Section Uninstall
     SetShellVarContext current
     ; GPT Image Playground：应用数据都在数据目录中，只删除它；
     ; downloads 和另选的保存目录中是用户保存的图片与备份，任何情况下都不删除。
-    ; 在客户端中更改过数据目录时，<安装目录>\data-dir 中是新位置：一行路径，UTF-8 无 BOM，
-    ; 可能省略盘符（以 \ 开头，U 盘安装时），读取时补上安装目录的盘符。该目录由用户选择，可能还放了别的东西，
-    ; 只在其中确有 data.db 时删除本应用自己的文件和文件夹，最后只删除空的目录本身。
-    ; 不勾选删除数据或更新时保留 data-dir，重新安装到同一位置后仍使用该数据目录
+    ; 更改过数据目录时，<安装目录>\data-dir 的第一行是新位置，读法与 data_dir.rs 一致；省略盘符时补上
+    ; 安装目录的盘符。该目录中可能还有别的东西，只在其中有 data.db 和 webview 时删除本应用的文件，
+    ; 最后只删除空的目录本身。不勾选删除数据或更新时保留 data-dir
     ClearErrors
     FileOpen $0 "$INSTDIR\data-dir" r
     ${IfNot} ${Errors}
-      ; 多读一个字节的余量：缓冲区由 System::Alloc 清零，读入的内容之后总有结尾的 NUL
-      System::Alloc 4096
+      ; 缓冲区比读入上限多几个字节且已清零，内容后总有结尾的 NUL
+      System::Alloc 4098
       Pop $1
       System::Call 'kernel32::ReadFile(p r0, p r1, i 4095, *i .r2, p 0)'
       FileClose $0
-      StrCpy $3 ""
-      System::Call 'kernel32::MultiByteToWideChar(i 65001, i 0, p r1, i -1, w .r3, i ${NSIS_MAX_STRLEN})'
-      System::Free $1
-      ; 只取第一行
-      StrCpy $4 0
+      ; 在转换前按字节跳过 BOM：NSIS 的字符串比较会忽略 U+FEFF
+      StrCpy $2 $1
       ${Do}
-        StrCpy $5 $3 1 $4
-        ${If} $5 == ""
-        ${OrIf} $5 == "$\r"
-        ${OrIf} $5 == "$\n"
+        System::Call '*$2(&i1 .r5, &i1 .r6, &i1 .r7)'
+        IntOp $5 $5 & 0xFF
+        IntOp $6 $6 & 0xFF
+        IntOp $7 $7 & 0xFF
+        ${If} $5 <> 0xEF
+        ${OrIf} $6 <> 0xBB
+        ${OrIf} $7 <> 0xBF
           ${ExitDo}
         ${EndIf}
+        IntPtrOp $2 $2 + 3
+      ${Loop}
+      StrCpy $3 ""
+      System::Call 'kernel32::MultiByteToWideChar(i 65001, i 0, p r2, i -1, w .r3, i ${NSIS_MAX_STRLEN})'
+      System::Free $1
+      ; 只取第一行；循环按长度结束，与空串比较对控制字符不可靠
+      StrLen $6 $3
+      StrCpy $4 0
+      ${DoWhile} $4 < $6
+        StrCpy $5 $3 1 $4
+        ${IfThen} $5 == "$\n" ${|} StrCpy $6 $4 ${|}
         IntOp $4 $4 + 1
       ${Loop}
-      StrCpy $3 $3 $4
-      ; 省略了盘符时补上安装目录的盘符
+      StrCpy $3 $3 $6
+      ; 去掉首尾的空格、\t、\r、\v、\f
+      IntFmt $8 "%c" 11
+      IntFmt $9 "%c" 12
+      ${DoWhile} $6 > 0
+        StrCpy $5 $3 1
+        ${If} $5 != " "
+        ${AndIf} $5 != "$\t"
+        ${AndIf} $5 != "$\r"
+        ${AndIf} $5 != $8
+        ${AndIf} $5 != $9
+          ${ExitDo}
+        ${EndIf}
+        StrCpy $3 $3 "" 1
+        IntOp $6 $6 - 1
+      ${Loop}
+      ${DoWhile} $6 > 0
+        StrCpy $5 $3 1 -1
+        ${If} $5 != " "
+        ${AndIf} $5 != "$\t"
+        ${AndIf} $5 != "$\r"
+        ${AndIf} $5 != $8
+        ${AndIf} $5 != $9
+          ${ExitDo}
+        ${EndIf}
+        StrCpy $3 $3 -1
+        IntOp $6 $6 - 1
+      ${Loop}
       StrCpy $5 $3 1
       StrCpy $6 $3 1 1
       ${If} $5 == "\"
-      ${AndIf} $6 != "\"
-        StrCpy $5 $INSTDIR 2
-        StrCpy $3 "$5$3"
+        ; 省略了盘符时补上安装目录的盘符
+        ${If} $6 != "\"
+          StrCpy $5 $INSTDIR 2
+          StrCpy $3 "$5$3"
+        ${EndIf}
+      ${Else}
+        ; 只接受 X:\ 开头；PathGetDriveNumberW 在不以“盘符:”开头时返回 -1
+        System::Call 'shlwapi::PathGetDriveNumberW(w r3) i .r5'
+        StrCpy $6 $3 1 2
+        ${If} $5 < 0
+        ${OrIf} $6 != "\"
+          StrCpy $3 ""
+        ${EndIf}
       ${EndIf}
       StrLen $4 $3
       ${If} $4 > 3
-      ${AndIf} ${FileExists} "$3\data.db"
-        Delete "$3\data.db"
-        Delete "$3\data.db-wal"
-        Delete "$3\data.db-shm"
-        Delete "$3\data.db-journal"
-        Delete "$3\download-dir.txt"
-        RmDir /r "$3\images"
-        RmDir /r "$3\thumbnails"
-        RmDir /r "$3\tmp"
-        RmDir /r "$3\webview"
-        RmDir /r "$3\logs"
-        RmDir /r "$3\updates"
-        RMDir "$3"
+        ${If} ${FileExists} "$3\data.db"
+        ${AndIf} ${FileExists} "$3\webview\*.*"
+          Delete "$3\data.db"
+          Delete "$3\data.db-wal"
+          Delete "$3\data.db-shm"
+          Delete "$3\data.db-journal"
+          Delete "$3\download-dir.txt"
+          !insertmacro RmDirSafe "$3\images"
+          !insertmacro RmDirSafe "$3\thumbnails"
+          !insertmacro RmDirSafe "$3\tmp"
+          !insertmacro RmDirSafe "$3\webview"
+          !insertmacro RmDirSafe "$3\logs"
+          !insertmacro RmDirSafe "$3\updates"
+          RMDir "$3"
+        ${Else}
+          DetailPrint "数据目录 $3 中没有本应用的数据（data.db 和 webview 文件夹），未删除。"
+        ${EndIf}
       ${EndIf}
       Delete "$INSTDIR\data-dir"
     ${EndIf}
-    RmDir /r "$INSTDIR\data"
+    !insertmacro RmDirSafe "$INSTDIR\data"
     RMDir "$INSTDIR"
     ; 窗口状态等插件数据写在下面两个目录；安装目录位于其中时不删除，避免连同用户文件一起删掉
     StrCpy $0 "$APPDATA\${BUNDLEID}\"
     StrLen $1 $0
     StrCpy $2 "$INSTDIR\" $1
     ${If} $2 != $0
-      RmDir /r "$APPDATA\${BUNDLEID}"
+      !insertmacro RmDirSafe "$APPDATA\${BUNDLEID}"
     ${EndIf}
     StrCpy $0 "$LOCALAPPDATA\${BUNDLEID}\"
     StrLen $1 $0
     StrCpy $2 "$INSTDIR\" $1
     ${If} $2 != $0
-      RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+      !insertmacro RmDirSafe "$LOCALAPPDATA\${BUNDLEID}"
     ${EndIf}
   ${EndIf}
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { normalizeBaseUrl } from '../lib/api'
 import { hasActiveDataOperations } from '../lib/dataOperations'
+import { useSettingsDataTransfer } from '../lib/dataProgress'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
 import { isLocalAutoSaveSupported } from '../lib/localAutoSave'
 import { isTauri } from '../lib/platform'
@@ -43,12 +44,23 @@ import {
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdown'
+import {
+  buildCustomProvider,
+  getApiProfileDeleteBlock,
+  getCustomProviderDeleteBlock,
+  getDefaultModelForMode,
+  newId,
+  prepareSettingsForCommit,
+  removeApiProfile,
+  removeCustomProvider,
+} from '../lib/settingsActions'
 import Select from './Select'
 import { Checkbox } from './Checkbox'
 import ViewportTooltip from './ViewportTooltip'
 import MarkdownRenderer from './MarkdownRenderer'
 import { ChevronDownIcon, CloseIcon, CopyIcon, PlusIcon, TrashIcon, GithubIcon, ExportIcon, ImportIcon, DragHandleIcon, LinkIcon } from './icons'
 import GeneralSettingsTab from './settings/GeneralSettingsTab'
+import AppearanceSettingsTab from './settings/AppearanceSettingsTab'
 import AboutSettingsTab from './settings/AboutSettingsTab'
 import FontLicensesModal from './settings/FontLicensesModal'
 import CustomProviderModal from './settings/CustomProviderModal'
@@ -56,10 +68,6 @@ import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/Pro
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
 import StorageUsageCard from './settings/StorageUsageCard'
 import ImageCleanupCard from './settings/ImageCleanupCard'
-
-function newId(prefix: string) {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-}
 
 const ADD_CUSTOM_PROVIDER_VALUE = '__add_custom_provider__'
 const COPY_IMPORT_URL_OPTIONS_STORAGE_KEY = 'gpt-image-playground.copy-import-url-options'
@@ -195,8 +203,9 @@ export default function SettingsModal() {
   const [importTasks, setImportTasks] = useState(true)
   const [clearConfig, setClearConfig] = useState(true)
   const [clearTasks, setClearTasks] = useState(true)
-  const [isExportingData, setIsExportingData] = useState(false)
-  const [isImportingData, setIsImportingData] = useState(false)
+  const dataTransferMode = useSettingsDataTransfer((s) => s.mode)
+  const isExportingData = dataTransferMode === 'export'
+  const isImportingData = dataTransferMode === 'import'
   const [isImportingJson, setIsImportingJson] = useState(false)
   const [draggedProfileId, setDraggedProfileId] = useState<string | null>(null)
   const [dragOverProfileId, setDragOverProfileId] = useState<string | null>(null)
@@ -285,6 +294,9 @@ export default function SettingsModal() {
     })),
   ]
 
+  // 草稿所对应的已保存设置。设置页打开期间设置被别处修改（例如 AI 工具通过命令行）时按新设置重建草稿，
+  // 避免之后提交草稿时把别处的修改改回去
+  const draftSourceRef = useRef<AppSettings | null>(null)
   const wasSettingsOpenRef = useRef(false)
 
   useEffect(() => {
@@ -292,9 +304,9 @@ export default function SettingsModal() {
       wasSettingsOpenRef.current = false
       return
     }
-    if (wasSettingsOpenRef.current) return
+    if (draftSourceRef.current === settings) return
 
-    wasSettingsOpenRef.current = true
+    draftSourceRef.current = settings
     const normalizedSettings = normalizeSettings(settings)
     const displaySettings = normalizedSettings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId && normalizedSettings.profiles.some((profile) => profile.id === reusedTaskApiProfileId)
       ? normalizeSettings({ ...normalizedSettings, activeProfileId: reusedTaskApiProfileId })
@@ -630,7 +642,6 @@ export default function SettingsModal() {
     }
   }
 
-  const dataTransferMode = isExportingData ? 'export' : isImportingData ? 'import' : null
   const showDataTransferBusyToast = () => {
     const now = Date.now()
     if (now - dataTransferToastAtRef.current < 1000) return
@@ -674,11 +685,11 @@ export default function SettingsModal() {
       showToast('当前有任务正在进行，请完成或停止后再导出', 'error')
       return
     }
-    setIsExportingData(true)
+    useSettingsDataTransfer.setState({ mode: 'export' })
     try {
       await exportData({ exportConfig, exportTasks })
     } finally {
-      setIsExportingData(false)
+      useSettingsDataTransfer.setState({ mode: null })
     }
   }
 
@@ -690,7 +701,7 @@ export default function SettingsModal() {
         e.target.value = ''
         return
       }
-      setIsImportingData(true)
+      useSettingsDataTransfer.setState({ mode: 'import' })
       try {
         const imported = await importData(files, { importConfig, importTasks })
         if (imported) {
@@ -700,7 +711,7 @@ export default function SettingsModal() {
           setShowProfileMenu(false)
         }
       } finally {
-        setIsImportingData(false)
+        useSettingsDataTransfer.setState({ mode: null })
       }
     }
     e.target.value = ''
@@ -1152,6 +1163,15 @@ export default function SettingsModal() {
                 习惯配置
               </button>
               <button
+                onClick={() => setActiveTab('appearance')}
+                className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'appearance' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
+                </svg>
+                外观配置
+              </button>
+              <button
                 onClick={() => setActiveTab('data')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'data' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1184,6 +1204,8 @@ export default function SettingsModal() {
                 toggleTaskCompletionNotification={toggleTaskCompletionNotification}
               />
             )}
+
+            {activeTab === 'appearance' && <AppearanceSettingsTab draft={draft} commitSettings={commitSettings} />}
 
             {activeTab === 'api' && (
               <div className="space-y-4">

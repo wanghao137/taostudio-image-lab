@@ -6,7 +6,7 @@ import {
   assertImageInputPayloadSize,
   assertMaskEditFileSize,
   appendStreamingFormatHint,
-  fetchWithRetryClassification,
+  fetchWithRetryClassification,
   createRequestTimeoutError,
   maybeAppendStreamingHint,
   type CallApiOptions,
@@ -641,6 +641,7 @@ async function parseResponsesApiStreamResponse(
 }
 
 export async function callOpenAICompatibleImageApi(opts: CallApiOptions, profile: ApiProfile, customProvider?: CustomProviderDefinition | null): Promise<CallApiResult> {
+  console.log(String.fromCharCode(91, 82, 68, 73, 65, 71, 93), customProvider ? customProvider.id : null)
   if (customProvider) {
     const n = opts.params.n > 0 ? opts.params.n : 1
     const submitMapping = opts.inputImageDataUrls.length > 0 && customProvider.editSubmit
@@ -737,7 +738,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
   const paths = createOpenAICompatiblePaths()
 
   const controller = new AbortController()
-  let timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
+  let timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
 
   // 重试前重置超时窗口：单个 AbortController 覆盖多次尝试会让第一次尝试
   // 吃掉全部预算（600s 用掉 590s 后重试 10s 即死）。
@@ -809,7 +810,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         formData.append('mask', maskBlob, 'mask.png')
       }
 
-      response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
+      response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.editPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: requestHeaders,
         cache: 'no-store',
@@ -850,7 +851,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         body.partial_images = getStreamPartialImages(profile)
       }
 
-      response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
+      response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
         method: 'POST',
         headers: {
           ...requestHeaders,
@@ -980,12 +981,16 @@ function createCustomProviderContext(opts: CallApiOptions, profile: ApiProfile) 
     ...(opts.nativeTransparentBackground ? { background: 'transparent' } : {}),
   }
 
+  const inputImageUrls = opts.inputImageUrls?.filter(isHttpUrl) ?? []
+
   return {
     profile,
     prompt,
     params,
     inputImages: {
       dataUrls: opts.inputImageDataUrls.length ? opts.inputImageDataUrls : undefined,
+      base64: opts.inputImageDataUrls.length ? opts.inputImageDataUrls.map((url) => url.replace(/^data:[^;]+;base64,/, '')) : undefined,
+      urls: inputImageUrls.length ? inputImageUrls : undefined,
       count: opts.inputImageDataUrls.length,
     },
     mask: {
@@ -1085,8 +1090,19 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
+  console.log(String.fromCharCode(91, 82, 68, 73, 65, 71, 50, 93), mapping.path, JSON.stringify(mapping).slice(0, 300), 'profile.baseUrl=', profile.baseUrl)
   const requestHeaders = createRequestHeaders(profile)
   const context = createCustomProviderContext(opts, profile)
+  // 只用链接传参考图时，不能把其余参考图静默丢掉；同时用其他方式传参考图时链接只是补充
+  const template = JSON.stringify([mapping.body, mapping.query])
+  const linkOnly = template.includes('$inputImages.urls')
+    && !template.includes('$inputImages.dataUrls')
+    && !template.includes('$inputImages.base64')
+    && !mapping.files?.some((file) => file.source === 'inputImages')
+  const missingUrlCount = context.inputImages.count - (context.inputImages.urls?.length ?? 0)
+  if (linkOnly && missingUrlCount > 0) {
+    throw new Error(`当前服务商只接受链接参考图，有 ${missingUrlCount} 张参考图不是通过链接添加的。请在输入框的「+ → 添加链接」中添加，或移除这些参考图后重试。`)
+  }
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
   const path = appendQuery(mapping.path, renderQuery(mapping.query, context))
@@ -1271,6 +1287,7 @@ async function callCustomHttpImageApiConcurrent(
 }
 
 async function callCustomHttpImageApi(opts: CallApiOptions, profile: ApiProfile, customProvider: CustomProviderDefinition): Promise<CallApiResult> {
+  console.log(String.fromCharCode(91, 82, 68, 73, 65, 71, 51, 93), customProvider.id, 'editSubmit=', Boolean(customProvider.editSubmit))
   const { params, inputImageDataUrls } = opts
   const isEdit = inputImageDataUrls.length > 0
   const mime = MIME_MAP[params.output_format] || 'image/png'
@@ -1321,7 +1338,7 @@ async function callResponsesImageApi(opts: CallApiOptions, profile: ApiProfile):
       : undefined,
   }, profile))
   const results = await Promise.allSettled(promises)
-  
+
   const successfulResults = results
     .filter((r): r is PromiseFulfilledResult<CallApiResult> => r.status === 'fulfilled')
     .map((r) => r.value)
@@ -1376,7 +1393,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
     clearTimeout(timeoutId)
     timeoutId = setTimeout(() => controller.abort(createRequestTimeoutError(profile.timeout)), profile.timeout * 1000)
     return operation()
-  }
+  }
 
   try {
     if (opts.maskDataUrl) {
@@ -1409,7 +1426,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
         cache: 'no-store',
         body: JSON.stringify(body),
         signal: controller.signal,
-      })
+      })
 
       if (!response.ok) {
         const errorMessage = await getApiErrorMessage(response)
