@@ -7,13 +7,26 @@
 import * as web from './dbWeb'
 import * as tauri from './dbTauri'
 import { isTauri } from './platform'
+import { DEFAULT_PARAMS, type TaskRecord } from '../types'
 
 type CoreFn = (...args: never[]) => unknown
 const core: Record<string, CoreFn> = (isTauri ? tauri : web) as unknown as Record<string, CoreFn>
 
 // ===== 核心数据操作（按平台转发） =====
 
-export const getAllTasks = core.getAllTasks as typeof web.getAllTasks
+/** 旧任务记录没有 GPT Image 2.6 参数，帧参数也可能为 null，读出时补全，之后使用的任务参数都是完整的（上游 v0.8.7） */
+export const getAllTasks: typeof web.getAllTasks = async () => {
+  const tasks = await (core.getAllTasks as typeof web.getAllTasks)()
+  return tasks.map((task) => ({
+    ...task,
+    params: {
+      ...task.params,
+      complexity: task.params.complexity ?? DEFAULT_PARAMS.complexity,
+      frame_count: task.params.frame_count ?? DEFAULT_PARAMS.frame_count,
+      frame_duration_ms: task.params.frame_duration_ms ?? DEFAULT_PARAMS.frame_duration_ms,
+    },
+  }))
+}
 export const putTask = core.putTask as typeof web.putTask
 export const deleteTask = core.deleteTask as typeof web.deleteTask
 export const commitTaskDeletion = core.commitTaskDeletion as typeof web.commitTaskDeletion

@@ -28,7 +28,7 @@ import {
   putTask,
   storeImage,
 } from './db'
-import type { AgentConversation, TaskRecord } from '../types'
+import { DEFAULT_PARAMS, type AgentConversation, type TaskRecord } from '../types'
 
 function sampleTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
@@ -82,6 +82,13 @@ describe('db — real IndexedDB transaction semantics (fake-indexeddb)', () => {
     // race and return [] in environments where commit is deferred.
     const all = await getAllTasks()
     expect(all.map((t) => t.id)).toContain('durable-1')
+  })
+
+  it('读取任务时补全旧记录缺少的 GPT Image 2.6 参数（上游 v0.8.7 语义，经 fork 门面）', async () => {
+    const legacyParams = { ...DEFAULT_PARAMS, complexity: undefined, frame_count: null, frame_duration_ms: 120 } as unknown as TaskRecord['params']
+    await putTask(sampleTask({ id: 'legacy-26', params: legacyParams }))
+    const [task] = await getAllTasks()
+    expect(task.params).toMatchObject({ complexity: 'auto', frame_count: 9, frame_duration_ms: 120 })
   })
 
   it('clearTasks resolves only after the store is actually empty', async () => {

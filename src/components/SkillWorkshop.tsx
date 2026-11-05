@@ -103,7 +103,7 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
             currentSize={params.size}
             onSelect={(size) => setParams({ size })}
             onClose={() => setShowSizePicker(false)}
-            allowAuto={!isFalImage}
+            autoDisabledReason={isFalImage ? 'fal.ai 的文生图模式不支持自动尺寸' : undefined}
             codexCli={imageProfile.codexCli}
           />
         </Suspense>,

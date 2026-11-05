@@ -1758,8 +1758,8 @@ export default function InputBar() {
         <Select value={params.complexity ?? 'auto'} onChange={(value) => setParams({ complexity: value as TaskParams['complexity'] })} options={IMAGE_COMPLEXITIES.map((value) => ({ label: value, value }))} className={selectClass} />
       </label>}
       {vectorAndAnimatedFormatsAvailable && params.output_format === 'gif' && <>
-        <label className="flex min-w-0 flex-col gap-0.5"><span className="ml-1 text-gray-400 dark:text-gray-500">GIF 帧数</span><input aria-label="画廊 GIF 帧数" type="number" min={GIF_FRAME_COUNT_RANGE.min} max={GIF_FRAME_COUNT_RANGE.max} step={1} value={params.frame_count ?? ''} placeholder="9" onChange={(e) => setParams({ frame_count: Number.isNaN(e.target.valueAsNumber) ? null : Math.min(GIF_FRAME_COUNT_RANGE.max, Math.max(GIF_FRAME_COUNT_RANGE.min, Math.round(e.target.valueAsNumber))) })} className={`${selectClass} w-full min-w-0`} /></label>
-        <label className="flex min-w-0 flex-col gap-0.5"><span className="ml-1 text-gray-400 dark:text-gray-500">每帧时长 ms</span><input aria-label="画廊 GIF 每帧时长" type="number" min={GIF_FRAME_DURATION_RANGE.min} max={GIF_FRAME_DURATION_RANGE.max} step={10} value={params.frame_duration_ms ?? ''} placeholder="200" onChange={(e) => setParams({ frame_duration_ms: Number.isNaN(e.target.valueAsNumber) ? null : Math.min(GIF_FRAME_DURATION_RANGE.max, Math.max(GIF_FRAME_DURATION_RANGE.min, Math.round(e.target.valueAsNumber / 10) * 10)) })} className={`${selectClass} w-full min-w-0`} /></label>
+        <label className="flex min-w-0 flex-col gap-0.5"><span className="ml-1 text-gray-400 dark:text-gray-500">GIF 帧数</span><input aria-label="画廊 GIF 帧数" type="number" min={GIF_FRAME_COUNT_RANGE.min} max={GIF_FRAME_COUNT_RANGE.max} step={1} value={params.frame_count ?? ''} placeholder="9" onChange={(e) => setParams({ frame_count: Number.isNaN(e.target.valueAsNumber) ? params.frame_count : Math.min(GIF_FRAME_COUNT_RANGE.max, Math.max(GIF_FRAME_COUNT_RANGE.min, Math.round(e.target.valueAsNumber))) })} className={`${selectClass} w-full min-w-0`} /></label>
+        <label className="flex min-w-0 flex-col gap-0.5"><span className="ml-1 text-gray-400 dark:text-gray-500">每帧时长 ms</span><input aria-label="画廊 GIF 每帧时长" type="number" min={GIF_FRAME_DURATION_RANGE.min} max={GIF_FRAME_DURATION_RANGE.max} step={10} value={params.frame_duration_ms ?? ''} placeholder="200" onChange={(e) => setParams({ frame_duration_ms: Number.isNaN(e.target.valueAsNumber) ? params.frame_duration_ms : Math.min(GIF_FRAME_DURATION_RANGE.max, Math.max(GIF_FRAME_DURATION_RANGE.min, Math.round(e.target.valueAsNumber / 10) * 10)) })} className={`${selectClass} w-full min-w-0`} /></label>
       </>}
       {showTransparentOutputControl ? (
         <label
@@ -2083,7 +2083,7 @@ export default function InputBar() {
             currentSize={isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
             onSelect={(size) => setParams({ size })}
             onClose={() => setShowSizePicker(false)}
-            allowAuto={!isFalTextToImage}
+            autoDisabledReason={isFalTextToImage ? 'fal.ai 的文生图模式不支持自动尺寸' : undefined}
             codexCli={activeProfile.codexCli && !params.exact_size}
           />
         </Suspense>

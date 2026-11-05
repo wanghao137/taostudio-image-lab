@@ -170,7 +170,7 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
             currentSize={isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
             onSelect={(size) => setParams({ size })}
             onClose={() => setSizePickerOpen(false)}
-            allowAuto={!isFalTextToImage}
+            autoDisabledReason={isFalTextToImage ? 'fal.ai 的文生图模式不支持自动尺寸' : undefined}
           />
         </Suspense>
       )}
