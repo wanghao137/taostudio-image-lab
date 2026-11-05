@@ -65,6 +65,10 @@ describe('privacy mode visibility', () => {
     expect(getPrivacySnapshotImageIds(privacy)).toEqual(['image-a'])
     expect(getPrivacySnapshotImageIds(null)).toEqual([])
   })
+  it('also protects markup layers while the private workspace is active', () => {
+    const snapshot = createPrivacyModeState({ ...sourceState(), inputImages: [{ ...imageA, markupImageId: 'markup-a' }] }, 100)
+    expect(getPrivacySnapshotImageIds(snapshot)).toEqual(['image-a', 'markup-a'])
+  })
 })
 
 describe('restorePrivacyInputState', () => {

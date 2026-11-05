@@ -1,8 +1,10 @@
-import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
-import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
-import { getImageGenerationModel, isGptImage25Model } from './imageModels'
+import { DEFAULT_PARAMS, type ApiProfile, type AppSettings, type TaskParams } from '../types'
+import { getActiveApiProfile, getCustomProviderDefinition, isOpenAICompatibleProvider } from './apiProfiles'
+import { customProviderSupportsNativeTransparentBackground } from './customProviderCapabilities'
+import { isVectorOrAnimatedFormat, supportsExtendedQuality, supportsGptImage26Params } from './imageModels'
+import { normalizeCodexCliImageSize, normalizeImageSize } from './size'
 import { resolveProviderRequestSizePolicy } from './providerCapability'
-import { calculateImageSize, normalizeCodexCliImageSize, normalizeImageSize } from './size'
+import { calculateImageSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
 export const MAX_FAL_OUTPUT_IMAGES = 4
@@ -34,9 +36,9 @@ function capRequestSizeToTier(size: string): string {
 export function normalizeParamsForSettings(
   params: TaskParams,
   settings: AppSettings,
-  options: { hasInputImages?: boolean; preserveExactSizeIntent?: boolean; capRequestSize?: boolean } = {},
+  options: { hasInputImages?: boolean; preserveExactSizeIntent?: boolean; capRequestSize?: boolean; agent?: boolean } = {},
 ) {
-  if (params.output_format === 'gif') return { ...params, exact_size: false, transparent_output: false, output_compression: null }
+  if (params.output_format === 'gif' && params.gif) return { ...params, exact_size: false, transparent_output: false, output_compression: null }
   const activeProfile = getActiveApiProfile(settings)
   const outputImageLimit = getOutputImageLimitForSettings(settings)
   const nextParams: TaskParams = {
@@ -73,16 +75,36 @@ export function normalizeParamsForSettings(
     nextParams.output_compression = DEFAULT_PARAMS.output_compression
   }
 
-  // gpt-image-2.5 才支持 xhigh/max 质量档；其他模型提交前降为 high，避免网关报参数错误。
-  if ((nextParams.quality === 'xhigh' || nextParams.quality === 'max') && !isGptImage25Model(getImageGenerationModel(activeProfile))) {
+  if ((nextParams.quality === 'xhigh' || nextParams.quality === 'max') && !supportsExtendedQuality(activeProfile)) {
     nextParams.quality = 'high'
   }
 
-  if (nextParams.output_format === 'png') {
-    nextParams.output_compression = DEFAULT_PARAMS.output_compression
+  const supports26Params = supportsGptImage26Params(activeProfile)
+  if (!supports26Params) nextParams.complexity = DEFAULT_PARAMS.complexity
+  // Agent 的图片会进入对话上下文继续编辑，只用位图格式
+  if (isVectorOrAnimatedFormat(nextParams.output_format) && (!supports26Params || options.agent)) {
+    nextParams.output_format = DEFAULT_PARAMS.output_format
   }
 
+  // fal.ai 的 SVG 暂不开放，原因见 falAiImageApi 中的说明
+  if (activeProfile.provider === 'fal' && nextParams.output_format === 'svg') nextParams.output_format = DEFAULT_PARAMS.output_format
+  // fal.ai 生成 SVG 时只能一张，且只有一个队列请求，无法像 OpenAI 那样拆成并发单张
+  // if (activeProfile.provider === 'fal' && nextParams.output_format === 'svg') nextParams.n = 1
+
+  if (nextParams.output_format === 'png' || isVectorOrAnimatedFormat(nextParams.output_format)) {
+    nextParams.output_compression = DEFAULT_PARAMS.output_compression
+  }
+  if (isVectorOrAnimatedFormat(nextParams.output_format)) nextParams.exact_size = false
+
   return nextParams
+}
+
+/** 透明背景：JPEG 不支持；SVG 和 GIF 无法本地抠图，需要接口原生透明背景，未映射 $params.background 的自定义服务商不可用 */
+export function supportsTransparentOutput(settings: AppSettings, profile: ApiProfile, format: TaskParams['output_format']) {
+  if (format === 'jpeg') return false
+  if (!isVectorOrAnimatedFormat(format)) return true
+  const customProvider = getCustomProviderDefinition(settings, profile.provider)
+  return !customProvider || customProviderSupportsNativeTransparentBackground(customProvider)
 }
 
 export function getChangedParams(current: TaskParams, next: TaskParams): Partial<TaskParams> {

@@ -296,6 +296,7 @@ function getImageCreatedAtFallback(tasks: TaskRecord[]) {
     for (const id of [
       ...(task.inputImageIds || []),
       ...(task.maskImageId ? [task.maskImageId] : []),
+      ...(task.markupImageId ? [task.markupImageId] : []),
       ...(task.outputImages || []),
       ...(task.transparentOriginalImages || []),
       ...(task.exactSizeOriginalImages || []),

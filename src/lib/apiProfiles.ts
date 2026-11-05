@@ -62,6 +62,8 @@ export function getDefaultOpenAIModel(apiMode: ApiMode): string {
 export function isManagedDefaultOpenAIModel(model: string): boolean {
   const normalized = model.trim()
   return normalized === DEFAULT_IMAGES_MODEL ||
+    normalized === 'gpt-image-2.5-flare' ||
+    normalized === 'gpt-image-2.5-sunburst' ||
     normalized === LEGACY_DEFAULT_IMAGES_MODEL ||
     normalized === DEFAULT_RESPONSES_MODEL ||
     (MANAGED_RESPONSES_MODELS as readonly string[]).includes(normalized)
@@ -710,6 +712,7 @@ export function normalizeApiProfile(
       ? record.transparentBackgroundMethod
       : defaults.transparentBackgroundMethod,
     modelByApiMode: normalizeModelByApiMode(record.modelByApiMode),
+    svgModel: typeof record.svgModel === 'string' && record.svgModel.trim() ? record.svgModel.trim() : undefined,
     providerDrafts: normalizeProviderDrafts(record.providerDrafts, customProviderIds, nativeTransparentProviderIds),
   }
 }
@@ -1360,6 +1363,7 @@ const PRESET_PROFILE_DEPLOYMENT_KEYS = [
   'streamImages',
   'streamPartialImages',
   'transparentBackgroundMethod',
+  'svgModel',
   'providerDrafts',
 ] as const
 

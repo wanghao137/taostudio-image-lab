@@ -1,4 +1,5 @@
 import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PresetConfig, PromptHistoryEntry, SceneDraft, SceneDraftSceneId, SceneDrafts, TaskParams } from '../types'
+import { GIF_FRAME_COUNT_RANGE, GIF_FRAME_DURATION_RANGE, IMAGE_COMPLEXITIES, OUTPUT_FORMATS } from '../types'
 import { normalizeSettings } from './apiProfiles'
 import { validateGifParams, type GifOptions } from './gif'
 import { clampSkillEntryCount, SKILL_ENTRY_COUNT_DEFAULT } from './skillWorkshop/expansion'
@@ -79,6 +80,7 @@ export function toPersistableSceneDrafts(drafts: SceneDrafts | undefined): Scene
       prompt: draft.prompt,
       params: { ...draft.params },
       inputImageIds: [...draft.inputImageIds],
+      ...(draft.inputMarkupImageIds ? { inputMarkupImageIds: { ...draft.inputMarkupImageIds } } : {}),
     }
   }
   return out
@@ -90,6 +92,7 @@ function normalizeSceneDraft(value: unknown, fallbackParams: TaskParams): SceneD
     prompt: typeof value.prompt === 'string' ? value.prompt : '',
     params: normalizeParams(value.params, fallbackParams),
     inputImageIds: normalizeStringArray(value.inputImageIds, []),
+    ...(isRecord(value.inputMarkupImageIds) ? { inputMarkupImageIds: Object.fromEntries(Object.entries(value.inputMarkupImageIds).filter(([id, layer]) => normalizeStringArray(value.inputImageIds, []).includes(id) && typeof layer === 'string' && layer.length > 0)) as Record<string, string> } : {}),
   }
 }
 
@@ -114,6 +117,10 @@ function normalizeStringArray(value: unknown, fallback: string[]) {
   return value.filter((item): item is string => typeof item === 'string')
 }
 
+function normalizeGifParam(value: unknown, range: { min: number; max: number }) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= range.min && value <= range.max ? value : null
+}
+
 function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
   if (!isRecord(value)) return fallback
   const result: TaskParams = {
@@ -122,18 +129,25 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
     quality: value.quality === 'auto' || value.quality === 'low' || value.quality === 'medium' || value.quality === 'high' || value.quality === 'xhigh' || value.quality === 'max'
       ? value.quality
       : fallback.quality,
-    output_format: value.output_format === 'png' || value.output_format === 'jpeg' || value.output_format === 'webp' || value.output_format === 'gif' ? value.output_format : fallback.output_format,
+    complexity: IMAGE_COMPLEXITIES.includes(value.complexity as TaskParams['complexity'])
+      ? value.complexity as TaskParams['complexity']
+      : fallback.complexity,
+    output_format: OUTPUT_FORMATS.includes(value.output_format as TaskParams['output_format'])
+      ? value.output_format as TaskParams['output_format']
+      : fallback.output_format,
     output_compression: value.output_compression === null || (typeof value.output_compression === 'number' && Number.isFinite(value.output_compression))
       ? value.output_compression
       : fallback.output_compression,
     moderation: value.moderation === 'auto' || value.moderation === 'low' ? value.moderation : fallback.moderation,
     n: typeof value.n === 'number' && Number.isFinite(value.n) ? value.n : fallback.n,
     transparent_output: typeof value.transparent_output === 'boolean' ? value.transparent_output : fallback.transparent_output,
+    frame_count: normalizeGifParam(value.frame_count, GIF_FRAME_COUNT_RANGE),
+    frame_duration_ms: normalizeGifParam(value.frame_duration_ms, GIF_FRAME_DURATION_RANGE),
     input_ratio_policy: value.input_ratio_policy === 'auto' || value.input_ratio_policy === 'crop' || value.input_ratio_policy === 'outpaint' || value.input_ratio_policy === 'off'
       ? value.input_ratio_policy
       : fallback.input_ratio_policy,
   }
-  if (result.output_format === 'gif') {
+  if (result.output_format === 'gif' && (value.gif || fallback.gif)) {
     result.gif = isRecord(value.gif) ? value.gif as unknown as GifOptions : fallback.gif
     try { validateGifParams(result) } catch { return { ...fallback } }
   }

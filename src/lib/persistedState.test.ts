@@ -252,6 +252,18 @@ describe('persisted state codec', () => {
 })
 
 describe('normalizePromptHistory', () => {
+  it('preserves markup alongside TaoStudio dimensions and per-scene drafts', () => {
+    const image = { ...imageA, width: 4096, height: 3072, markupImageId: 'markup-a' }
+    const stored = createPersistedState({
+      ...source({ ...DEFAULT_SETTINGS, persistInputOnRestart: true }),
+      inputImages: [image],
+      sceneDrafts: { portrait: { prompt: 'portrait', params: { ...DEFAULT_PARAMS }, inputImageIds: [image.id], inputMarkupImageIds: { [image.id]: 'markup-a' } } },
+    })
+    const restored = normalizePersistedState(stored, fallback())!
+    expect(restored.inputImages[0]).toMatchObject({ id: image.id, width: 4096, height: 3072, markupImageId: 'markup-a', dataUrl: '' })
+    expect(restored.sceneDrafts.portrait?.inputMarkupImageIds).toEqual({ [image.id]: 'markup-a' })
+  })
+
   it('sanitizes malformed entries and caps at 20', async () => {
     const { normalizePromptHistory } = await import('./persistedState')
     const malformed = [

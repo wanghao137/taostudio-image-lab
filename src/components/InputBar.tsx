@@ -2,7 +2,7 @@ import { lazy, Suspense, useRef, useEffect, useCallback, useState, useLayoutEffe
 import { createPortal } from 'react-dom'
 import { ImageUp, Maximize2, SlidersHorizontal } from 'lucide-react'
 import { deleteFavoriteCollection, useStore, createInputImageFromFile, deleteImageIfUnreferenced, removeMultipleTasks, stopBatchPrompts } from '../store'
-import { type TaskParams, type TaskRecord } from '../types'
+import { GIF_FRAME_COUNT_RANGE, GIF_FRAME_DURATION_RANGE, IMAGE_COMPLEXITIES, type TaskParams, type TaskRecord } from '../types'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds as getTaskFavoriteCollectionIdsForState } from '../lib/favoriteState'
 import { filterAndSortTasks } from '../lib/taskFilters'
 import { splitModelList } from '../lib/apiProfiles'
@@ -19,7 +19,8 @@ import {
   getMentionTagHtml,
 } from '../lib/contentEditableTools'
 import { ensureImageCached } from '../lib/imageCache'
-import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
+import { isVectorOrAnimatedFormat, supportsExtendedQuality, supportsGptImage26Params } from '../lib/imageModels'
+import { toReferenceImage } from '../lib/inputImages'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageComments, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, getSelectedTextMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
 import {
@@ -39,6 +40,7 @@ import Select from './Select'
 import ViewportTooltip from './ViewportTooltip'
 import { CloseIcon, LinkIcon, SketchIcon } from './icons'
 import { CommentBadge } from './CommentMarks'
+import MarkupOverlay from './input/markupOverlay'
 
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
 const AddImageUrlsModal = lazy(() => import('./input/addImageUrlsModal'))
@@ -173,6 +175,7 @@ export default function InputBar() {
   const openFavoritePicker = useStore((s) => s.openFavoritePicker)
   const searchQuery = useStore((s) => s.searchQuery)
   const privacyMode = useStore((s) => Boolean(s.privacyMode))
+  const appMode = useStore((s) => s.appMode)
   const setPromptReverseSource = useStore((s) => s.setPromptReverseSource)
 
   const {
@@ -552,14 +555,15 @@ export default function InputBar() {
     { label: 'low', value: 'low' },
     { label: 'medium', value: 'medium' },
     { label: 'high', value: 'high' },
-    // gpt-image-2.5 专属质量档；其他模型提交前会自动降为 high（paramCompatibility）。
-    ...(isGptImage25Model(getImageGenerationModel(activeProfile))
+    ...(supportsExtendedQuality(activeProfile)
       ? [
           { label: 'xhigh', value: 'xhigh' },
           { label: 'max', value: 'max' },
         ]
       : []),
   ]
+  const complexityAvailable = supportsGptImage26Params(activeProfile)
+  const vectorAndAnimatedFormatsAvailable = complexityAvailable && appMode === 'gallery'
   // 多模型切换（上游 v0.7.16）：模型 ID 支持逗号分隔列表，首页按配置记忆选择。
   const isTemporarilyReusedProfile = Boolean(settings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId && activeProfile.id === reusedTaskApiProfileId)
   const modelOptions = useMemo(() => (
@@ -1032,7 +1036,7 @@ export default function InputBar() {
             showToast('部分图片已不存在', 'error')
             return
           }
-          addInputImage({ id: imageId, dataUrl })
+          addInputImage(await toReferenceImage(imageId, dataUrl))
         })).then(() => {
           showToast('已上传图片', 'success')
         }).catch((err) => showToast(`上传图片失败：${err instanceof Error ? err.message : String(err)}`, 'error'))
@@ -1469,7 +1473,7 @@ export default function InputBar() {
         )}
         <div
           className={`relative w-[40px] h-[40px] rounded-lg overflow-hidden shadow-sm cursor-grab active:cursor-grabbing select-none ${
-            isMaskTarget || commentCount > 0
+            isMaskTarget || commentCount > 0 || img.markupImageId
               ? 'border-2 border-blue-500'
               : 'border border-gray-200 dark:border-white/[0.08]'
           }`}
@@ -1500,6 +1504,7 @@ export default function InputBar() {
               MASK
             </span>
           )}
+          {img.markupImageId && !isMaskTarget && <MarkupOverlay imageId={img.markupImageId} />}
           {commentCount > 0 && <CommentBadge count={commentCount} className={isMaskTarget ? 'left-1 top-[18px]' : 'left-1 top-1'} />}
           <span className="absolute bottom-1 left-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/55 text-[9px] font-semibold text-white backdrop-blur-sm z-10 pointer-events-none">
             {idx + 1}
@@ -1578,7 +1583,7 @@ export default function InputBar() {
   }
 
   const renderParams = (cols: string) => (
-    <div className={`grid ${cols} gap-2 text-xs flex-1`}>
+    <div className={`grid ${cols} min-w-0 gap-2 text-xs flex-1`}>
       <label
         className="relative flex flex-col gap-0.5"
         onMouseEnter={sizeHint.show}
@@ -1732,17 +1737,30 @@ export default function InputBar() {
           onChange={(val) => {
             setParams({
               output_format: val as any,
-              ...(val === 'png' ? { output_compression: null } : { transparent_output: false }),
+              gif: undefined,
+              ...(val === 'png' || isVectorOrAnimatedFormat(val) ? { output_compression: null } : {}),
+              ...(isVectorOrAnimatedFormat(val) ? { exact_size: false } : {}),
+              ...(val === 'jpeg' ? { transparent_output: false } : {}),
             })
           }}
           options={[
             { label: 'PNG', value: 'png' },
             { label: 'JPEG', value: 'jpeg' },
             { label: 'WebP', value: 'webp' },
+            ...(vectorAndAnimatedFormatsAvailable ? [{ label: 'GIF', value: 'gif' }] : []),
+            ...(vectorAndAnimatedFormatsAvailable && !isFalProvider && inputImages.length === 0 ? [{ label: 'SVG（仅文生图）', value: 'svg' }] : []),
           ]}
           className={selectClass}
         />
       </label>
+      {complexityAvailable && <label className="flex min-w-0 flex-col gap-0.5">
+        <span className="ml-1 text-gray-400 dark:text-gray-500">复杂度</span>
+        <Select value={params.complexity ?? 'auto'} onChange={(value) => setParams({ complexity: value as TaskParams['complexity'] })} options={IMAGE_COMPLEXITIES.map((value) => ({ label: value, value }))} className={selectClass} />
+      </label>}
+      {vectorAndAnimatedFormatsAvailable && params.output_format === 'gif' && <>
+        <label className="flex min-w-0 flex-col gap-0.5"><span className="ml-1 text-gray-400 dark:text-gray-500">GIF 帧数</span><input aria-label="画廊 GIF 帧数" type="number" min={GIF_FRAME_COUNT_RANGE.min} max={GIF_FRAME_COUNT_RANGE.max} step={1} value={params.frame_count ?? ''} placeholder="9" onChange={(e) => setParams({ frame_count: Number.isNaN(e.target.valueAsNumber) ? null : Math.min(GIF_FRAME_COUNT_RANGE.max, Math.max(GIF_FRAME_COUNT_RANGE.min, Math.round(e.target.valueAsNumber))) })} className={`${selectClass} w-full min-w-0`} /></label>
+        <label className="flex min-w-0 flex-col gap-0.5"><span className="ml-1 text-gray-400 dark:text-gray-500">每帧时长 ms</span><input aria-label="画廊 GIF 每帧时长" type="number" min={GIF_FRAME_DURATION_RANGE.min} max={GIF_FRAME_DURATION_RANGE.max} step={10} value={params.frame_duration_ms ?? ''} placeholder="200" onChange={(e) => setParams({ frame_duration_ms: Number.isNaN(e.target.valueAsNumber) ? null : Math.min(GIF_FRAME_DURATION_RANGE.max, Math.max(GIF_FRAME_DURATION_RANGE.min, Math.round(e.target.valueAsNumber / 10) * 10)) })} className={`${selectClass} w-full min-w-0`} /></label>
+      </>}
       {showTransparentOutputControl ? (
         <label
           className="relative flex flex-col gap-0.5"

@@ -76,8 +76,10 @@ import { IMAGE_FETCH_CORS_HINT, isHttpUrl } from './lib/imageApiShared'
 import { getFalErrorMessage, getFalQueuedImageResult } from './lib/falAiImageApi'
 import { getCustomQueuedImageResult } from './lib/openaiCompatibleImageApi'
 import { validateMaskMatchesImage } from './lib/canvasImage'
+import { persistTaskInputImages, toReferenceImage } from './lib/inputImages'
 import { orderInputImagesForMask } from './lib/mask'
-import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
+import { getChangedParams, normalizeParamsForSettings, supportsTransparentOutput } from './lib/paramCompatibility'
+import { isVectorOrAnimatedFormat } from './lib/imageModels'
 import { recordProviderSizeObservation } from './lib/providerCapability'
 import { runWithConcurrency, splitBatchPrompts } from './lib/batchPrompts'
 import { buildNativeTransparentPrompt, buildTransparentPrompt, createTransparentOutputMeta, getTransparentRequestParams } from './lib/transparentImage'
@@ -547,6 +549,8 @@ interface AppState {
   inputImages: InputImage[]
   addInputImage: (img: InputImage) => void
   replaceInputImage: (idx: number, img: InputImage) => void
+  /** 设置或清除参考图上的 markup 标注层 */
+  setInputImageMarkup: (imageId: string, markupImageId: string | undefined) => void
   removeInputImage: (idx: number) => void
   clearInputImages: () => void
   setInputImages: (imgs: InputImage[], options?: { equivalentImageIds?: Record<string, string> }) => void
@@ -743,9 +747,9 @@ interface AppState {
 
 function isImageReferencedByState(state: AppState, imageId: string) {
   if (state.promptReverseSource?.imageId === imageId) return true
-  if (state.inputImages.some((img) => img.id === imageId)) return true
-  if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId)) return true
-    if (Object.values(state.sceneDrafts).some((draft) => draft?.inputImageIds.includes(imageId))) return true
+  if (state.inputImages.some((img) => img.id === imageId || img.markupImageId === imageId)) return true
+  if (state.galleryInputDraft?.inputImages.some((img) => img.id === imageId || img.markupImageId === imageId)) return true
+    if (Object.values(state.sceneDrafts).some((draft) => draft?.inputImageIds.includes(imageId) || Object.values(draft?.inputMarkupImageIds ?? {}).includes(imageId))) return true
     if (getPrivacySnapshotImageIds(state.privacyMode).includes(imageId)) return true
     return state.tasks.some((task) =>
     task.inputImageIds.includes(imageId) ||
@@ -755,7 +759,8 @@ function isImageReferencedByState(state: AppState, imageId: string) {
     task.originalInputImageIds?.includes(imageId) ||
     task.streamPartialImageIds?.includes(imageId) ||
     task.maskTargetImageId === imageId ||
-    task.maskImageId === imageId
+    task.maskImageId === imageId ||
+    task.markupImageId === imageId
   )
 }
 
@@ -981,20 +986,38 @@ export const useStore = create<AppState>()(
           return syncActiveInputDraft(s, { inputImages: [...s.inputImages, img] })
         }),
       replaceInputImage: (idx, img) => {
-        let removedImageId: string | null = null
+        let removed = null as InputImage | null
         set((s) => {
           if (idx < 0 || idx >= s.inputImages.length) return s
           const previous = s.inputImages[idx]
           if (!previous || previous.id === img.id) return s
           if (s.inputImages.some((item, itemIdx) => itemIdx !== idx && item.id === img.id)) return s
-          removedImageId = previous.id
+          removed = previous
           const inputImages = s.inputImages.map((item, itemIdx) => itemIdx === idx ? img : item)
           return syncActiveInputDraft(s, updateInputDraftImages(s, inputImages, {
             equivalentImageIds: { [previous.id]: img.id },
             clearMissingMask: previous.id === s.maskDraft?.targetImageId,
           }))
         })
-        if (removedImageId) void deleteImageIfUnreferenced(removedImageId)
+        // 换了图片后旧标注对不上新图，随旧图一起清理
+        for (const id of [removed?.id, removed?.markupImageId]) {
+          if (id) void deleteImageIfUnreferenced(id)
+        }
+      },
+      setInputImageMarkup: (imageId, markupImageId) => {
+        let previousMarkupId: string | undefined
+        set((s) => {
+          const target = s.inputImages.find((img) => img.id === imageId)
+          if (!target || target.markupImageId === markupImageId) return s
+          previousMarkupId = target.markupImageId
+          const inputImages = s.inputImages.map((img) => {
+            if (img.id !== imageId) return img
+            const { markupImageId: _previous, ...rest } = img
+            return markupImageId ? { ...rest, markupImageId } : rest
+          })
+          return syncActiveInputDraft(s, { inputImages })
+        })
+        if (previousMarkupId) void deleteImageIfUnreferenced(previousMarkupId)
       },
       removeInputImage: (idx) =>
         set((s) => {
@@ -1191,6 +1214,7 @@ export const useStore = create<AppState>()(
             prompt: state.prompt,
             params: { ...state.params },
             inputImageIds: state.inputImages.map((img) => img.id),
+            ...(state.inputImages.some((image) => image.markupImageId) ? { inputMarkupImageIds: Object.fromEntries(state.inputImages.filter((image) => image.markupImageId).map((image) => [image.id, image.markupImageId!])) } : {}),
           }
           sceneDraftImageMemo.set(previousScene, state.inputImages)
         }
@@ -1205,7 +1229,7 @@ export const useStore = create<AppState>()(
         } else {
           const draft = sceneDrafts[scene]
           // 进入非 skill 场景：有草稿整体恢复；首次进入 prompt/图片置空、参数以场景 defaults 初始化。
-          restoredImages = draft ? resolveSceneDraftImages(scene, draft.inputImageIds) : []
+          restoredImages = draft ? resolveSceneDraftImages(scene, draft.inputImageIds, draft.inputMarkupImageIds) : []
           const incomingImageIds = new Set(restoredImages.map((img) => img.id))
           inputPatch = syncActiveInputDraft(state, {
             prompt: draft?.prompt ?? '',
@@ -2003,9 +2027,9 @@ function usesConcurrentImageRequests(settings: AppSettings, profile: ApiProfile,
   if (n <= 1) return false
   if (profile.provider === 'openai') {
     if (profile.apiMode === 'responses') return true
-    return profile.apiMode === 'images' && (profile.codexCli || profile.streamImages)
+    return profile.apiMode === 'images' && (profile.codexCli || params.output_format === 'svg' || (profile.streamImages && params.output_format !== 'gif'))
   }
-  return profile.provider !== 'fal' && profile.codexCli && !isAsyncCustomProviderTask(settings, profile.provider, hasInputImages)
+  return profile.provider !== 'fal' && (profile.codexCli || params.output_format === 'svg') && !isAsyncCustomProviderTask(settings, profile.provider, hasInputImages)
 }
 
 function scheduleOpenAIWatchdog(taskId: string, timeoutSeconds: number, profile?: TimeoutStreamingHintProfile | null, startedAtMs?: number) {
@@ -2110,7 +2134,7 @@ export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiP
  * retryTask 的打点与 getSceneImageApiProfile 同源解析（此处为同构断言依据）。
  */
 function getSceneOverriddenTaskProfile(settings: AppSettings, task: TaskRecord, taskProfile: ApiProfile): ApiProfile {
-  if (task.params.output_format === 'gif') return taskProfile
+  if (task.params.output_format === 'gif' && task.params.gif) return taskProfile
   if (task.sceneId == null) return taskProfile
   const normalized = normalizeSettings(settings)
   if (normalized.scenes[task.sceneId].imageProfileId !== taskProfile.id) return taskProfile
@@ -2451,9 +2475,9 @@ export async function initStore() {
   const state = useStore.getState()
   const persistedInputImages = state.inputImages
   const galleryInputDraft = state.galleryInputDraft
-  for (const img of persistedInputImages) referencedIds.add(img.id)
+  for (const img of persistedInputImages) addInputImageReferencedIds(referencedIds, img)
   if (galleryInputDraft) {
-    for (const img of galleryInputDraft.inputImages) referencedIds.add(img.id)
+    for (const img of galleryInputDraft.inputImages) addInputImageReferencedIds(referencedIds, img)
   }
   // 其他场景的草稿仍引用其输入图：草稿隔离后这些图不属于孤儿
   addSceneDraftReferencedImageIds(referencedIds, state.sceneDrafts)
@@ -2674,10 +2698,9 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   }
 
   // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
+  let taskInputImages = orderedInputImages
   try {
-    for (const img of orderedInputImages) {
-      await storeImage(img.dataUrl)
-    }
+    taskInputImages = await persistTaskInputImages(orderedInputImages, true)
   } catch (err) {
     console.error('保存参考图失败', err)
     endBatch(batchId)
@@ -2689,7 +2712,12 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     hasInputImages: orderedInputImages.length > 0,
     preserveExactSizeIntent: true,
   })
-  const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
+  if (orderedInputImages.length > 0 && normalizedParams.output_format === 'svg') {
+    endBatch(batchId)
+    showToast('SVG 只能用于文生图，请移除参考图或切换输出格式', 'error')
+    return []
+  }
+  const shouldUseTransparentOutput = normalizedParams.transparent_output && supportsTransparentOutput(requestSettings, activeProfile, normalizedParams.output_format)
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
     : { ...normalizedParams, transparent_output: false }
@@ -2698,14 +2726,15 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   // 预处理输入图是控画幅的主力，详见 docs/portrait-general-skill-optimization-plan-2026-09-11.md T2）。
   // 仅「有输入图 + size 为具体尺寸」时执行；带遮罩的任务跳过（遮罩坐标绑定原图像素）。
   // 多提示词批量时预处理结果对每条提示词复用（上游语义：参考图和参数对每条提示词都生效）。
-  const preprocessTarget = orderedInputImages.length > 0 && !maskDraft && taskParams.size !== 'auto'
+  // 标注层与原图坐标绑定，和遮罩一样不能单独裁切原图。
+  const preprocessTarget = orderedInputImages.length > 0 && !maskDraft && !orderedInputImages.some((image) => image.markupImageId) && !isVectorOrAnimatedFormat(taskParams.output_format) && taskParams.size !== 'auto'
     ? parseImageSize(taskParams.size)
     : null
   let preprocessResult: Awaited<ReturnType<typeof preprocessInputImagesForTarget>> | null = null
   let preprocessFailed = false
   if (preprocessTarget) {
     try {
-      preprocessResult = await preprocessInputImagesForTarget(orderedInputImages, preprocessTarget, taskParams.input_ratio_policy)
+      preprocessResult = await preprocessInputImagesForTarget(taskInputImages, preprocessTarget, taskParams.input_ratio_policy)
     } catch (err) {
       // 预处理失败（解码/canvas/toBlob 等本地环节）不阻断提交：回退发送原图，
       // 任务记录 policy='none' + failed 标记，并在任务提交后 toast 提示。
@@ -2717,7 +2746,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       }
     }
   }
-  let inputImageIds = orderedInputImages.map((i) => i.id)
+  let inputImageIds = taskInputImages.map((i) => i.id)
   let originalInputImageIds: string[] | undefined
   let inputPreprocess: TaskRecord['inputPreprocess']
   if (preprocessResult) {
@@ -2751,7 +2780,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     // 收藏夹自动收藏（上游 v0.8.4）
     const saveToFavorite = normalizedSettings.saveTasksToActiveFavoriteCollection
   const startTask = async (taskPrompt: string) => {
-    const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
+    const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local' && !isVectorOrAnimatedFormat(taskParams.output_format)
       ? createTransparentOutputMeta(taskPrompt)
       : null
     const state = useStore.getState()
@@ -2765,7 +2794,6 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       })
       : null
     const task: TaskRecord = {
-      ...favoritePatch,
       id: genId(),
       storageGeneration: taskStorageGeneration,
       prompt: taskPrompt,
@@ -2776,6 +2804,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       apiMode: activeProfile.apiMode,
       apiModel: activeProfile.model,
       inputImageIds,
+      markupImageId: taskInputImages[0]?.markupImageId ?? null,
       maskTargetImageId,
       maskImageId,
       inputPreprocess,
@@ -2897,14 +2926,20 @@ export function stopBatchPrompts() {
   useStore.getState().showToast(`已停止批量提交，共提交 ${progress.started} / ${progress.total} 条，已开始的任务会继续完成`, 'info')
 }
 
+function addInputImageReferencedIds(target: Set<string>, image: InputImage) {
+  target.add(image.id)
+  if (image.markupImageId) target.add(image.markupImageId)
+}
+
 function addInputDraftReferencedImageIds(target: Set<string>, draft: AgentInputDraft | null) {
   if (!draft) return
-  for (const img of draft.inputImages) target.add(img.id)
+  for (const img of draft.inputImages) addInputImageReferencedIds(target, img)
 }
 
 function addTaskReferencedImageIds(target: Set<string>, task: TaskRecord) {
   for (const id of task.inputImageIds || []) target.add(id)
   if (task.maskImageId) target.add(task.maskImageId)
+  if (task.markupImageId) target.add(task.markupImageId)
   for (const id of task.originalInputImageIds || []) {
     if (id) target.add(id)
   }
@@ -2927,7 +2962,7 @@ async function deleteUnreferencedImageIds(imageIds: Iterable<string>) {
   for (const task of tasks) addTaskReferencedImageIds(stillUsed, task)
   addInputDraftReferencedImageIds(stillUsed, galleryInputDraft)
   addSceneDraftReferencedImageIds(stillUsed, sceneDrafts)
-  for (const img of inputImages) stillUsed.add(img.id)
+  for (const img of inputImages) addInputImageReferencedIds(stillUsed, img)
 
   for (const imgId of candidates) {
     if (stillUsed.has(imgId)) continue
@@ -3041,6 +3076,8 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       maskDataUrl = await ensureImageCached(task.maskImageId)
       if (!maskDataUrl) throw new Error('遮罩图片已不存在')
     }
+    const markupDataUrl = task.markupImageId ? await ensureImageCached(task.markupImageId) : undefined
+    if (task.markupImageId && !markupDataUrl) throw new Error('标注图片已不存在')
 
     // 原生透明：background 参数照发（官方后端按参数出 alpha）；部分后端不读
     // 该参数但遵循提示词意图，因此叠加透明指令，两类后端都能直出真透明。
@@ -3073,6 +3110,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
       inputImageDataUrls: inputDataUrls,
       inputImageUrls: task.inputImageIds.map((id) => useStore.getState().imageSourceUrls[id] ?? null),
       maskDataUrl,
+      markupDataUrl,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
       onFalRequestEnqueued: (request) => {
         if (taskExecutions.get(taskId) !== execution) return
@@ -3117,7 +3155,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     // + openai 非 codexCli 链路（编辑链路输出画幅锁定输入图尺寸，观测会被污染）。
     // 必须用 rawSize：outputImageSizes 是 exact_size 本地放大/比例校正之后的
     // 交付尺寸，用它会把「provider 压图」误判成「大尺寸生效」（对抗审查场景3）。
-    if (task.params.output_format !== 'gif' && taskProvider === 'openai' && !executionProfile.codexCli && inputDataUrls.length === 0) {
+    if (!isVectorOrAnimatedFormat(task.params.output_format) && taskProvider === 'openai' && !executionProfile.codexCli && inputDataUrls.length === 0) {
       const requestedSize = parseImageSize(providerParams.size)
       const observedSize = outputRawImageSizes.find(
         (size) => typeof size.width === 'number' && typeof size.height === 'number',
@@ -3408,9 +3446,9 @@ const sceneDraftImageMemo = new Map<SceneDraftSceneId, InputImage[]>()
 let sceneDraftHydrationToken = 0
 
 /** 草稿输入图 id → 输入图对象：优先用同会话 memo（有预览 dataUrl），跨刷新时占位 dataUrl 空串待水合 */
-function resolveSceneDraftImages(scene: SceneDraftSceneId, inputImageIds: string[]): InputImage[] {
+function resolveSceneDraftImages(scene: SceneDraftSceneId, inputImageIds: string[], markupIds: Record<string, string> = {}): InputImage[] {
   const remembered = sceneDraftImageMemo.get(scene) ?? []
-  return inputImageIds.map((id) => remembered.find((img) => img.id === id) ?? { id, dataUrl: '' })
+  return inputImageIds.map((id) => remembered.find((img) => img.id === id) ?? { id, dataUrl: '', ...(markupIds[id] ? { markupImageId: markupIds[id] } : {}) })
 }
 
 /** 首次进入场景时以 DEFAULT_PARAMS 为底、按场景 defaults 覆盖（ratio/tier → size；透明开关）。
@@ -3470,6 +3508,7 @@ function syncActiveSceneDraftFromGlobalInput() {
         prompt,
         params: { ...params },
         inputImageIds: inputImages.map((img) => img.id),
+        ...(inputImages.some((image) => image.markupImageId) ? { inputMarkupImageIds: Object.fromEntries(inputImages.filter((image) => image.markupImageId).map((image) => [image.id, image.markupImageId!])) } : {}),
       },
     },
   })
@@ -3480,6 +3519,7 @@ function syncActiveSceneDraftFromGlobalInput() {
 function addSceneDraftReferencedImageIds(target: Set<string>, drafts: SceneDrafts) {
   for (const draft of Object.values(drafts)) {
     for (const id of draft?.inputImageIds ?? []) target.add(id)
+    for (const id of Object.values(draft?.inputMarkupImageIds ?? {})) target.add(id)
   }
 }
 
@@ -4101,7 +4141,7 @@ export async function retryTask(task: TaskRecord) {
   // 覆盖重试保留任务原场景溯源，打点必须与任务场景同源解析（执行链
   // getSceneOverriddenTaskProfile 会按 task.sceneId 叠加场景覆盖，打点错场景
   // 会让 provider 标签/错误提示/断线恢复解析全部错位）；新建重试用当前场景。
-  const activeProfile = source.params.output_format === 'gif'
+  const activeProfile = source.params.output_format === 'gif' && source.params.gif
     ? getTaskApiProfile(settings, source)
     : overwrite && source.sceneId
     ? getSceneImageApiProfile(settings, source.sceneId)
@@ -4112,11 +4152,11 @@ export async function retryTask(task: TaskRecord) {
     hasInputImages: source.inputImageIds.length > 0,
     preserveExactSizeIntent: true,
   })
-  const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
+  const shouldUseTransparentOutput = normalizedParams.transparent_output && supportsTransparentOutput(requestSettings, activeProfile, normalizedParams.output_format)
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
     : { ...normalizedParams, transparent_output: false }
-  const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local'
+  const transparentMeta = taskParams.transparent_output && activeProfile.transparentBackgroundMethod === 'local' && !isVectorOrAnimatedFormat(taskParams.output_format)
     ? createTransparentOutputMeta(source.prompt.trim())
     : null
   const taskId = overwrite ? source.id : genId()
@@ -4139,6 +4179,7 @@ export async function retryTask(task: TaskRecord) {
     inputImageIds: [...source.inputImageIds],
     maskTargetImageId: source.maskTargetImageId ?? null,
     maskImageId: source.maskImageId ?? null,
+    markupImageId: source.markupImageId ?? null,
     inputPreprocess: source.inputPreprocess,
     originalInputImageIds: source.originalInputImageIds ? [...source.originalInputImageIds] : undefined,
     transparentOutput: transparentMeta?.transparentOutput,
@@ -4170,7 +4211,7 @@ export async function retryTask(task: TaskRecord) {
     status: 'running',
     error: null,
     // 覆盖重试保留任务原始场景溯源；新建重试记录当前场景。
-    sceneId: source.params.output_format === 'gif' ? 'sticker' : overwrite ? source.sceneId : settings.activeScene,
+    sceneId: source.params.output_format === 'gif' && source.params.gif ? 'sticker' : overwrite ? source.sceneId : settings.activeScene,
     createdAt: overwrite ? source.createdAt : startedAt,
     startedAt,
     finishedAt: null,
@@ -4245,9 +4286,9 @@ export async function reuseConfig(task: TaskRecord) {
       const storedImage = await getImage(imgId)
       const dataUrl = storedImage?.dataUrl ?? await ensureImageCached(imgId)
       if (dataUrl) {
+        const reference = await toReferenceImage(imgId, dataUrl)
         loaded.push({
-          id: imgId,
-          dataUrl,
+          ...reference,
           ...(storedImage?.width ? { width: storedImage.width } : {}),
           ...(storedImage?.height ? { height: storedImage.height } : {}),
         })
@@ -4269,6 +4310,7 @@ export async function reuseConfig(task: TaskRecord) {
   if (!imgs.length) {
     imgs = await loadInputImagesByIds(task.inputImageIds)
   }
+  if (task.markupImageId && imgs[0]) imgs[0] = { ...imgs[0], markupImageId: task.markupImageId }
 
   setParams(normalizeParamsForSettings(restoredParams, paramsSettings, {
     hasInputImages: imgs.length > 0,
@@ -4571,6 +4613,7 @@ function collectProtectedImageIds(tasks: TaskRecord[]): Set<string> {
     for (const id of task.outputImages ?? []) protectedIds.add(id)
     for (const id of task.inputImageIds ?? []) protectedIds.add(id)
     if (task.maskImageId) protectedIds.add(task.maskImageId)
+    if (task.markupImageId) protectedIds.add(task.markupImageId)
   }
   return protectedIds
 }

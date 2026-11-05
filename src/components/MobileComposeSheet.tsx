@@ -5,6 +5,7 @@ import { useMobileSheet } from '../hooks/useMobileSheet'
 import { createInputImageFromFile, useStore } from '../store'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
 import MobileMoreParamsSheet from './MobileMoreParamsSheet'
+import { supportsExtendedQuality } from '../lib/imageModels'
 
 // SizePickerModal 已是独立组件；懒加载以匹配桌面 InputBar 的用法。
 const SizePickerModal = lazy(() => import('./SizePickerModal'))
@@ -22,7 +23,7 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
     submitCurrentMode, hasSubmitApiConfig, canSubmit,
     handleFiles, atImageLimit, uploadImageTooltipText,
     applyAsset4KOriginalRatioPreset,
-    isFalTextToImage, outputImageLimit,
+    isFalTextToImage, outputImageLimit, activeProfile,
   } = composer
   const removeInputImage = useStore((s) => s.removeInputImage)
   const setShowSettings = useStore((s) => s.setShowSettings)
@@ -119,7 +120,7 @@ export default function MobileComposeSheet({ open, onClose }: { open: boolean; o
               <Chip label="质量" value={qualityLabel(params.quality)} onClick={() => setOpenMenu(openMenu === 'quality' ? 'none' : 'quality')} active={openMenu === 'quality'} />
               {openMenu === 'quality' && (
                 <ChipMenu onClose={() => setOpenMenu('none')}>
-                  {(['auto', 'max', 'xhigh', 'high', 'medium', 'low'] as const).map((q) => (
+                  {(['auto', 'max', 'xhigh', 'high', 'medium', 'low'] as const).filter((q) => (q !== 'max' && q !== 'xhigh') || supportsExtendedQuality(activeProfile)).map((q) => (
                     <ChipMenuItem key={q} active={params.quality === q} onClick={() => { setParams({ quality: q }); setOpenMenu('none') }}>
                       {qualityLabel(q)}
                     </ChipMenuItem>

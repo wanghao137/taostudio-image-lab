@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react'
 import { useImageComposer } from '../hooks/useImageComposer'
 import { useMobileSheet } from '../hooks/useMobileSheet'
+import { GIF_FRAME_COUNT_RANGE, GIF_FRAME_DURATION_RANGE, IMAGE_COMPLEXITIES } from '../types'
+import { isVectorOrAnimatedFormat, supportsGptImage26Params } from '../lib/imageModels'
 
 /**
  * 移动端二级参数 sheet（格式 / 透明 / 审核 / 精确尺寸）。
@@ -10,6 +12,7 @@ export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean
   const {
     params, setParams,
     inputImages,
+    activeProfile,
     transparentOutputEnabled, showTransparentOutputControl,
     exactSizeEnabled, exactSizeDisabled,
     moderationDisabled,
@@ -19,6 +22,7 @@ export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean
   if (!open) return null
 
   const inputRatioPolicy = params.input_ratio_policy ?? 'auto'
+  const supports26 = supportsGptImage26Params(activeProfile)
   const showInputRatioPolicy = inputImages.length > 0 && params.size !== 'auto'
   const inputRatioDescriptions: Record<string, string> = {
     auto: '输入图比例与目标偏差大于 2% 时自动裁切，否则保持原图。',
@@ -45,10 +49,20 @@ export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean
         <Row label="格式">
           <Seg
             value={params.output_format}
-            options={[['png', 'PNG'], ['jpeg', 'JPG'], ['webp', 'WebP']]}
-            onChange={(v) => setParams({ output_format: v as typeof params.output_format })}
+            options={[
+              ['png', 'PNG'], ['jpeg', 'JPG'], ['webp', 'WebP'],
+              ...(supports26 ? [['gif', 'GIF'] as [string, string]] : []),
+              ...(supports26 && activeProfile.provider !== 'fal' && !inputImages.length ? [['svg', 'SVG'] as [string, string]] : []),
+            ]}
+            onChange={(v) => setParams({ output_format: v as typeof params.output_format, gif: undefined, ...(isVectorOrAnimatedFormat(v) ? { exact_size: false, output_compression: null } : {}), ...(v === 'jpeg' ? { transparent_output: false } : {}) })}
           />
         </Row>
+
+        {supports26 && <Row label="复杂度"><Seg value={params.complexity ?? 'auto'} options={IMAGE_COMPLEXITIES.map((value) => [value, value])} onChange={(value) => setParams({ complexity: value as typeof params.complexity })} /></Row>}
+        {supports26 && params.output_format === 'gif' && <>
+          <Row label="GIF 帧数"><input aria-label="手机 GIF 帧数" type="number" min={GIF_FRAME_COUNT_RANGE.min} max={GIF_FRAME_COUNT_RANGE.max} step={1} value={params.frame_count ?? ''} placeholder="9" onChange={(e) => setParams({ frame_count: Number.isNaN(e.target.valueAsNumber) ? null : Math.min(GIF_FRAME_COUNT_RANGE.max, Math.max(GIF_FRAME_COUNT_RANGE.min, Math.round(e.target.valueAsNumber))) })} className="w-28 rounded-lg bg-stone-100 px-3 py-2 text-sm dark:bg-white/5" /></Row>
+          <Row label="每帧时长 ms"><input aria-label="手机 GIF 每帧时长" type="number" min={GIF_FRAME_DURATION_RANGE.min} max={GIF_FRAME_DURATION_RANGE.max} step={10} value={params.frame_duration_ms ?? ''} placeholder="200" onChange={(e) => setParams({ frame_duration_ms: Number.isNaN(e.target.valueAsNumber) ? null : Math.min(GIF_FRAME_DURATION_RANGE.max, Math.max(GIF_FRAME_DURATION_RANGE.min, Math.round(e.target.valueAsNumber / 10) * 10)) })} className="w-28 rounded-lg bg-stone-100 px-3 py-2 text-sm dark:bg-white/5" /></Row>
+        </>}
 
         {showTransparentOutputControl && (
           <Row label="透明背景">
@@ -93,15 +107,15 @@ export default function MobileMoreParamsSheet({ open, onClose }: { open: boolean
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-center justify-between border-b border-stone-100 py-3 dark:border-white/5">
-      <span className="text-sm text-stone-700 dark:text-stone-200">{label}</span>
+    <div className="flex min-w-0 items-center justify-between gap-3 border-b border-stone-100 py-3 dark:border-white/5">
+      <span className="shrink-0 text-sm text-stone-700 dark:text-stone-200">{label}</span>
       {children}
     </div>
   )
 }
 function Seg({ value, options, onChange }: { value: string; options: [string, string][]; onChange: (v: string) => void }) {
   return (
-    <div className="flex gap-1 rounded-lg bg-stone-100 p-0.5 dark:bg-white/5">
+    <div className="flex min-w-0 flex-wrap justify-end gap-1 rounded-lg bg-stone-100 p-0.5 dark:bg-white/5">
       {options.map(([v, l]) => (
         <button key={v} onClick={() => onChange(v)} className={`rounded-md px-3 py-1 text-xs ${value === v ? 'bg-white text-stone-900 shadow dark:bg-white/15 dark:text-stone-50' : 'text-stone-500'}`}>{l}</button>
       ))}

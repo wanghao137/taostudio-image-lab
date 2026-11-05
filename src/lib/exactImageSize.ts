@@ -21,6 +21,7 @@ const OUTPUT_MIME_BY_FORMAT: Record<TaskParams['output_format'], string> = {
   jpeg: 'image/jpeg',
   webp: 'image/webp',
   gif: 'image/gif',
+  svg: 'image/svg+xml',
 }
 
 export interface ExactImageResizeResult {

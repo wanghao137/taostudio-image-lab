@@ -12,6 +12,7 @@ import { removeKeyedBackgroundFromDataUrl } from './transparentImage'
 import { getInputRatioDeviation } from './inputPreprocess'
 import { resolveExactDeliverySize } from './size'
 import { readGifMetadata } from './gif'
+import { isVectorOrAnimatedFormat } from './imageModels'
 import type { ExactSizeTransformRecord } from '../types'
 
 /** 第二层兜底：非 exact_size 任务返回图比例与请求比例的相对偏差阈值 */
@@ -34,12 +35,12 @@ export async function storeGeneratedOutputImage(
   let ratioCorrected = false
   let persistFailed = false
   if (params.output_format === 'gif') readGifMetadata(dataUrl)
-  const isGif = params.output_format === 'gif'
-  const targetSize = isGif ? null : getExactImageSizeTarget(params)
+  const preserveOriginal = isVectorOrAnimatedFormat(params.output_format)
+  const targetSize = preserveOriginal ? null : getExactImageSizeTarget(params)
   // exact_size 走既有无条件重采样管线；非 exact_size 且请求了具体尺寸时，
   // 仅当返回比例偏差 >5% 才做本地 cover 校正（比例已匹配的返回不动）。
   // 校正目标同样经 resolveExactDeliverySize 解析到预设精确比例（P0-B）。
-  const ratioCorrectionTarget = !isGif && !targetSize && options.ratioAutoCorrect && params.size !== 'auto'
+  const ratioCorrectionTarget = !preserveOriginal && !targetSize && options.ratioAutoCorrect && params.size !== 'auto'
     ? resolveExactDeliverySize(params.size)
     : null
 
@@ -161,7 +162,7 @@ export async function storeTaskOutputImages(
   try {
     for (const dataUrl of images) {
       let outputDataUrl = dataUrl
-      if (task.transparentOutput && task.params.output_format !== 'gif') {
+      if (task.transparentOutput && !isVectorOrAnimatedFormat(task.params.output_format)) {
         let originalId: string
         let originalSize: { width?: number; height?: number }
         try {

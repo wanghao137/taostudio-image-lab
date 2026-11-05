@@ -22,6 +22,7 @@ function normalizeInputImages(value: unknown): InputImage[] {
       return {
         id: img.id,
         dataUrl: typeof img.dataUrl === 'string' ? img.dataUrl : '',
+        ...(typeof img.markupImageId === 'string' && img.markupImageId ? { markupImageId: img.markupImageId } : {}),
         ...(width ? { width } : {}),
         ...(height ? { height } : {}),
       }
@@ -37,6 +38,7 @@ export function getPersistableInputImage(img: InputImage): InputImage {
   return {
     id: img.id,
     dataUrl: '',
+    ...(img.markupImageId ? { markupImageId: img.markupImageId } : {}),
     ...(img.width ? { width: img.width } : {}),
     ...(img.height ? { height: img.height } : {}),
   }

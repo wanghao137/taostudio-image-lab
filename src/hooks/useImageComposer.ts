@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useStore, submitTask, addImageFromFile } from '../store'
 import { DEFAULT_PARAMS } from '../types'
 import { getSceneImageApiProfile, normalizeSettings, resolveApiProfileModel } from '../lib/apiProfiles'
-import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
+import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings, supportsTransparentOutput } from '../lib/paramCompatibility'
+import { isVectorOrAnimatedFormat } from '../lib/imageModels'
 import { formatImageRatio, normalizeCodexCliImageSize, normalizeImageSize, type CommonImageRatio } from '../lib/size'
 import {
   ASSET_4K_RATIO_PRESETS,
@@ -80,21 +81,21 @@ export function useImageComposer() {
   // --- Capability flags ---
   const moderationDisabled = isFalProvider
   const transparentOutputAvailable = appMode === 'gallery'
-  const showTransparentOutputControl = transparentOutputAvailable && (params.output_format === 'png' || params.output_format === 'webp')
+  const showTransparentOutputControl = transparentOutputAvailable && supportsTransparentOutput(effectiveSettings, activeProfile, params.output_format)
   const transparentOutputEnabled = showTransparentOutputControl && params.transparent_output
-  const compressionDisabled = params.output_format === 'png' || isFalProvider
+  const compressionDisabled = params.output_format === 'png' || isVectorOrAnimatedFormat(params.output_format) || isFalProvider
   const outputImageLimit = getOutputImageLimitForSettings(effectiveSettings)
   const isFalTextToImage = isFalProvider && inputImages.length === 0
   const nDraftValue = Number(nInput)
   const effectiveNValue = Number.isNaN(nDraftValue) ? params.n : nDraftValue
-  const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && effectiveNValue > 1
+  const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && !isVectorOrAnimatedFormat(params.output_format) && effectiveNValue > 1
   const nLimitHintText = isFalProvider
     ? `fal.ai 最大请求数量为 ${outputImageLimit}`
     : `OpenAI 最大请求数量为 ${outputImageLimit}`
   const displaySize = isFalTextToImage && params.size === 'auto'
     ? DEFAULT_FAL_IMAGE_SIZE
     : (activeProfile.codexCli && !params.exact_size ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || DEFAULT_PARAMS.size
-  const exactSizeDisabled = params.size === 'auto'
+  const exactSizeDisabled = params.size === 'auto' || isVectorOrAnimatedFormat(params.output_format)
   const exactSizeEnabled = !exactSizeDisabled && params.exact_size
 
   // --- 4K 派生（依赖 isFalProvider/activeProfile/exactSizeEnabled/params/inputImages） ---

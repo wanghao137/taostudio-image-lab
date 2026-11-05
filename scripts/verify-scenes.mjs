@@ -23,6 +23,11 @@ fs.mkdirSync(screenshotDir, { recursive: true })
 const browser = await chromium.launch()
 const errors = []
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+await page.route('**/*', (route) => {
+  if (new URL(route.request().url()).pathname.endsWith('/announcements.json')) return route.fulfill({ contentType: 'application/json', body: '[]' })
+  if (route.request().resourceType() === 'font') return route.abort()
+  return route.continue()
+})
   // 本门的核心防线是 React 崩溃类错误（pageerror / “Maximum update depth”
   // / “getSnapshot should be cached” 等 console error）。浏览器网络层的
   // “Failed to load resource: ...”（如本机引擎 /v1/capabilities 探测在
@@ -44,7 +49,7 @@ try {
   await page.waitForFunction(() => document.body?.innerText.includes('TaoStudio 生图工作台'), undefined, { timeout: 60000 })
 
   // 检查点1: 桌面场景 Tab + 引擎在位；智能体 Tab 已不在主导航
-  for (const label of ['人像写真', '通用创作', '表情与头像', 'Skill 工坊', '引擎']) {
+  for (const label of ['人像写真', '通用创作', 'GIF 工作台', 'Skill 工坊', '引擎']) {
     if (!(await page.getByRole('button', { name: label, exact: true }).count())) fail(`桌面 Tab 缺失: ${label}`)
   }
   if (await page.getByRole('button', { name: '智能体', exact: true }).count()) fail('桌面仍存在智能体 Tab')
@@ -80,20 +85,21 @@ try {
   await page.getByRole('button', { name: '通用创作', exact: true }).first().click()
   await page.waitForTimeout(300)
 
-  // 检查点2b: 表情与头像专属工作台（sticker 场景已工坊化）：两分区 + 动作预设/网格/表情 chips
-  //（生成入口随画像可用性变化，不参与断言）
-  await page.getByRole('button', { name: '表情与头像', exact: true }).first().click()
+  // 自有 GIF 工作台：保留独立模型与 64 帧控制，不恢复旧精灵图入口。
+  await page.getByRole('button', { name: 'GIF 工作台', exact: true }).first().click()
   let bodySticker = ''
   for (let i = 0; i < 20; i++) {
     await page.waitForTimeout(250)
     bodySticker = await page.locator('body').innerText()
-    if (await page.getByRole('heading', { name: '表情与头像工作台' }).count()) break
+    if (await page.getByRole('heading', { name: 'GIF 工作台', exact: true }).count()) break
   }
-  if (!(await page.getByRole('heading', { name: '表情与头像工作台' }).count())) fail('表情工坊 lazy 视图未加载（「表情与头像工作台」标题缺失）')
-  for (const s of ['静态表情 / 头像快捷生成', '战斗动图工坊（Sprite GIF）', '开心大笑', '挥剑连斩', '4×4']) {
-    if (!bodySticker.includes(s)) fail(`表情工坊分区缺失: ${s}`)
+  if (!(await page.getByRole('heading', { name: 'GIF 工作台', exact: true }).count())) fail('GIF 工作台未加载')
+  for (const s of ['描述你的动画', '动画节奏', '动画预览', '最近的 GIF']) {
+    if (!bodySticker.includes(s)) fail(`GIF 工作台分区缺失: ${s}`)
   }
-  if (!(await page.getByRole('button', { name: '场景设置' }).count())) fail('表情工坊内场景设置齿轮缺失')
+  if (bodySticker.includes('战斗动图工坊（Sprite GIF）')) fail('旧精灵图首页入口被恢复')
+  if (await page.getByLabel('GIF 帧数', { exact: true }).getAttribute('max') !== '64') fail('自有 64 帧配置范围丢失')
+  if (!(await page.getByRole('button', { name: 'GIF 场景设置' }).count())) fail('GIF 场景设置齿轮缺失')
   await page.screenshot({ path: `${screenshotDir}/scene-smoke-sticker-workshop.png` })
   await page.getByRole('button', { name: '通用创作', exact: true }).first().click()
   await page.waitForTimeout(300)
@@ -145,7 +151,7 @@ try {
   await page.setViewportSize({ width: 375, height: 812 })
   await page.waitForTimeout(500)
   const bodyMobile = await page.locator('body').innerText()
-  for (const label of ['人像写真', '通用创作', '表情与头像', 'Skill 工坊', '引擎']) {
+  for (const label of ['人像写真', '通用创作', 'GIF 工作台', 'Skill 工坊', '引擎']) {
     if (!bodyMobile.includes(label)) fail(`移动端缺失: ${label}`)
   }
   await page.screenshot({ path: `${screenshotDir}/scene-smoke-mobile.png` })

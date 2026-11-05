@@ -105,6 +105,8 @@ export interface ApiProfile {
   streamImages?: boolean
   streamPartialImages?: number
   transparentBackgroundMethod: 'api' | 'local'
+  /** 生成 SVG 的文本模型，留空沿用接口默认配置。 */
+  svgModel?: string
   /** 请求尺寸收口开关：设为 true 表示服务商真实支持大尺寸原生输出，
    * 跳过 exact_size 大目标的请求尺寸收口（默认收口到 ~1.5MP 原生档）。 */
   nativeLargeOutput?: boolean
@@ -177,6 +179,8 @@ export interface SceneDraft {
   params: TaskParams
   /** 输入图只存 IndexedDB 引用 id：图片数据不进草稿，预览 dataUrl 在内存缓存/IndexedDB 按 id 找回 */
   inputImageIds: string[]
+  /** 输入图 id 到独立标注层 id 的映射，仅存在标注时保存。 */
+  inputMarkupImageIds?: Record<string, string>
 }
 
 export type SceneDrafts = Partial<Record<SceneDraftSceneId, SceneDraft>>
@@ -270,12 +274,20 @@ export interface AppSettings {
 /** 编辑任务输入图比例预处理策略 */
 export type InputRatioPolicy = 'auto' | 'crop' | 'outpaint' | 'off'
 
+export const OUTPUT_FORMATS = ['png', 'jpeg', 'webp', 'svg', 'gif'] as const
+export const IMAGE_COMPLEXITIES = ['auto', 'low', 'medium', 'high'] as const
+export const GIF_FRAME_COUNT_RANGE = { min: 2, max: 16 }
+export const GIF_FRAME_DURATION_RANGE = { min: 20, max: 2000 }
+
 export interface TaskParams {
   size: string
   exact_size: boolean
   quality: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-  output_format: 'png' | 'jpeg' | 'webp' | 'gif'
+  complexity: typeof IMAGE_COMPLEXITIES[number]
+  output_format: typeof OUTPUT_FORMATS[number]
   gif?: import('./lib/gif').GifOptions
+  frame_count: number | null
+  frame_duration_ms: number | null
   output_compression: number | null
   moderation: 'auto' | 'low'
   n: number
@@ -301,7 +313,10 @@ export const DEFAULT_PARAMS: TaskParams = {
   size: 'auto',
   exact_size: false,
   quality: 'auto',
+  complexity: 'auto',
   output_format: 'png',
+  frame_count: null,
+  frame_duration_ms: null,
   output_compression: null,
   moderation: 'low',
   n: 1,
@@ -372,6 +387,8 @@ export interface InputImage {
   id: string
   /** data URL，用于预览 */
   dataUrl: string
+  /** 独立保存的透明标注层，坐标与原图一致。 */
+  markupImageId?: string
   /** 原图宽度，用于按上传图比例推导目标尺寸 */
   width?: number
   /** 原图高度，用于按上传图比例推导目标尺寸 */
@@ -418,6 +435,7 @@ export interface ImageTaskLink {
 }
 
 export interface TaskRecord {
+  markupImageId?: string | null
   gifCompanionCount?: number
   animation?: import('./lib/gif').GifMetadata
   animations?: import('./lib/gif').GifMetadata[]

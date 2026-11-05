@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { strToU8, zipSync } from 'fflate'
 import { DEFAULT_PARAMS } from './types'
-import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, getCustomProviderDefinition, getSceneImageApiProfile, normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
+import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_IMAGES_MODEL, DEFAULT_RESPONSES_MODEL, DEFAULT_SETTINGS, getCustomProviderDefinition, getSceneImageApiProfile, normalizeSettings, switchApiProfileProvider } from './lib/apiProfiles'
 import type { AgentConversation, AppSettings, ExportData, SkillSummary, StoredImage, StoredImageThumbnail, TaskRecord } from './types'
 import { getSelectedImageMentionLabel } from './lib/promptImageMentions'
 import { hasActiveDataOperations, hasInterruptibleOperations, trackDataTransfer } from './lib/dataOperations'
@@ -366,9 +366,9 @@ vi.mock('./lib/exactImageSize', () => ({
     }
   }),
 }))
-vi.mock('./lib/canvasImage', () => ({
-  // store.ts 仅用 validateMaskMatchesImage（浏览器 canvas 校验，node 环境不可用）；
-  // mock 为 partial 让遮罩提交链在测试中可走通。
+vi.mock('./lib/canvasImage', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./lib/canvasImage')>(),
+  // 只替换需要浏览器 canvas 的遮罩校验，保留新加入的输入格式转换。
   validateMaskMatchesImage: vi.fn(async () => 'partial'),
 }))
 vi.mock('./lib/inputPreprocess', async (importOriginal) => {
@@ -2881,7 +2881,7 @@ describe('reused task API profile', () => {
     expect(getTaskApiProfile(useStore.getState().settings, sourceTask)).toMatchObject({
       id: profile.id,
       provider: 'provider-old',
-      model: 'gpt-image-2.5-flare',
+      model: DEFAULT_IMAGES_MODEL,
     })
   })
 

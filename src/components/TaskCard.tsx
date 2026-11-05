@@ -327,6 +327,8 @@ function TaskCard({
 
   const qualityDisplay = getParamDisplay(task, 'quality')
   const showQuality = task.params.quality !== 'auto' || qualityDisplay.isMismatch
+  // 旧任务记录没有 complexity；接口也不回传该字段
+  const showComplexity = Boolean(task.params.complexity) && task.params.complexity !== 'auto'
 
   const sizeDisplay = getParamDisplay(task, 'size')
   const showSize = task.params.size !== 'auto' || sizeDisplay.isMismatch
@@ -635,6 +637,14 @@ function TaskCard({
                   局部重绘
                 </span>
               )}
+              {task.markupImageId && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 text-xs flex-shrink-0">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="8" strokeWidth={2} />
+                  </svg>
+                  标注编辑
+                </span>
+              )}
               {/* Transparent background */}
               {showTransparentOutput && (
                 <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-xs flex-shrink-0">
@@ -652,6 +662,12 @@ function TaskCard({
                 <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-xs flex-shrink-0">
                   <span className="text-gray-400 dark:text-gray-500">质量</span>
                   {qualityDisplay.isMismatch ? <ActualValueBadge value={qualityDisplay.displayValue} className="px-1 rounded-sm" /> : <span className="text-gray-600 dark:text-gray-300">{qualityDisplay.displayValue}</span>}
+                </span>
+              )}
+              {showComplexity && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-xs flex-shrink-0">
+                  <span className="text-gray-400 dark:text-gray-500">复杂度</span>
+                  <span className="text-gray-600 dark:text-gray-300">{task.params.complexity}</span>
                 </span>
               )}
               {showSize && (
