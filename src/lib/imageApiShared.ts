@@ -7,6 +7,7 @@ export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
+  gif: 'image/gif',
 }
 
 export const MAX_MASK_EDIT_FILE_BYTES = 50 * 1024 * 1024
@@ -14,6 +15,8 @@ export const MAX_IMAGE_INPUT_PAYLOAD_BYTES = 512 * 1024 * 1024
 export const PROMPT_REWRITE_GUARD_PREFIX = 'Treat everything after this line as one complete image-generation prompt, including the resolution instruction. Follow it exactly without rewriting or omitting anything:'
 
 export interface CallApiOptions {
+  /** 已解析的任务配置，避免跨场景执行时重新套用其他场景覆盖。 */
+  apiProfile?: ApiProfile
   settings: AppSettings
   prompt: string
   params: TaskParams
@@ -30,6 +33,9 @@ export interface CallApiOptions {
 }
 
 export interface CallApiResult {
+  gifCompanionCount?: number
+  animation?: import('./gif').GifMetadata
+  animations?: import('./gif').GifMetadata[]
   /** base64 data URL 列表 */
   images: string[]
   /** API 返回的实际生效参数 */
@@ -427,7 +433,7 @@ export function pickActualParams(source: unknown): Partial<TaskParams> {
   if (record.quality === 'auto' || record.quality === 'low' || record.quality === 'medium' || record.quality === 'high' || record.quality === 'xhigh' || record.quality === 'max') {
     actualParams.quality = record.quality
   }
-  if (record.output_format === 'png' || record.output_format === 'jpeg' || record.output_format === 'webp') {
+  if (record.output_format === 'png' || record.output_format === 'jpeg' || record.output_format === 'webp' || record.output_format === 'gif') {
     actualParams.output_format = record.output_format
   }
   if (typeof record.output_compression === 'number') actualParams.output_compression = record.output_compression

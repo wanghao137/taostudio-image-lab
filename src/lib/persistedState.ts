@@ -1,5 +1,6 @@
 import type { AgentInputDraft, AppMode, AppSettings, FavoriteCollection, InputImage, MaskDraft, PresetConfig, PromptHistoryEntry, SceneDraft, SceneDraftSceneId, SceneDrafts, TaskParams } from '../types'
 import { normalizeSettings } from './apiProfiles'
+import { validateGifParams, type GifOptions } from './gif'
 import { clampSkillEntryCount, SKILL_ENTRY_COUNT_DEFAULT } from './skillWorkshop/expansion'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
 import { isHttpUrl } from './imageApiShared'
@@ -115,13 +116,13 @@ function normalizeStringArray(value: unknown, fallback: string[]) {
 
 function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
   if (!isRecord(value)) return fallback
-  return {
+  const result: TaskParams = {
     size: typeof value.size === 'string' ? value.size : fallback.size,
     exact_size: typeof value.exact_size === 'boolean' ? value.exact_size : fallback.exact_size,
     quality: value.quality === 'auto' || value.quality === 'low' || value.quality === 'medium' || value.quality === 'high' || value.quality === 'xhigh' || value.quality === 'max'
       ? value.quality
       : fallback.quality,
-    output_format: value.output_format === 'png' || value.output_format === 'jpeg' || value.output_format === 'webp' ? value.output_format : fallback.output_format,
+    output_format: value.output_format === 'png' || value.output_format === 'jpeg' || value.output_format === 'webp' || value.output_format === 'gif' ? value.output_format : fallback.output_format,
     output_compression: value.output_compression === null || (typeof value.output_compression === 'number' && Number.isFinite(value.output_compression))
       ? value.output_compression
       : fallback.output_compression,
@@ -132,6 +133,11 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
       ? value.input_ratio_policy
       : fallback.input_ratio_policy,
   }
+  if (result.output_format === 'gif') {
+    result.gif = isRecord(value.gif) ? value.gif as unknown as GifOptions : fallback.gif
+    try { validateGifParams(result) } catch { return { ...fallback } }
+  }
+  return result
 }
 
 /** Skill 扩写偏好归一：非法值回落默认（严格模式开、SKILL_ENTRY_COUNT_DEFAULT 条），

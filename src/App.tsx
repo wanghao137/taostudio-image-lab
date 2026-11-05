@@ -318,7 +318,7 @@ export default function App() {
       {TITLEBAR_HEIGHT > 0 && <TitleBar />}
       {isMobile ? (
         <MobileShell composeHidden={appMode === 'gallery' && (activeScene === 'skill' || activeScene === 'sticker')} onOpenCompose={() => setComposeOpen(true)}>
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? '表情与头像工作台' : '画廊'}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? 'GIF 工作台' : '画廊'}>
             {appMode === 'engine' ? (
               <>
                 <div className="safe-area-x">
@@ -337,7 +337,7 @@ export default function App() {
                 </Suspense>
               </div>
             ) : activeScene === 'sticker' ? (
-              // 表情与头像专属工作台：替代画廊块（最近生成在工作台内），镜像 skill 工坊分支
+              // GIF 工作台自带输入与历史。
               <div className="safe-area-x max-w-7xl mx-auto">
                 <Suspense fallback={<div className="min-h-[320px]" />}>
                   <StickerWorkshop onOpenSceneSettings={() => setSceneSettingsOpen(true)} />
@@ -363,7 +363,7 @@ export default function App() {
       ) : (
         <>
           <Header />
-          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? '表情与头像工作台' : '画廊'}>
+          <ErrorBoundary sectionLabel={appMode === 'engine' ? '引擎工作台' : activeScene === 'skill' ? 'Skill 工坊' : activeScene === 'sticker' ? 'GIF 工作台' : '画廊'}>
             {appMode === 'engine' ? (
               <Suspense fallback={<div className="min-h-[320px]" />}>
                 <EngineWorkspace />

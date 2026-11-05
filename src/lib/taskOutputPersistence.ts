@@ -11,6 +11,7 @@ import { getExactImageSizeTarget, resizeImageDataUrlToExactSize } from './exactI
 import { removeKeyedBackgroundFromDataUrl } from './transparentImage'
 import { getInputRatioDeviation } from './inputPreprocess'
 import { resolveExactDeliverySize } from './size'
+import { readGifMetadata } from './gif'
 import type { ExactSizeTransformRecord } from '../types'
 
 /** 第二层兜底：非 exact_size 任务返回图比例与请求比例的相对偏差阈值 */
@@ -32,11 +33,13 @@ export async function storeGeneratedOutputImage(
   let exactSizeTransform: ExactSizeTransformRecord | undefined
   let ratioCorrected = false
   let persistFailed = false
-  const targetSize = getExactImageSizeTarget(params)
+  if (params.output_format === 'gif') readGifMetadata(dataUrl)
+  const isGif = params.output_format === 'gif'
+  const targetSize = isGif ? null : getExactImageSizeTarget(params)
   // exact_size 走既有无条件重采样管线；非 exact_size 且请求了具体尺寸时，
   // 仅当返回比例偏差 >5% 才做本地 cover 校正（比例已匹配的返回不动）。
   // 校正目标同样经 resolveExactDeliverySize 解析到预设精确比例（P0-B）。
-  const ratioCorrectionTarget = !targetSize && options.ratioAutoCorrect && params.size !== 'auto'
+  const ratioCorrectionTarget = !isGif && !targetSize && options.ratioAutoCorrect && params.size !== 'auto'
     ? resolveExactDeliverySize(params.size)
     : null
 
@@ -57,7 +60,7 @@ export async function storeGeneratedOutputImage(
     }
   }
   storedImageIds.push(stored.id)
-  cacheImage(stored.id, outputDataUrl)
+  if (!persistFailed) cacheImage(stored.id, outputDataUrl)
 
   if (targetSize) {
     // exact_size：无条件重采样到目标像素（cover 裁切内建）
@@ -117,7 +120,7 @@ export async function storeGeneratedOutputImage(
       }
     }
     storedImageIds.push(storedOutput.id)
-    cacheImage(storedOutput.id, outputDataUrl)
+    if (!persistFailed) cacheImage(storedOutput.id, outputDataUrl)
   }
 
   return {
@@ -158,7 +161,7 @@ export async function storeTaskOutputImages(
   try {
     for (const dataUrl of images) {
       let outputDataUrl = dataUrl
-      if (task.transparentOutput) {
+      if (task.transparentOutput && task.params.output_format !== 'gif') {
         let originalId: string
         let originalSize: { width?: number; height?: number }
         try {

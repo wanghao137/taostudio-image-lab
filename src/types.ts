@@ -274,7 +274,8 @@ export interface TaskParams {
   size: string
   exact_size: boolean
   quality: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-  output_format: 'png' | 'jpeg' | 'webp'
+  output_format: 'png' | 'jpeg' | 'webp' | 'gif'
+  gif?: import('./lib/gif').GifOptions
   output_compression: number | null
   moderation: 'auto' | 'low'
   n: number
@@ -417,6 +418,9 @@ export interface ImageTaskLink {
 }
 
 export interface TaskRecord {
+  gifCompanionCount?: number
+  animation?: import('./lib/gif').GifMetadata
+  animations?: import('./lib/gif').GifMetadata[]
   id: string
   /** IndexedDB task generation. Writes from a generation cleared in another tab are rejected. */
   storageGeneration?: number

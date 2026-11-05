@@ -27,7 +27,7 @@ export const CANVAS_WORKSPACE_URL: string = 'https://canvas.taostudioai.com'
 export const SCENE_TABS: Array<{ id: SceneId; label: string }> = [
   { id: 'portrait', label: '人像写真' },
   { id: 'general', label: '通用创作' },
-  { id: 'sticker', label: '表情与头像' },
+  { id: 'sticker', label: 'GIF 工作台' },
   { id: 'skill', label: 'Skill 工坊' },
 ]
 const HelpModal = lazy(() => import('./HelpModal'))

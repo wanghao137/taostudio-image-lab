@@ -126,6 +126,7 @@ import { buildSpriteSheetPrompt, fetchSpriteSheet, processSpriteSheet } from './
 import { buildSpriteApngFrames, buildSpriteGifFrames, downloadBlob, downloadSpriteFramesZip, formatBlobSize, type SpriteExportSize } from './lib/stickerSplit/spriteExport'
 import { encodeGif } from './lib/stickerSplit/gifEncode'
 import { encodeApngFromCanvases } from './lib/stickerSplit/apng'
+import { getGifProfile, validateGifParams } from './lib/gif'
 import { apiFetch, FetchConnectError, isTauri } from './lib/platform'
 import {
   AUTO_SAVE_DIR_KEY,
@@ -2091,6 +2092,10 @@ export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiP
   if (!task.apiProfileId) return null
   const profile = normalized.profiles.find((item) => item.id === task.apiProfileId)
   // 任务记录的模型仍在配置的模型列表中时，沿用任务提交时的模型
+  if (profile && task.params.output_format === 'gif' && task.params.gif) {
+    const sceneProfile = getSceneImageApiProfile(settings, task.sceneId)
+    try { return getGifProfile(sceneProfile.id === profile.id ? sceneProfile : profile, task.params.gif.model) } catch { return null }
+  }
   return profile ? resolveApiProfileModel(profile, task.apiModel) : null
 }
 
@@ -2105,6 +2110,7 @@ export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiP
  * retryTask 的打点与 getSceneImageApiProfile 同源解析（此处为同构断言依据）。
  */
 function getSceneOverriddenTaskProfile(settings: AppSettings, task: TaskRecord, taskProfile: ApiProfile): ApiProfile {
+  if (task.params.output_format === 'gif') return taskProfile
   if (task.sceneId == null) return taskProfile
   const normalized = normalizeSettings(settings)
   if (normalized.scenes[task.sceneId].imageProfileId !== taskProfile.id) return taskProfile
@@ -2564,17 +2570,30 @@ export async function initStore() {
 }
 
 /** 提交新任务 */
-export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean; skillMeta?: { skillId: string; skillInput: string }; ignoreBatchPrompt?: boolean } = {}) {
+export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean; skillMeta?: { skillId: string; skillInput: string }; ignoreBatchPrompt?: boolean; gif?: { prompt: string; params: TaskParams } } = {}) {
   // 用户发起新生成：重置数据清除标志，确保新任务能正常写入。
   tasksCleared = false
   await refreshTaskStorageGeneration()
-  const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, reusedTaskApiModel, showToast, setConfirmDialog } =
+  const { settings, prompt: draftPrompt, inputImages: draftImages, maskDraft: draftMask, params: draftParams, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, reusedTaskApiModel, showToast, setConfirmDialog } =
     useStore.getState()
+  const prompt = options.gif?.prompt ?? draftPrompt
+  const params = options.gif?.params ?? draftParams
+  const inputImages = options.gif ? [] : draftImages
+  const maskDraft = options.gif ? null : draftMask
 
   const normalizedSettings = normalizeSettings(settings)
-  let activeProfile = getSceneImageApiProfile(settings)
+  let activeProfile = getSceneImageApiProfile(settings, options.gif ? 'sticker' : undefined)
+  if (options.gif) {
+    try {
+      validateGifParams(params)
+      activeProfile = getGifProfile(activeProfile, params.gif!.model)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'error')
+      return []
+    }
+  }
   let requestSettings = createSettingsForApiProfile(normalizedSettings, activeProfile)
-  if (normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
+  if (!options.gif && normalizedSettings.reuseTaskApiProfileTemporarily && (reusedTaskApiProfileId || reusedTaskApiProfileMissing)) {
     const reusedProfile = getReusedTaskApiProfile(normalizedSettings, reusedTaskApiProfileId, reusedTaskApiModel)
     if (!reusedProfile) {
       if (options.useCurrentApiProfileWhenReusedMissing) {
@@ -2610,7 +2629,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
 
     // 程序化逐条提交（Skill 工坊/表情工坊）不走批量管线：批量会使 submitTask 阻塞至
     // 每条任务完成，把循环退化为串行并产生成倍的批量开始/完成提示。
-    const batchPrompts = !options.ignoreBatchPrompt && normalizedSettings.showBatchPrompt && normalizedSettings.batchPromptEnabled
+    const batchPrompts = !options.gif && !options.ignoreBatchPrompt && normalizedSettings.showBatchPrompt && normalizedSettings.batchPromptEnabled
       ? splitBatchPrompts(prompt)
       : []
   if (useStore.getState().batchProgress) {
@@ -2721,7 +2740,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     }
   }
   const normalizedParamPatch = getChangedParams(params, taskParams)
-  if (Object.keys(normalizedParamPatch).length) {
+  if (!options.gif && Object.keys(normalizedParamPatch).length) {
     useStore.getState().setParams(normalizedParamPatch)
   }
 
@@ -2766,7 +2785,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
       outputImages: [],
       status: 'running',
       error: null,
-      sceneId: settings.activeScene,
+      sceneId: options.gif ? 'sticker' : settings.activeScene,
       // Skill 工坊溯源（generateFromSkillEntries 逐条目提交时携带）
       ...(options.skillMeta ? { skillId: options.skillMeta.skillId, skillInput: options.skillMeta.skillInput } : {}),
       createdAt: Date.now(),
@@ -2794,7 +2813,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     }
   }
 
-  if (settings.clearInputAfterSubmit) {
+  if (!options.gif && settings.clearInputAfterSubmit) {
     useStore.getState().setPrompt('')
     useStore.getState().clearInputImages()
   }
@@ -3047,6 +3066,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
 
     const result = await callImageApi({
       settings: requestSettings,
+      ...(task.params.output_format === 'gif' ? { apiProfile: executionProfile } : {}),
       prompt: promptSentToApi,
       params: providerParams,
       nativeTransparentBackground: nativeTransparentRequested,
@@ -3097,7 +3117,7 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     // + openai 非 codexCli 链路（编辑链路输出画幅锁定输入图尺寸，观测会被污染）。
     // 必须用 rawSize：outputImageSizes 是 exact_size 本地放大/比例校正之后的
     // 交付尺寸，用它会把「provider 压图」误判成「大尺寸生效」（对抗审查场景3）。
-    if (taskProvider === 'openai' && !executionProfile.codexCli && inputDataUrls.length === 0) {
+    if (task.params.output_format !== 'gif' && taskProvider === 'openai' && !executionProfile.codexCli && inputDataUrls.length === 0) {
       const requestedSize = parseImageSize(providerParams.size)
       const observedSize = outputRawImageSizes.find(
         (size) => typeof size.width === 'number' && typeof size.height === 'number',
@@ -3163,6 +3183,9 @@ async function executeTaskWithSlot(taskId: string, releaseSlot?: () => void) {
     useStore.getState().setTaskStreamPreview(taskId)
     updateTaskInStore(taskId, {
       outputImages: outputIds,
+      animation: result.animation,
+      animations: result.animations,
+      gifCompanionCount: result.gifCompanionCount || undefined,
       transparentOriginalImages: transparentOriginalImageIds,
       exactSizeOriginalImages: exactSizeOriginalImageIds,
       exactSizeTransforms,
@@ -4078,9 +4101,12 @@ export async function retryTask(task: TaskRecord) {
   // 覆盖重试保留任务原场景溯源，打点必须与任务场景同源解析（执行链
   // getSceneOverriddenTaskProfile 会按 task.sceneId 叠加场景覆盖，打点错场景
   // 会让 provider 标签/错误提示/断线恢复解析全部错位）；新建重试用当前场景。
-  const activeProfile = overwrite && source.sceneId
+  const activeProfile = source.params.output_format === 'gif'
+    ? getTaskApiProfile(settings, source)
+    : overwrite && source.sceneId
     ? getSceneImageApiProfile(settings, source.sceneId)
     : getSceneImageApiProfile(settings)
+  if (!activeProfile) { state.showToast('找不到此 GIF 所使用的 API 配置', 'error'); return }
   const requestSettings = createSettingsForApiProfile(settings, activeProfile)
   const normalizedParams = normalizeParamsForSettings(source.params, requestSettings, {
     hasInputImages: source.inputImageIds.length > 0,
@@ -4118,6 +4144,9 @@ export async function retryTask(task: TaskRecord) {
     transparentOutput: transparentMeta?.transparentOutput,
     transparentPrompt: transparentMeta?.effectivePrompt,
     outputImages: [],
+    animation: undefined,
+    animations: undefined,
+    gifCompanionCount: undefined,
     outputErrors: undefined,
     transparentOriginalImages: undefined,
     exactSizeOriginalImages: undefined,
@@ -4141,7 +4170,7 @@ export async function retryTask(task: TaskRecord) {
     status: 'running',
     error: null,
     // 覆盖重试保留任务原始场景溯源；新建重试记录当前场景。
-    sceneId: overwrite ? source.sceneId : settings.activeScene,
+    sceneId: source.params.output_format === 'gif' ? 'sticker' : overwrite ? source.sceneId : settings.activeScene,
     createdAt: overwrite ? source.createdAt : startedAt,
     startedAt,
     finishedAt: null,

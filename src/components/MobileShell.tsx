@@ -1,5 +1,5 @@
 import { useMemo, useState, type ComponentType, type ReactNode } from 'react'
-import { BookOpen, Camera, Cpu, Image as ImageIcon, LayoutGrid, Moon, Smile, Sparkles, Sun, User } from 'lucide-react'
+import { BookOpen, Camera, Cpu, Film, Image as ImageIcon, LayoutGrid, Moon, Sparkles, Sun, User } from 'lucide-react'
 import { useStore } from '../store'
 import { CANVAS_WORKSPACE_URL, SCENE_TABS } from './Header'
 import type { SceneId } from '../types'
@@ -17,7 +17,7 @@ const THEME_KEY = 'taostudio.imageLab.theme'
 const SCENE_TAB_ICONS: Record<SceneId, ComponentType<{ className?: string }>> = {
   portrait: Camera,
   general: ImageIcon,
-  sticker: Smile,
+  sticker: Film,
   skill: Sparkles,
 }
 
@@ -65,9 +65,9 @@ export default function MobileShell({ children, onOpenCompose, composeHidden = f
               />
             ))}
           </div>
-          <div className="w-16 shrink-0" aria-hidden /> {/* FAB 占位，加宽避免遮挡两侧 */}
-          <TabButton icon={Cpu} label="引擎" active={appMode === 'engine'} onClick={() => setAppMode('engine')} />
-          <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} />
+          {!composeHidden && <div className="w-16 shrink-0" aria-hidden />}
+          <TabButton icon={Cpu} label="引擎" active={appMode === 'engine'} onClick={() => setAppMode('engine')} className="shrink-0 px-3" />
+          <TabButton icon={User} label="我的" active={myOpen} onClick={() => setMyOpen(true)} className="shrink-0 px-3" />
         </div>
         {/* FAB（skill/sticker 场景隐藏：工坊自带输入与生成入口） */}
         {!composeHidden && (

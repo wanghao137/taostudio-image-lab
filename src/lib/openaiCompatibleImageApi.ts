@@ -33,6 +33,7 @@ import { getImageGenerationModel } from './imageModels'
 import { apiFetch, FetchConnectError } from './platform'
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
 import { prependCodexCliSizePrompt } from './size'
+import { parseGifOutput } from './gif'
 
 function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
@@ -724,6 +725,7 @@ async function callImagesApiConcurrent(opts: CallApiOptions, profile: ApiProfile
 
 async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): Promise<CallApiResult> {
   const { prompt: originalPrompt, params, inputImageDataUrls } = opts
+  const isGif = params.output_format === 'gif'
   const sizePrompt = profile.codexCli && !opts.skipCodexCliSizePrompt
     ? prependCodexCliSizePrompt(originalPrompt, params.size)
     : originalPrompt
@@ -768,7 +770,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         formData.append('quality', params.quality)
       }
 
-      if (params.output_format !== 'png' && params.output_compression != null) {
+      if (!isGif && params.output_format !== 'png' && params.output_compression != null) {
         formData.append('output_compression', String(params.output_compression))
       }
       if (params.n > 1) {
@@ -837,18 +839,24 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
         body.quality = params.quality
       }
 
-      if (params.output_format !== 'png' && params.output_compression != null) {
+      if (!isGif && params.output_format !== 'png' && params.output_compression != null) {
         body.output_compression = params.output_compression
       }
       if (params.n > 1) {
         body.n = params.n
       }
-      if (profile.responseFormatB64Json) {
+      if (!isGif && profile.responseFormatB64Json) {
         body.response_format = 'b64_json'
       }
-      if (profile.streamImages) {
+      if (!isGif && profile.streamImages) {
         body.stream = true
         body.partial_images = getStreamPartialImages(profile)
+      }
+      if (isGif) {
+        body.frame_count = params.gif!.frame_count
+        body.frame_duration_ms = params.gif!.frame_duration_ms
+        body.complexity = params.gif!.complexity
+        body.n = params.n
       }
 
       response = await fetchWithRetryClassification(buildApiUrl(profile.baseUrl, paths.generationPath, proxyConfig, useApiProxy), {
@@ -877,10 +885,27 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       return await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
     }
 
-    return await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+    const result = await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+    if (isGif) {
+      const gifs = result.images.flatMap((image, index) => {
+        const parsed = parseGifOutput(image)
+        return parsed ? [{ ...parsed, index }] : []
+      })
+      if (!gifs.length) throw new ApiError({ message: '服务商仅返回静态图片，没有返回多帧 GIF', stage: 'parse' })
+      result.gifCompanionCount = result.images.length - gifs.length
+      result.images = gifs.map((gif) => gif.image)
+      result.animations = gifs.map((gif) => gif.metadata)
+      result.animation = result.animations[0]
+      result.actualParamsList = gifs.map((gif) => result.actualParamsList?.[gif.index])
+      result.revisedPrompts = gifs.map((gif) => result.revisedPrompts?.[gif.index])
+      result.actualParams = { ...result.actualParams, output_format: 'gif', n: gifs.length }
+    }
+    return result
   }
 
   try {
+    // GIF 超时后上游可能已执行；不自动重发或改写用户的动画意图。
+    if (isGif) return await sendRequest(firstPrompt)
     try {
       // 瞬态失败重试：408/429/5xx/网络错误自动退避重试。每次重试重置超时窗口，
       // 否则一次 600s 预算被首尝试耗尽后重试立即失败。

@@ -36,6 +36,7 @@ export function normalizeParamsForSettings(
   settings: AppSettings,
   options: { hasInputImages?: boolean; preserveExactSizeIntent?: boolean; capRequestSize?: boolean } = {},
 ) {
+  if (params.output_format === 'gif') return { ...params, exact_size: false, transparent_output: false, output_compression: null }
   const activeProfile = getActiveApiProfile(settings)
   const outputImageLimit = getOutputImageLimitForSettings(settings)
   const nextParams: TaskParams = {

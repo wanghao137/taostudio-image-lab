@@ -20,6 +20,7 @@ const OUTPUT_MIME_BY_FORMAT: Record<TaskParams['output_format'], string> = {
   png: 'image/png',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
+  gif: 'image/gif',
 }
 
 export interface ExactImageResizeResult {
@@ -102,6 +103,7 @@ export async function resizeImageDataUrlToExactSize(
   outputFormat: TaskParams['output_format'],
   fitMode: ExactSizeFitMode = 'cover',
 ): Promise<ExactImageResizeResult> {
+  if (outputFormat === 'gif') throw new Error('GIF 原件不能使用静态图片尺寸变换')
   const image = await loadImage(dataUrl)
   const rawSource = { width: image.naturalWidth, height: image.naturalHeight }
 

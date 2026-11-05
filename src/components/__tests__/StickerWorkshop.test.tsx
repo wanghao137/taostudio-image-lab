@@ -1,180 +1,96 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { StickerWorkshop } from '../StickerWorkshop'
-import { submitTask, useStore, makeSpriteGifState } from '../../store'
+import { submitTask, useStore } from '../../store'
 import { DEFAULT_SETTINGS, createDefaultOpenAIProfile, normalizeSettings } from '../../lib/apiProfiles'
-import { DEFAULT_PARAMS } from '../../types'
-import type { TaskRecord } from '../../types'
+import { DEFAULT_PARAMS, type TaskRecord } from '../../types'
+import { DEFAULT_GIF_OPTIONS, readGifMetadata } from '../../lib/gif'
+import { ANIMATED_GIF } from '../../lib/__fixtures__/gif'
+import { downloadImageIds } from '../../lib/downloadImages'
 
-// 分区 A 的「一键生成」直接调模块级 submitTask（SkillWorkshop 同模式）：partial mock
-// 让提交动作可断言，其余 store 能力保持真实实现
-vi.mock('../../store', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../store')>()
-  return { ...actual, submitTask: vi.fn(async () => {}) }
-})
-
-const IMAGE_PROFILE = createDefaultOpenAIProfile({
-  id: 'image-a',
-  name: '生图配置A',
-  apiKey: 'sk-test',
-  baseUrl: 'https://api.example.com',
-})
-
-function buildTask(id: string, createdAt: number, sceneId?: TaskRecord['sceneId']): TaskRecord {
-  return {
-    id,
-    prompt: `任务 ${id}`,
-    params: {},
-    status: 'done',
-    outputImages: [`img-${id}`],
-    createdAt,
-    sceneId,
-  } as unknown as TaskRecord
+vi.mock('../../store', async (original) => ({ ...await original<typeof import('../../store')>(), submitTask: vi.fn(async () => []) }))
+vi.mock('../../lib/imageCache', async (original) => ({ ...await original<typeof import('../../lib/imageCache')>(), ensureImageCached: vi.fn(async () => ANIMATED_GIF), ensureImageThumbnailCached: vi.fn(async () => ({ src: 'data:image/png;base64,poster' })) }))
+vi.mock('../../lib/downloadImages', async (original) => ({ ...await original<typeof import('../../lib/downloadImages')>(), downloadImageIds: vi.fn(async () => ({ successCount: 1, failCount: 0 })) }))
+vi.mock('../../lib/dbWeb', async (original) => ({ ...await original<typeof import('../../lib/dbWeb')>(), safeCreateImageThumbnail: vi.fn(async () => ({ thumbnailDataUrl: 'data:image/png;base64,poster' })) }))
+const profile = createDefaultOpenAIProfile({ id: 'image-a', name: '生图配置 A', apiKey: 'test-only', baseUrl: 'https://example.test', apiMode: 'responses', streamImages: true })
+function seed(tasks: TaskRecord[] = []) {
+  localStorage.removeItem('gif-workbench-v1')
+  useStore.setState({ settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, activeScene: 'sticker' }), params: { ...DEFAULT_PARAMS }, prompt: '', tasks, toast: null, showSettings: false, inputImages: [{ id: 'old-image', dataUrl: 'data:image/png;base64,old' }] })
 }
+const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => ({ id: 'gif-a', prompt: '纸灯笼摇晃', params: { ...DEFAULT_PARAMS, output_format: 'gif', gif: DEFAULT_GIF_OPTIONS }, inputImageIds: [], outputImages: ['output-a'], maskImageId: null, maskTargetImageId: null, status: 'done', error: null, createdAt: 1, finishedAt: 2, elapsed: 1, animation: readGifMetadata(ANIMATED_GIF), ...overrides })
+afterEach(() => { cleanup(); vi.clearAllMocks() })
 
-// zustand setState 是重载类型，Parameters<> 会取到最后一个「整状态替换」重载；
-// 覆盖块用 Partial<State> 表达
-type StorePatch = Partial<ReturnType<typeof useStore.getState>>
-
-function seedStore(overrides: StorePatch = {}) {
-  useStore.setState({
-    settings: normalizeSettings({
-      ...DEFAULT_SETTINGS,
-      profiles: [IMAGE_PROFILE],
-      activeProfileId: IMAGE_PROFILE.id,
-      activeScene: 'sticker',
-    }),
-    params: { ...DEFAULT_PARAMS, size: '1024x1024' },
-    spriteGif: makeSpriteGifState(),
-    toast: null,
-    ...overrides,
+describe('通用 GIF 工作台', () => {
+  it('移除静态快捷区和战斗精灵图，提供通用描述与时序', () => {
+    seed(); render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    expect(screen.getByRole('heading', { name: 'GIF 工作台' })).toBeTruthy()
+    expect(screen.queryByText('静态表情 / 头像快捷生成')).toBeNull()
+    expect(screen.queryByText(/战斗动图工坊/)).toBeNull()
+    expect(screen.getByText('1.80 秒 / 周期')).toBeTruthy()
+    expect((screen.getByRole('button', { name: '生成 GIF' }) as HTMLButtonElement).disabled).toBe(true)
   })
-}
-
-describe('StickerWorkshop', () => {
-  afterEach(() => {
-    cleanup()
-    vi.restoreAllMocks()
-    vi.clearAllMocks()
+  it('提交独立 GIF 参数，不清除或重写其他场景的参考图与参数', async () => {
+    seed(); render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    fireEvent.change(screen.getByLabelText('动画描述'), { target: { value: '产品慢慢旋转，首尾衔接' } })
+    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '12' } })
+    fireEvent.change(screen.getByLabelText('GIF 每帧时长'), { target: { value: '100' } })
+    fireEvent.change(screen.getByLabelText('GIF 生成模型'), { target: { value: 'gpt-image-2.6-sunburst' } })
+    fireEvent.click(screen.getByRole('button', { name: '生成 GIF' }))
+    await waitFor(() => expect(submitTask).toHaveBeenCalledTimes(1))
+    expect(submitTask).toHaveBeenCalledWith(expect.objectContaining({ gif: { prompt: '产品慢慢旋转，首尾衔接', params: expect.objectContaining({ output_format: 'gif', exact_size: false, size: 'auto', gif: { model: 'gpt-image-2.6-sunburst', frame_count: 12, frame_duration_ms: 100, complexity: 'high' } }) } }))
+    expect(useStore.getState().inputImages[0].id).toBe('old-image')
+    expect(useStore.getState().params.output_format).toBe('png')
+    expect(profile.apiMode).toBe('responses')
   })
-
-  it('渲染两分区与 8 个动作预设 chips，点击切换 motionId（单选高亮）', () => {
-    seedStore()
+  it('参数错误阻止提交，运行中保留明确状态', () => {
+    seed([task({ status: 'running', outputImages: [] })]); render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    expect(screen.getByText('正在生成动画')).toBeTruthy()
+    expect((screen.getByRole('button', { name: '生成中…' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '65' } })
+    expect(screen.getByText('GIF 帧数须为 2–64 的整数')).toBeTruthy()
+  })
+  it('从持久任务预览、停止播放并下载 GIF 原件', async () => {
+    seed([task(), task({ id: 'static-old', params: DEFAULT_PARAMS })]); render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    await screen.findByAltText('生成的 GIF 动画')
+    expect(screen.getByText('1 个任务')).toBeTruthy()
+    expect(screen.getByText(/2 × 2 · 2 帧 · 0.40 秒/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '停止预览' }))
+    expect(screen.getByAltText('GIF 静态封面')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '下载 GIF 原件' }))
+    await waitFor(() => expect(downloadImageIds).toHaveBeenCalledWith(['output-a'], 'gif-gif-a'))
+  })
+  it('展示生成失败与缺失配置，不伪装成功', () => {
+    seed([task({ status: 'error', outputImages: [], error: '当前配置未开通 GIF' })])
+    useStore.setState({ settings: normalizeSettings({ ...DEFAULT_SETTINGS, activeScene: 'sticker' }) })
     render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-
-    expect(screen.getByRole('heading', { name: '表情与头像工作台' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: '静态表情 / 头像快捷生成' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: '战斗动图工坊（Sprite GIF）' })).toBeTruthy()
-    // 8 个动作预设全部渲染，默认 sword-slash 高亮
-    const slash = screen.getByRole('button', { name: '挥剑连斩' })
-    expect(slash.getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getAllByRole('button', { name: /连斩|连击|施法|奔跑|受击|待机|劈砍|射击/ })).toHaveLength(8)
-
-    fireEvent.click(screen.getByRole('button', { name: '出拳连击' }))
-    expect(useStore.getState().spriteGif.motionId).toBe('punch-combo')
-    expect(screen.getByRole('button', { name: '出拳连击' }).getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByRole('button', { name: '挥剑连斩' }).getAttribute('aria-pressed')).toBe('false')
-  })
-
-  it('generating 中按钮禁用并按细阶段显示文案，动作 chips 同步禁用', () => {
-    seedStore({
-      spriteGif: makeSpriteGifState({ status: 'generating', phase: 'fetching' }),
-    })
-    const { rerender } = render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-
-    const generate = screen.getByRole('button', { name: '生成精灵图中…' })
-    expect((generate as HTMLButtonElement).disabled).toBe(true)
-    expect((screen.getByRole('button', { name: '出拳连击' }) as HTMLButtonElement).disabled).toBe(true)
-
-    useStore.setState({ spriteGif: makeSpriteGifState({ status: 'generating', phase: 'processing' }) })
-    rerender(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-    expect(screen.getByRole('button', { name: '切分对齐中…' })).toBeTruthy()
-  })
-
-  it('ready 后渲染帧条：缩略图、切换勾选、删除与警告黄条', () => {
-    seedStore({
-      spriteGif: makeSpriteGifState({
-        status: 'ready',
-        frames: [
-          { id: 'f1', dataUrl: 'data:image/png;base64,1', enabled: true },
-          { id: 'f2', dataUrl: 'data:image/png;base64,2', enabled: true },
-          { id: 'f3', dataUrl: 'data:image/png;base64,3', enabled: true },
-        ],
-        warnings: ['第 3 格为空格，已剔除'],
-        sheetDataUrl: 'data:image/png;base64,sheet',
-      }),
-    })
-    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-
-    // 预览区渲染 + 帧条 3 帧缩略 + 警告黄条 + sheet 折叠入口
-    expect(screen.getByAltText('动图预览')).toBeTruthy()
-    expect(screen.getByLabelText('切换帧 1')).toBeTruthy()
-    expect(screen.getByText('第 3 格为空格，已剔除')).toBeTruthy()
-    expect(screen.getByText(/查看原始精灵图/)).toBeTruthy()
-    expect(screen.getByRole('button', { name: '导出 GIF' })).toBeTruthy()
-
-    fireEvent.click(screen.getByLabelText('切换帧 2'))
-    expect(useStore.getState().spriteGif.frames[1].enabled).toBe(false)
-    fireEvent.click(screen.getByLabelText('删除帧 3'))
-    expect(useStore.getState().spriteGif.frames.map((frame) => frame.id)).toEqual(['f1', 'f2'])
-  })
-
-  it('帧率滑杆绑定 frameMs 并显示 fps', () => {
-    seedStore({
-      spriteGif: makeSpriteGifState({
-        status: 'ready',
-        frames: [{ id: 'f1', dataUrl: 'data:image/png;base64,1', enabled: true }],
-      }),
-    })
-    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-
-    // 默认 80ms（12.5fps）
-    expect(screen.getByText(/80ms \/ 帧（12\.5fps）/)).toBeTruthy()
-    const slider = screen.getByLabelText('帧间隔（毫秒）') as HTMLInputElement
-    expect(slider.value).toBe('80')
-    fireEvent.change(slider, { target: { value: '120' } })
-    expect(useStore.getState().spriteGif.frameMs).toBe(120)
-    expect(screen.getByText(/120ms \/ 帧（8\.3fps）/)).toBeTruthy()
-  })
-
-  it('静态快捷生成：表情 chip 填入 + 一键生成走 setPrompt+submitTask（纯文生图先清输入图）', async () => {
-    seedStore({
-      tasks: [
-        buildTask('sticker-1', 3000, 'sticker'),
-        buildTask('general-1', 2500, 'general'),
-        buildTask('sticker-2', 2000, 'sticker'),
-      ],
-    })
-    const clearInputImages = vi.spyOn(useStore.getState(), 'clearInputImages')
-    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-
-    // 最近生成 strip：只显示 sceneId=sticker 的 2 个任务
-    expect(screen.getByText('最近生成')).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: '查看任务详情' })).toHaveLength(2)
-
-    // 空描述时按钮禁用；chip 点击填入后可用
-    const generate = screen.getByRole('button', { name: '一键生成' }) as HTMLButtonElement
-    expect(generate.disabled).toBe(true)
-    fireEvent.click(screen.getByRole('button', { name: '开心大笑' }))
-    expect((screen.getByLabelText('描述想要的表情或头像') as HTMLTextAreaElement).value).toBe('开心大笑')
-    expect((screen.getByRole('button', { name: '一键生成' }) as HTMLButtonElement).disabled).toBe(false)
-
-    fireEvent.click(screen.getByRole('button', { name: '一键生成' }))
-    expect(clearInputImages).toHaveBeenCalled()
-    expect(useStore.getState().prompt).toBe('开心大笑')
-    expect(submitTask).toHaveBeenCalledTimes(1)
-  })
-
-  it('无可用生图档案时显示 noProfile 引导与「打开设置」', () => {
-    seedStore({
-      settings: normalizeSettings({ ...DEFAULT_SETTINGS, activeScene: 'sticker' }),
-    })
-    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-
-    expect(screen.getByText('未找到可用的生图 API 配置，可在设置→API 中添加')).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '生成战斗动图' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '打开设置' }))
+    expect(screen.getByText('当前配置未开通 GIF')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '打开 API 设置' }))
     expect(useStore.getState().showSettings).toBe(true)
+  })
+  it('显示服务商忽略时序或尺寸、另附静态图的事实', async () => {
+    seed([task({ params: { ...DEFAULT_PARAMS, output_format: 'gif', gif: DEFAULT_GIF_OPTIONS, size: '512x512' }, gifCompanionCount: 1 })])
+    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    await screen.findByAltText('生成的 GIF 动画')
+    expect(screen.getByText(/返回的帧数或时长与请求不同/)).toBeTruthy()
+    expect(screen.getByText(/请求尺寸 512x512，实际返回 2 × 2/)).toBeTruthy()
+    expect(screen.getByText(/服务商另附 1 张静态辅助图/)).toBeTruthy()
+  })
+  it('完整参数配置可恢复，多个输出分别预览和下载', async () => {
+    seed([task({ params: { ...DEFAULT_PARAMS, output_format: 'gif', gif: DEFAULT_GIF_OPTIONS, n: 2 }, outputImages: ['output-a', 'output-b'], animations: [readGifMetadata(ANIMATED_GIF), readGifMetadata(ANIMATED_GIF)] })])
+    const { unmount } = render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '64' } })
+    fireEvent.change(screen.getByLabelText('GIF 每帧尺寸'), { target: { value: '512x512' } })
+    fireEvent.change(screen.getByLabelText('GIF 画质'), { target: { value: 'max' } })
+    fireEvent.change(screen.getByLabelText('GIF 生成数量'), { target: { value: '2' } })
+    unmount()
+    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    expect((screen.getByLabelText('GIF 帧数') as HTMLInputElement).value).toBe('64')
+    expect((screen.getByLabelText('GIF 每帧尺寸') as HTMLInputElement).value).toBe('512x512')
+    expect((screen.getByLabelText('GIF 画质') as HTMLSelectElement).value).toBe('max')
+    fireEvent.click(screen.getByRole('button', { name: /^动画 2$/ }))
+    await screen.findByAltText('生成的 GIF 动画')
+    fireEvent.click(screen.getByRole('button', { name: '下载 GIF 原件' }))
+    await waitFor(() => expect(downloadImageIds).toHaveBeenCalledWith(['output-b'], 'gif-gif-a-2'))
   })
 })

@@ -1,541 +1,188 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { Loader2, Settings2, Sparkles, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Download, Film, Loader2, Play, Settings2, Sparkles, Square } from 'lucide-react'
 import { submitTask, useStore } from '../store'
 import { getSceneImageApiProfile, validateApiProfile } from '../lib/apiProfiles'
-import { SPRITE_MOTION_PRESETS } from '../lib/stickerSplit/spriteSheet'
-import type { SpriteExportSize } from '../lib/stickerSplit/spriteExport'
-import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
-import { normalizeCodexCliImageSize, normalizeImageSize } from '../lib/size'
-import { ensureImageThumbnailCached, subscribeImageThumbnail } from '../lib/imageCache'
-import type { TaskRecord } from '../types'
+import { DEFAULT_GIF_OPTIONS, GIF_MODELS, getGifProfile, validateGifParams, type GifOptions } from '../lib/gif'
+import { ensureImageCached } from '../lib/imageCache'
+import { safeCreateImageThumbnail } from '../lib/dbWeb'
+import { downloadImageIds, withSaveLocation } from '../lib/downloadImages'
+import { DEFAULT_PARAMS, type TaskParams, type TaskRecord } from '../types'
+import { readLocal, writeLocal } from '../lib/localRecord'
 
-const SizePickerModal = lazy(() => import('./SizePickerModal'))
+const FIELD = 'w-full rounded-xl border border-stone-200/80 bg-white/70 px-3 py-2.5 text-sm text-stone-800 outline-none transition focus:border-[#df7b57] focus:ring-2 focus:ring-[#df7b57]/15 disabled:opacity-50 dark:border-white/10 dark:bg-white/[0.04] dark:text-stone-100'
+const BUTTON = 'inline-flex items-center justify-center gap-2 rounded-xl bg-[#df7b57] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#c96a49] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#df7b57] disabled:cursor-not-allowed disabled:opacity-50'
+const SECONDARY = 'inline-flex items-center justify-center gap-2 rounded-xl border border-stone-200/80 px-3 py-2 text-xs font-medium text-stone-700 transition hover:bg-stone-100 disabled:opacity-50 dark:border-white/10 dark:text-stone-200 dark:hover:bg-white/5'
 
-// 样式常量与 SkillWorkshop 同款（按任务书约定复制不提取，保持两工坊独立演进）
-const CARD_CLASS_NAME = 'mt-4 overflow-hidden rounded-2xl border border-stone-200/80 bg-white/70 shadow-[0_18px_50px_rgba(72,54,35,0.08)] ring-1 ring-white/70 backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.035] dark:shadow-[0_18px_60px_rgba(0,0,0,0.28)] dark:ring-white/[0.04]'
-const SECTION_TITLE_CLASS_NAME = 'text-xs font-semibold text-stone-500 dark:text-stone-400'
-const HINT_CLASS_NAME = 'text-[11px] leading-relaxed text-stone-400 dark:text-stone-500'
+function readGifPreferences(): TaskParams {
+  const defaults: TaskParams = { ...DEFAULT_PARAMS, output_format: 'gif', gif: { ...DEFAULT_GIF_OPTIONS }, quality: 'auto', moderation: 'auto' }
+  try {
+    const saved = JSON.parse(readLocal('gif-workbench-v1') ?? 'null') as Partial<TaskParams> | null
+    if (!saved) return defaults
+    const params = { ...defaults, gif: saved.gif, size: saved.size ?? 'auto', quality: saved.quality ?? 'auto', n: saved.n ?? 1, moderation: saved.moderation ?? 'auto' }
+    validateGifParams(params)
+    return params
+  } catch { return defaults }
+}
 
-const PRIMARY_BUTTON_CLASS_NAME = 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#df7b57] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#c96a49] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[#df7b57] dark:hover:bg-[#e88a68] dark:disabled:hover:bg-[#df7b57]'
-const SECONDARY_BUTTON_CLASS_NAME = 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-stone-100/80 px-4 py-2.5 text-sm font-medium text-stone-700 transition-colors hover:bg-stone-200 hover:text-stone-900 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-stone-100/80 disabled:hover:text-stone-700 dark:bg-white/[0.06] dark:text-stone-300 dark:hover:bg-white/[0.1] dark:hover:text-white'
-
-const ANCHOR_TEXTAREA_CLASS_NAME = 'mt-1.5 w-full resize-y rounded-xl border border-stone-200/80 bg-white/60 px-3 py-2.5 text-sm leading-relaxed text-stone-700 outline-none transition focus:border-[#df7b57]/50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200 dark:focus:border-[#ffb096]/40'
-
-const CHIP_CLASS_NAME = 'rounded-full border border-stone-200/80 bg-white/60 px-2.5 py-1 text-xs text-stone-600 transition-colors hover:border-[#df7b57]/40 hover:text-[#b4552f] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-300 dark:hover:border-[#ffb096]/40 dark:hover:text-[#ffb096]'
-const CHIP_ACTIVE_CLASS_NAME = CHIP_CLASS_NAME + ' border-[#df7b57]/60 bg-[#df7b57]/10 text-[#b4552f] hover:border-[#df7b57]/60 hover:text-[#b4552f] dark:border-[#ffb096]/50 dark:bg-[#df7b57]/15 dark:text-[#ffb096] dark:hover:border-[#ffb096]/50 dark:hover:text-[#ffb096]'
-
-/** 静态表情快捷 chips：点击填入描述框 */
-const STICKER_EXPRESSION_CHIPS = ['开心大笑', '生气鼓脸', '委屈巴巴', '比心', '惊讶', '睡觉', '吃饭', '打工人'] as const
-
-/** 网格规格：2×2/3×3/4×4（默认 4×4） */
-const SPRITE_GRID_OPTIONS = [2, 3, 4] as const
-
-const SPRITE_EXPORT_SIZE_OPTIONS: Array<{ value: SpriteExportSize; label: string }> = [
-  { value: 256, label: '256' },
-  { value: 512, label: '512' },
-  { value: 'original', label: '原尺寸' },
-]
-
-/**
- * 表情与头像工作台（sticker 场景专属视图，镜像 SkillWorkshop 模式）：
- * 分区 A 静态表情/头像快捷生成（submitTask 走画廊任务系统，sceneId=sticker）；
- * 分区 B 战斗动图工坊（Sprite GIF）：生成 → 去底 → 切帧 → 对齐 → 预览/导出，
- * 编排见 store.spriteGif，本组件只做展示与接线。
- */
 export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: () => void }) {
-  const spriteGif = useStore((s) => s.spriteGif)
   const settings = useStore((s) => s.settings)
-  const params = useStore((s) => s.params)
-  const tasks = useStore((s) => s.tasks)
-  const setParams = useStore((s) => s.setParams)
+  const prompt = useStore((s) => s.prompt)
   const setPrompt = useStore((s) => s.setPrompt)
-  const clearInputImages = useStore((s) => s.clearInputImages)
-  const clearMaskDraft = useStore((s) => s.clearMaskDraft)
+  const tasks = useStore((s) => s.tasks)
   const showToast = useStore((s) => s.showToast)
   const setShowSettings = useStore((s) => s.setShowSettings)
-  const setSpriteGifDraft = useStore((s) => s.setSpriteGifDraft)
-  const generateSpriteGif = useStore((s) => s.generateSpriteGif)
-  const toggleSpriteFrame = useStore((s) => s.toggleSpriteFrame)
-  const removeSpriteFrame = useStore((s) => s.removeSpriteFrame)
-  const setSpriteFrameMs = useStore((s) => s.setSpriteFrameMs)
-  const exportSpriteGif = useStore((s) => s.exportSpriteGif)
-  const exportSpriteApng = useStore((s) => s.exportSpriteApng)
-  const exportSpriteFramesZip = useStore((s) => s.exportSpriteFramesZip)
-  const setDetailTaskId = useStore((s) => s.setDetailTaskId)
-
-  // 分区 A 本地态：描述草稿 + 尺寸弹层（随 sticker 场景 params 持久隔离）
-  const [staticDraft, setStaticDraft] = useState('')
-  const [showSizePicker, setShowSizePicker] = useState(false)
-  // 分区 B 本地态：导出尺寸 + 导出进行中标记
-  const [exportSize, setExportSize] = useState<SpriteExportSize>(512)
-  const [exportBusy, setExportBusy] = useState<'gif' | 'apng' | 'zip' | null>(null)
-
-  const generating = spriteGif.status === 'generating'
-  const busy = generating || exportBusy !== null
-
-  const recentStickerTasks = useMemo(
-    () => tasks.filter((task) => task.sceneId === 'sticker' && task.status === 'done' && task.outputImages.length > 0).slice(0, 12),
-    [tasks],
-  )
-
-  // 场景图像档案与尺寸显示：与 SkillWorkshop 同规则（fal 不允许 auto，codexCli 规整）
-  const imageProfile = useMemo(() => getSceneImageApiProfile(settings), [settings])
-  const imageProfileError = validateApiProfile(imageProfile)
-  const isFalImage = imageProfile.provider === 'fal'
-  const displaySize = isFalImage && params.size === 'auto'
-    ? DEFAULT_FAL_IMAGE_SIZE
-    : (imageProfile.codexCli ? normalizeCodexCliImageSize(params.size) : normalizeImageSize(params.size)) || params.size
-
-  // 分区 A：一键生成（纯文生图语义，submitTask 自带守卫与 toast）；
-  // submitting 防 in-flight 双击（submitTask 无编排态，双击=两个计费任务）
+  const [initial] = useState(readGifPreferences)
+  const [gif, setGif] = useState<GifOptions>(initial.gif!)
+  const [quality, setQuality] = useState<TaskParams['quality']>(initial.quality)
+  const [size, setSize] = useState(initial.size)
+  const [count, setCount] = useState(initial.n)
+  const [moderation, setModeration] = useState(initial.moderation)
   const [submitting, setSubmitting] = useState(false)
-  const submitStaticGeneration = async () => {
-    const text = staticDraft.trim()
-    if (!text) {
-      showToast('请先描述想要的表情或头像（可点击表情快捷填入）', 'error')
-      return
-    }
-    if (submitting) return
+  const submitLock = useRef(false)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [outputIndex, setOutputIndex] = useState(0)
+  const [downloading, setDownloading] = useState(false)
+  const [playing, setPlaying] = useState(() => !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
+  const [preview, setPreview] = useState('')
+  const [poster, setPoster] = useState('')
+  const [previewError, setPreviewError] = useState('')
+  const gifTasks = useMemo(() => tasks.filter((t) => t.params.output_format === 'gif'), [tasks])
+  const selected = gifTasks.find((t) => t.id === selectedId) ?? gifTasks[0]
+  const running = gifTasks.some((t) => t.status === 'running')
+  const profile = useMemo(() => getSceneImageApiProfile(settings, 'sticker'), [settings])
+  let profileError = validateApiProfile(profile)
+  try { getGifProfile(profile, gif.model) } catch (err) { profileError = err instanceof Error ? err.message : String(err) }
+  const params = useMemo<TaskParams>(() => ({ ...DEFAULT_PARAMS, output_format: 'gif', gif, quality, size, n: count, moderation }), [gif, quality, size, count, moderation])
+  let parameterError = ''
+  try { validateGifParams(params) } catch (err) { parameterError = err instanceof Error ? err.message : String(err) }
+  const imageId = selected?.outputImages[outputIndex]
+  const animation = selected?.animations?.[outputIndex] ?? (outputIndex === 0 ? selected?.animation : undefined)
+
+  useEffect(() => {
+    try { validateGifParams(params); writeLocal('gif-workbench-v1', JSON.stringify(params)) } catch { /* 编辑中的无效值不覆盖上次有效配置。 */ }
+  }, [params])
+
+  useEffect(() => {
+    let cancelled = false
+    setPreview(''); setPoster(''); setPreviewError('')
+    if (imageId) void ensureImageCached(imageId).then(async (dataUrl) => {
+      if (!cancelled) {
+        setPreview(dataUrl ?? '')
+        setPreviewError(dataUrl ? '' : '原件暂时无法读取，请在任务详情中检查保存状态')
+      }
+      if (dataUrl) {
+        const thumbnail = await safeCreateImageThumbnail(dataUrl)
+        if (!cancelled) setPoster(thumbnail.thumbnailDataUrl ?? '')
+      }
+    }).catch(() => { if (!cancelled) setPreviewError('无法读取 GIF 原件') })
+    return () => { cancelled = true }
+  }, [imageId])
+
+  const generate = async () => {
+    if (submitLock.current || running || !prompt.trim() || profileError || parameterError) return
+    submitLock.current = true
     setSubmitting(true)
     try {
-      // 与 Skill 工坊同语义：静态快捷生成为纯文生图，清掉本场景遗留的参考图/遮罩，
-      // 避免静默携带输入图变成计费编辑请求
-      clearInputImages()
-      clearMaskDraft()
-      setPrompt(text)
-      await submitTask({ ignoreBatchPrompt: true })
-    } finally {
-      setSubmitting(false)
-    }
+      setSelectedId(null)
+      setOutputIndex(0)
+      await submitTask({ gif: { prompt: prompt.trim(), params }, ignoreBatchPrompt: true })
+    } catch (err) { showToast(`提交失败：${err instanceof Error ? err.message : String(err)}`, 'error') }
+    finally { submitLock.current = false; setSubmitting(false) }
   }
-
-  const runExport = async (kind: 'gif' | 'apng' | 'zip') => {
-    if (busy) return
-    setExportBusy(kind)
+  const download = async () => {
+    if (!imageId || !selected || downloading) return
+    setDownloading(true)
     try {
-      if (kind === 'gif') await exportSpriteGif(exportSize)
-      else if (kind === 'apng') await exportSpriteApng(exportSize)
-      else await exportSpriteFramesZip()
-    } finally {
-      setExportBusy(null)
-    }
+      const result = await downloadImageIds([imageId], `gif-${selected.id}${selected.outputImages.length > 1 ? `-${outputIndex + 1}` : ''}`)
+      if (!result.canceled) showToast(result.successCount ? withSaveLocation('GIF 原件已下载', result.location) : 'GIF 下载失败，请重试', result.successCount ? 'success' : 'error')
+    } catch { showToast('GIF 下载失败，请重试', 'error') }
+    finally { setDownloading(false) }
   }
-
-  const enabledFrames = useMemo(() => spriteGif.frames.filter((frame) => frame.enabled), [spriteGif.frames])
-
-  // 循环预览：按 frameMs 步进 enabled 帧（帧集/帧率变化时重置）
-  const [previewIndex, setPreviewIndex] = useState(0)
-  useEffect(() => {
-    setPreviewIndex(0)
-  }, [spriteGif.frameMs, enabledFrames.length])
-  useEffect(() => {
-    if (!enabledFrames.length) return
-    const timer = setInterval(() => {
-      setPreviewIndex((index) => (index + 1) % enabledFrames.length)
-    }, spriteGif.frameMs)
-    return () => clearInterval(timer)
-  }, [enabledFrames, spriteGif.frameMs])
-  const previewFrame = enabledFrames.length ? enabledFrames[previewIndex % enabledFrames.length] : null
 
   return (
-    <section data-no-drag-select data-ui-summary className={CARD_CLASS_NAME}>
-      {/* 弹层 portal 到 body：同 SkillWorkshop（卡片 overflow-hidden 会裁剪 fixed 后代） */}
-      {showSizePicker && createPortal(
-        <Suspense fallback={null}>
-          <SizePickerModal
-            currentSize={params.size}
-            onSelect={(size) => setParams({ size })}
-            onClose={() => setShowSizePicker(false)}
-            allowAuto={!isFalImage}
-            codexCli={imageProfile.codexCli}
-          />
-        </Suspense>,
-        document.body,
-      )}
-      {/* 标题栏 + 场景设置入口 */}
-      <div className="flex items-center justify-between gap-3 border-b border-stone-200/70 px-4 py-3 dark:border-white/[0.06]">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-[#df7b57] shadow-[0_0_0_4px_rgba(223,123,87,0.14)]" />
-          <h2 className="truncate text-sm font-semibold text-stone-900 dark:text-stone-50">表情与头像工作台</h2>
+    <section data-no-drag-select data-ui-summary className="mt-4 overflow-hidden rounded-2xl border border-stone-200/80 bg-white/75 shadow-sm dark:border-white/[0.08] dark:bg-white/[0.035]">
+      <header className="flex items-center justify-between gap-4 border-b border-stone-200/70 px-5 py-4 dark:border-white/[0.06]">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="rounded-xl bg-[#df7b57]/10 p-2.5 text-[#bd6547]"><Film className="h-5 w-5" aria-hidden /></span>
+          <div><h2 className="text-base font-semibold text-stone-900 dark:text-stone-50">GIF 工作台</h2><p className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">把角色、场景和创意变成动画</p></div>
         </div>
-        <button
-          type="button"
-          onClick={onOpenSceneSettings}
-          aria-label="场景设置"
-          title="场景设置"
-          className="shrink-0 rounded-lg p-1.5 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-white/[0.08] dark:hover:text-stone-100"
-        >
-          <Settings2 className="h-4 w-4" aria-hidden />
-        </button>
-      </div>
-
-      <div className="space-y-4 p-4">
-        {/* 分区 A：静态表情/头像快捷生成 */}
-        <section className="space-y-3 rounded-2xl border border-stone-200/70 bg-white/50 p-3.5 dark:border-white/[0.06] dark:bg-white/[0.02]">
-          <h3 className="text-base font-bold text-stone-900 dark:text-stone-50">静态表情 / 头像快捷生成</h3>
-          <div>
-            <span className={SECTION_TITLE_CLASS_NAME}>描述想要的表情或头像</span>
-            <textarea
-              aria-label="描述想要的表情或头像"
-              value={staticDraft}
-              onChange={(event) => setStaticDraft(event.target.value)}
-              rows={2}
-              placeholder="例如：圆脸橘猫开心大笑的表情包，简洁背景"
-              className={ANCHOR_TEXTAREA_CLASS_NAME}
-            />
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              <span className={HINT_CLASS_NAME}>表情：</span>
-              {STICKER_EXPRESSION_CHIPS.map((chip) => (
-                <button
-                  key={chip}
-                  type="button"
-                  onClick={() => setStaticDraft(chip)}
-                  disabled={generating}
-                  className={CHIP_CLASS_NAME}
-                >
-                  {chip}
-                </button>
-              ))}
-            </div>
-            <p className={`${HINT_CLASS_NAME} mt-1`}>点击表情快速填入；最近生成显示在下方，切换到其他场景后可在画廊按「全部」查看历史。</p>
+        <button type="button" onClick={onOpenSceneSettings} className={SECONDARY} aria-label="GIF 场景设置"><Settings2 className="h-4 w-4" aria-hidden /><span className="hidden sm:inline">场景设置</span></button>
+      </header>
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]">
+        <form className="min-w-0 space-y-5 p-5 sm:p-6" onSubmit={(event) => { event.preventDefault(); void generate() }}>
+          <label className="block">
+            <span className="text-sm font-semibold text-stone-800 dark:text-stone-100">描述你的动画</span>
+            <textarea aria-label="动画描述" value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={6} maxLength={32000} placeholder="例如：一盏纸灯笼在夜色中轻轻摇晃，暖光逐渐亮起再暗下，镜头固定，首尾自然衔接。" className={`${FIELD} mt-2 min-h-40 resize-y leading-relaxed`} />
+            <span className="mt-2 block text-xs leading-relaxed text-stone-500 dark:text-stone-400">写清主体、动作变化、背景与循环方式。支持文字生成，暂不支持上传图片动画化。</span>
+          </label>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <label className="block space-y-2 text-xs font-medium text-stone-600 dark:text-stone-300">生成模型
+              <select aria-label="GIF 生成模型" value={gif.model} onChange={(e) => setGif({ ...gif, model: e.target.value as GifOptions['model'] })} className={FIELD}>{GIF_MODELS.map((model) => <option value={model} key={model}>{model.endsWith('flare') ? 'GPT Image 2.6 Flare' : 'GPT Image 2.6 Sunburst'}</option>)}</select>
+            </label>
+            <label className="block space-y-2 text-xs font-medium text-stone-600 dark:text-stone-300">画质
+              <select aria-label="GIF 画质" value={quality} onChange={(e) => setQuality(e.target.value as TaskParams['quality'])} className={FIELD}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高 xhigh</option><option value="max">最高 max</option></select>
+            </label>
           </div>
+          <div className="rounded-xl border border-stone-200/70 p-4 dark:border-white/[0.08]">
+            <div className="mb-4 flex items-center justify-between gap-2"><h3 className="text-sm font-semibold text-stone-800 dark:text-stone-100">动画节奏</h3><output className="font-mono text-xs text-[#bd6547] dark:text-[#ffb096]">{Number.isFinite(gif.frame_count * gif.frame_duration_ms) ? (gif.frame_count * gif.frame_duration_ms / 1000).toFixed(2) : '—'} 秒 / 周期</output></div>
+            <div className="grid grid-cols-2 gap-4">
+              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">帧数<input aria-label="GIF 帧数" type="number" min={2} max={64} step={1} value={Number.isNaN(gif.frame_count) ? '' : gif.frame_count} onChange={(e) => setGif({ ...gif, frame_count: e.target.valueAsNumber })} className={FIELD} required /><span className="block text-[11px] text-stone-500">2–64 帧，默认 9 帧</span></label>
+              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">每帧时长 ms<input aria-label="GIF 每帧时长" type="number" min={20} max={2000} step={10} value={Number.isNaN(gif.frame_duration_ms) ? '' : gif.frame_duration_ms} onChange={(e) => setGif({ ...gif, frame_duration_ms: e.target.valueAsNumber })} className={FIELD} required /></label>
+            </div>
+            {gif.frame_count > 16 && <p className="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-200">指南支持最多 64 帧；当前接口参考仍写 16 帧，部分服务商可能拒绝更高帧数。</p>}
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">每帧尺寸<input aria-label="GIF 每帧尺寸" value={size} onChange={(e) => setSize(e.target.value.trim())} placeholder="auto 或 512x512" className={FIELD} /><span className="block text-[11px] leading-relaxed text-stone-500">auto 自动选择；自定义宽高须为 16 的倍数。</span></label>
+              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">生成数量<input aria-label="GIF 生成数量" type="number" min={1} max={10} step={1} value={Number.isNaN(count) ? '' : count} onChange={(e) => setCount(e.target.valueAsNumber)} className={FIELD} required /><span className="block text-[11px] leading-relaxed text-stone-500">帧数、尺寸和数量共同占用像素预算；超限时降低其中一项。</span></label>
+            </div>
+          </div>
+          <details className="text-xs text-stone-600 dark:text-stone-300">
+            <summary className="cursor-pointer py-1 font-medium">高级设置</summary>
+            <div className="mt-3 grid gap-4 sm:grid-cols-2">
+              <label className="space-y-2">规划强度<select aria-label="GIF 规划强度" value={gif.complexity} onChange={(e) => setGif({ ...gif, complexity: e.target.value as GifOptions['complexity'] })} className={FIELD}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+              <label className="space-y-2">内容审核<select aria-label="GIF 内容审核" value={moderation} onChange={(e) => setModeration(e.target.value as TaskParams['moderation'])} className={FIELD}><option value="auto">标准 auto</option><option value="low">较宽松 low</option></select></label>
+            </div>
+            <p className="mt-3 leading-relaxed text-stone-500">规划强度控制渲染前的规划量，默认高，与画质独立。GIF 不支持流式预览、压缩率或图片编辑。</p>
+          </details>
+          {profileError && <div role="alert" className="rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"><p>{profileError}</p><button type="button" onClick={() => setShowSettings(true)} className={`${SECONDARY} mt-2`}>打开 API 设置</button></div>}
+          {parameterError && <p role="alert" className="text-xs text-red-600 dark:text-red-300">{parameterError}</p>}
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className={SECTION_TITLE_CLASS_NAME}>图片尺寸</span>
-              <button
-                type="button"
-                onClick={() => setShowSizePicker(true)}
-                title="选择尺寸；保存在表情与头像工作台，不被其他场景影响（跨刷新保留需开启「刷新保留输入」）"
-                className="rounded-xl border border-stone-200/80 bg-white/60 px-3 py-1.5 text-left font-mono text-xs text-stone-700 shadow-sm transition-all duration-200 hover:bg-white dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200 dark:hover:bg-white/[0.06]"
-              >
-                {displaySize}
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => { void submitStaticGeneration() }}
-              disabled={busy || submitting || !staticDraft.trim()}
-              className={PRIMARY_BUTTON_CLASS_NAME}
-            >
-              <Sparkles className="h-4 w-4" aria-hidden />
-              一键生成
-            </button>
+            <button type="submit" disabled={submitting || running || !prompt.trim() || Boolean(profileError || parameterError)} className={BUTTON}>{submitting || running ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Sparkles className="h-4 w-4" aria-hidden />}{submitting || running ? '生成中…' : '生成 GIF'}</button>
+            <p className="text-xs leading-relaxed text-stone-500 dark:text-stone-400">每次生成 {Number.isFinite(count) ? count : '—'} 个 GIF<br />使用「{profile.name}」，需已开通 GIF 能力</p>
           </div>
-          {recentStickerTasks.length > 0 && (
-            <div className="space-y-2">
-              <span className={SECTION_TITLE_CLASS_NAME}>最近生成</span>
-              <div className="flex gap-2 overflow-x-auto pb-1">
-                {recentStickerTasks.map((task) => (
-                  <RecentTaskThumb key={task.id} task={task} onOpen={() => setDetailTaskId(task.id)} />
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* 分区 B：战斗动图工坊（Sprite GIF） */}
-        <section className="space-y-3 rounded-2xl border border-stone-200/70 bg-white/50 p-3.5 dark:border-white/[0.06] dark:bg-white/[0.02]">
-          <div>
-            <h3 className="text-base font-bold text-stone-900 dark:text-stone-50">战斗动图工坊（Sprite GIF）</h3>
-            <p className={`${HINT_CLASS_NAME} mt-0.5`}>一次生成 N×N 战斗动作精灵图 → 自动绿幕去底 → 切帧 → 帧间对齐 → 导出 GIF / APNG / 帧序列。</p>
+        </form>
+        <div className="min-w-0 border-t border-stone-200/70 bg-stone-50/60 p-5 sm:p-6 lg:border-l lg:border-t-0 dark:border-white/[0.06] dark:bg-black/10">
+          <div className="mb-4 flex items-center justify-between"><h3 className="text-sm font-semibold text-stone-800 dark:text-stone-100">动画预览</h3><span className="text-[11px] text-stone-500">GIF 原件</span></div>
+          {selected && selected.outputImages.length > 1 && <div className="mb-3 flex flex-wrap gap-2" aria-label="GIF 结果选择">{selected.outputImages.map((id, index) => <button key={id + index} type="button" aria-pressed={outputIndex === index} onClick={() => setOutputIndex(index)} className={`${SECONDARY} ${outputIndex === index ? 'border-[#df7b57] bg-[#df7b57]/10' : ''}`}>动画 {index + 1}</button>)}</div>}
+          <div className="flex aspect-square max-h-[480px] min-h-60 items-center justify-center overflow-hidden rounded-2xl border border-stone-200/80 bg-white dark:border-white/[0.08] dark:bg-stone-900">
+            {selected?.status === 'running' ? <div role="status" className="space-y-3 p-6 text-center text-stone-500"><Loader2 className="mx-auto h-7 w-7 animate-spin text-[#df7b57]" aria-hidden /><p className="text-sm">正在生成动画</p><p className="text-xs">完成后自动显示，请保持页面打开</p></div>
+              : selected?.status === 'error' ? <p role="alert" className="max-w-full break-words p-6 text-sm leading-relaxed text-red-600 dark:text-red-300">{selected.error || '生成失败，请查看任务详情'}</p>
+                : (playing ? preview : poster) ? <img key={`${imageId}-${playing}`} src={playing ? preview : poster} alt={playing ? '生成的 GIF 动画' : 'GIF 静态封面'} className="h-full max-h-[480px] w-full object-contain" onError={() => setPreviewError('浏览器无法显示该文件，请下载原件检查')} />
+                  : <div className="p-8 text-center text-stone-400 dark:text-stone-500"><Film className="mx-auto mb-4 h-10 w-10 stroke-1" aria-hidden /><p className="text-sm">{imageId ? '正在读取预览…' : '你的下一段动画，从这里开始'}</p><p className="mt-2 text-xs">角色动作、产品展示、场景循环，都可以</p></div>}
           </div>
-
-          <div>
-            <span className={SECTION_TITLE_CLASS_NAME}>动作预设</span>
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              {SPRITE_MOTION_PRESETS.map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  onClick={() => setSpriteGifDraft({ motionId: preset.id })}
-                  disabled={generating}
-                  aria-pressed={spriteGif.motionId === preset.id}
-                  className={spriteGif.motionId === preset.id ? CHIP_ACTIVE_CLASS_NAME : CHIP_CLASS_NAME}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <span className={SECTION_TITLE_CLASS_NAME}>角色描述（可选，无参考图时定义角色）</span>
-            <textarea
-              aria-label="角色补充描述"
-              value={spriteGif.characterNote}
-              onChange={(event) => setSpriteGifDraft({ characterNote: event.target.value })}
-              rows={2}
-              placeholder="例如：银发红瞳的女剑士，奇幻冒险风"
-              className={ANCHOR_TEXTAREA_CLASS_NAME}
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <div className="flex items-center gap-2">
-              <span className={SECTION_TITLE_CLASS_NAME}>网格</span>
-              <div className="flex overflow-hidden rounded-lg border border-stone-200/80 dark:border-white/[0.08]">
-                {SPRITE_GRID_OPTIONS.map((grid) => (
-                  <button
-                    key={grid}
-                    type="button"
-                    onClick={() => setSpriteGifDraft({ rows: grid, cols: grid })}
-                    disabled={generating}
-                    aria-pressed={spriteGif.rows === grid && spriteGif.cols === grid}
-                    className={`px-2.5 py-1.5 text-xs transition-colors ${
-                      spriteGif.rows === grid && spriteGif.cols === grid
-                        ? 'bg-[#df7b57] font-medium text-white'
-                        : 'text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-white/[0.06]'
-                    } disabled:cursor-not-allowed disabled:opacity-50`}
-                  >
-                    {grid}×{grid}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {imageProfileError ? (
-              <span className="text-xs text-amber-600 dark:text-amber-400">请先完善 API 配置：{imageProfileError}</span>
-            ) : null}
-          </div>
-
-          {imageProfileError ? (
-            // 无可用图像档案：与 Skill 工坊 noProfile 同款引导（文案与 store 校验错误一致）
-            <div className="rounded-xl border border-yellow-200/70 bg-yellow-50 px-3 py-2.5 text-xs leading-relaxed text-yellow-700 dark:border-yellow-500/20 dark:bg-yellow-500/10 dark:text-yellow-200">
-              <p>未找到可用的生图 API 配置，可在设置→API 中添加</p>
-              <button
-                type="button"
-                onClick={() => setShowSettings(true)}
-                className="mt-2 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-600"
-              >
-                打开设置
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => { void generateSpriteGif() }}
-              disabled={generating}
-              className={PRIMARY_BUTTON_CLASS_NAME}
-            >
-              {generating
-                ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-                : <Sparkles className="h-4 w-4" aria-hidden />}
-              {generating
-                ? (spriteGif.phase === 'processing' ? '切分对齐中…' : '生成精灵图中…')
-                : spriteGif.status === 'ready' ? '重新生成动图' : '生成战斗动图'}
-            </button>
-          )}
-
-          {spriteGif.error && (
-            <p className="text-xs leading-relaxed text-red-500 dark:text-red-300">生成失败：{spriteGif.error}</p>
-          )}
-
-          {spriteGif.frames.length > 0 && (
-            <div className="space-y-2">
-              <span className={SECTION_TITLE_CLASS_NAME}>
-                帧条（{enabledFrames.length}/{spriteGif.frames.length} 帧参与播放与导出，点击缩略图停用/启用）
-              </span>
-              <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 lg:grid-cols-8">
-                {spriteGif.frames.map((frame, index) => (
-                  <div key={frame.id} className="group relative">
-                    <button
-                      type="button"
-                      onClick={() => toggleSpriteFrame(frame.id)}
-                      disabled={busy}
-                      aria-label={`切换帧 ${index + 1}`}
-                      aria-pressed={frame.enabled}
-                      title={frame.enabled ? `停用第 ${index + 1} 帧` : `启用第 ${index + 1} 帧`}
-                      className={`block w-full overflow-hidden rounded-lg border bg-stone-100/80 transition-colors dark:bg-white/[0.04] ${
-                        frame.enabled
-                          ? 'border-[#df7b57]/50 hover:border-[#df7b57]'
-                          : 'border-dashed border-stone-300 opacity-40 hover:opacity-70 dark:border-white/[0.12]'
-                      } disabled:cursor-not-allowed`}
-                    >
-                      <img src={frame.dataUrl} alt="" loading="lazy" className="aspect-square w-full object-contain" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => removeSpriteFrame(frame.id)}
-                      disabled={busy}
-                      aria-label={`删除帧 ${index + 1}`}
-                      title="删除"
-                      className="absolute right-0.5 top-0.5 rounded-full bg-black/45 p-0.5 text-white opacity-0 transition-opacity hover:bg-red-500 disabled:cursor-not-allowed group-hover:opacity-100 dark:bg-black/60"
-                    >
-                      <X className="h-3 w-3" aria-hidden />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {spriteGif.warnings.length > 0 && (
-            <div className="rounded-xl border border-yellow-200/70 bg-yellow-50 px-3 py-2.5 text-xs leading-relaxed text-yellow-700 dark:border-yellow-500/20 dark:bg-yellow-500/10 dark:text-yellow-200">
-              {spriteGif.warnings.map((warning) => (
-                <p key={warning}>{warning}</p>
-              ))}
-            </div>
-          )}
-
-          {spriteGif.sheetDataUrl && (
-            <details className="group">
-              <summary className="inline-flex cursor-pointer select-none items-center gap-1 text-xs text-stone-500 transition-colors hover:text-stone-700 dark:text-stone-400 dark:hover:text-stone-200 [&::-webkit-details-marker]:hidden">
-                查看原始精灵图（去底前 {spriteGif.rows}×{spriteGif.cols}）
-              </summary>
-              <img
-                src={spriteGif.sheetDataUrl}
-                alt="原始精灵图"
-                className="mt-2 max-h-96 w-auto rounded-xl border border-stone-200/80 object-contain dark:border-white/[0.08]"
-              />
-            </details>
-          )}
-
-          {spriteGif.frames.length > 0 && (
-            <div className="space-y-3 rounded-xl border border-stone-200/70 bg-white/60 p-3 dark:border-white/[0.06] dark:bg-white/[0.03]">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <span className={SECTION_TITLE_CLASS_NAME}>预览与导出</span>
-                <span className={HINT_CLASS_NAME}>
-                  {enabledFrames.length ? `${enabledFrames.length} 帧 · ${(1000 / spriteGif.frameMs).toFixed(1)}fps` : '没有启用帧'}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-start gap-4">
-                <div className="relative flex h-40 w-40 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-stone-100 ring-1 ring-stone-200/70 dark:bg-white/[0.04] dark:ring-white/[0.06]">
-                  {previewFrame ? (
-                    <img
-                      src={previewFrame.dataUrl}
-                      alt="动图预览"
-                      className="h-full w-full object-contain"
-                    />
-                  ) : (
-                    <span className={HINT_CLASS_NAME}>启用至少一帧后可预览</span>
-                  )}
-                  {generating && (
-                    <span className="absolute inset-0 flex items-center justify-center bg-white/50 text-xs text-stone-500 backdrop-blur-[1px] dark:bg-black/40 dark:text-stone-300">
-                      生成中…
-                    </span>
-                  )}
-                </div>
-                <div className="min-w-[220px] flex-1 space-y-3">
-                  <label className="block">
-                    <span className={SECTION_TITLE_CLASS_NAME}>
-                      帧率：{spriteGif.frameMs}ms / 帧（{(1000 / spriteGif.frameMs).toFixed(1)}fps）
-                    </span>
-                    <input
-                      type="range"
-                      min={40}
-                      max={300}
-                      step={5}
-                      value={spriteGif.frameMs}
-                      onChange={(event) => setSpriteFrameMs(Number(event.target.value))}
-                      disabled={busy}
-                      aria-label="帧间隔（毫秒）"
-                      className="mt-1.5 w-full accent-[#df7b57] disabled:cursor-not-allowed disabled:opacity-50"
-                    />
-                  </label>
-                  <label className="flex items-center gap-2">
-                    <span className={SECTION_TITLE_CLASS_NAME}>导出尺寸</span>
-                    <select
-                      value={String(exportSize)}
-                      onChange={(event) => setExportSize(event.target.value === 'original' ? 'original' : Number(event.target.value) === 256 ? 256 : 512)}
-                      disabled={busy}
-                      aria-label="导出尺寸"
-                      className="rounded-lg border border-stone-200/80 bg-white/60 px-2 py-1.5 text-xs text-stone-700 outline-none transition disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-stone-200"
-                    >
-                      {SPRITE_EXPORT_SIZE_OPTIONS.map((option) => (
-                        <option key={String(option.value)} value={String(option.value)}>{option.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => { void runExport('gif') }}
-                      disabled={busy || !enabledFrames.length}
-                      className={PRIMARY_BUTTON_CLASS_NAME + ' px-3.5 py-2 text-xs'}
-                    >
-                      {exportBusy === 'gif' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
-                      导出 GIF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void runExport('apng') }}
-                      disabled={busy || !enabledFrames.length}
-                      className={SECONDARY_BUTTON_CLASS_NAME + ' px-3.5 py-2 text-xs'}
-                    >
-                      {exportBusy === 'apng' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
-                      导出 APNG
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { void runExport('zip') }}
-                      disabled={busy || !enabledFrames.length}
-                      className={SECONDARY_BUTTON_CLASS_NAME + ' px-3.5 py-2 text-xs'}
-                    >
-                      {exportBusy === 'zip' ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
-                      帧 ZIP（原尺寸 PNG）
-                    </button>
-                  </div>
-                  <p className={HINT_CLASS_NAME}>GIF 适配微信等聊天软件（1-bit 透明）；APNG 保留完整半透明；帧 ZIP 为原始尺寸 PNG 序列。</p>
-                </div>
-              </div>
-            </div>
-          )}
-        </section>
+          {animation && <p className="mt-3 font-mono text-xs leading-relaxed text-stone-500 dark:text-stone-400">{animation.width} × {animation.height} · {animation.frameCount} 帧 · {(animation.durationMs / 1000).toFixed(2)} 秒 · {(animation.byteLength / 1024).toFixed(0)} KB</p>}
+          {Boolean(selected?.gifCompanionCount) && <p className="mt-2 text-xs text-stone-500">服务商另附 {selected?.gifCompanionCount} 张静态辅助图，GIF 原件已单独保存。</p>}
+          {animation && selected?.params.gif && (animation.frameCount !== selected.params.gif.frame_count || animation.frameDurationsMs.some((ms) => ms !== selected.params.gif!.frame_duration_ms)) && <p className="mt-2 text-xs leading-relaxed text-amber-700 dark:text-amber-200">返回的帧数或时长与请求不同，以上显示文件的实际时序。</p>}
+          {animation && selected?.params.size !== 'auto' && selected?.params.size !== `${animation.width}x${animation.height}` && <p className="mt-2 text-xs leading-relaxed text-amber-700 dark:text-amber-200">请求尺寸 {selected?.params.size}，实际返回 {animation.width} × {animation.height}；已保留原件，未缩放或裁切动画。</p>}
+          {selected?.status === 'done' && selected.outputImages.length !== selected.params.n && <p className="mt-2 text-xs text-amber-700 dark:text-amber-200">请求 {selected.params.n} 个动画，服务商实际返回 {selected.outputImages.length} 个；未自动补发。</p>}
+          {previewError && <p role="alert" className="mt-2 text-xs text-red-600">{previewError}</p>}
+          {selected?.outputPersistWarning && <p role="alert" className="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-200">本地空间不足，原件尚未完整保存。请立即下载，刷新可能丢失。</p>}
+          {selected && <div className="mt-4 flex flex-wrap gap-2">
+            {imageId && <><button type="button" onClick={() => setPlaying(!playing)} className={SECONDARY}>{playing ? <Square className="h-3.5 w-3.5" aria-hidden /> : <Play className="h-3.5 w-3.5" aria-hidden />}{playing ? '停止预览' : '播放动画'}</button><button type="button" onClick={() => { void download() }} disabled={downloading} className={SECONDARY}><Download className="h-3.5 w-3.5" aria-hidden />{downloading ? '下载中…' : '下载 GIF 原件'}</button></>}
+            <button type="button" onClick={() => useStore.getState().setDetailTaskId(selected.id)} className={SECONDARY}>任务详情</button>
+          </div>}
+          <p className="mt-4 text-[11px] leading-relaxed text-stone-500 dark:text-stone-400">生成结果保存在当前浏览器。下载保留原始帧与时序；修改描述或节奏后需重新生成。</p>
+        </div>
       </div>
+      <section className="border-t border-stone-200/70 p-5 sm:p-6 dark:border-white/[0.06]" aria-label="GIF 历史">
+        <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold text-stone-800 dark:text-stone-100">最近的 GIF</h3><span className="text-xs text-stone-500">{gifTasks.length} 个任务</span></div>
+        {gifTasks.length ? <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{gifTasks.slice(0, 12).map((task) => <HistoryItem key={task.id} task={task} selected={selected?.id === task.id} onSelect={() => { setSelectedId(task.id); setOutputIndex(0) }} />)}</div> : <p className="py-3 text-xs text-stone-500">生成后的动画会出现在这里，可随时重新预览与下载。</p>}
+      </section>
     </section>
   )
 }
 
-/** 最近生成缩略块：与 SkillWorkshop.RecentTaskThumb 同模式（复制；点击打开任务详情） */
-function RecentTaskThumb({ task, onOpen }: { task: TaskRecord; onOpen: () => void }) {
-  const [thumbSrc, setThumbSrc] = useState('')
-
-  useEffect(() => {
-    setThumbSrc('')
-    let cancelled = false
-    const imageId = task.outputImages?.[0]
-    let unsubscribe: (() => void) | undefined
-
-    if (imageId) {
-      unsubscribe = subscribeImageThumbnail(imageId, (thumbnail) => {
-        if (!cancelled) setThumbSrc(thumbnail.src)
-      })
-      ensureImageThumbnailCached(imageId)
-        .then((thumbnail) => {
-          if (!cancelled && thumbnail) setThumbSrc(thumbnail.src)
-        })
-        .catch(() => {
-          if (!cancelled) setThumbSrc('')
-        })
-    }
-
-    return () => {
-      cancelled = true
-      unsubscribe?.()
-    }
-  }, [task.outputImages])
-
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label="查看任务详情"
-      title={task.prompt}
-      className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-stone-200/80 bg-stone-100/80 transition-colors hover:border-[#df7b57]/50 dark:border-white/[0.08] dark:bg-white/[0.04] dark:hover:border-[#ffb096]/40"
-    >
-      {thumbSrc ? (
-        <img
-          src={thumbSrc}
-          data-image-id={task.outputImages[0]}
-          alt=""
-          loading="lazy"
-          className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
-        />
-      ) : (
-        <Sparkles className="absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 text-stone-300 dark:text-stone-600" aria-hidden />
-      )}
-    </button>
-  )
+function HistoryItem({ task, selected, onSelect }: { task: TaskRecord; selected: boolean; onSelect: () => void }) {
+  return <button type="button" aria-pressed={selected} onClick={onSelect} className={`min-w-0 rounded-xl border p-3 text-left transition ${selected ? 'border-[#df7b57]/70 bg-[#df7b57]/5' : 'border-stone-200/80 hover:border-[#df7b57]/50 dark:border-white/10'}`}><p className="truncate text-xs font-medium text-stone-800 dark:text-stone-200">{task.prompt}</p><p className="mt-2 text-[11px] text-stone-500">{task.status === 'done' ? '已完成' : task.status === 'running' ? '生成中' : '生成失败'} · {new Date(task.createdAt).toLocaleString('zh-CN')}</p></button>
 }
 
 export default StickerWorkshop

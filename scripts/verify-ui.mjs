@@ -31,6 +31,11 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, de
 await page.route('**/*', (route) => {
   const request = route.request()
   const url = request.url()
+  // 首次访问公告会覆盖主题按钮；此脚本只验证主界面。
+  if (new URL(url).pathname.endsWith('/announcements.json')) {
+    route.fulfill({ contentType: 'application/json', body: '[]' })
+    return
+  }
   if (
     request.resourceType() === 'font' ||
     url.includes('fontsapi.zeoseven.com') ||
