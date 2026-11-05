@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, RefreshCw, Settings2, Sparkles, Trash2, Upload } from 'lucide-react'
 import { useStore } from '../store'
+import { useVisibleTasks } from '../hooks/usePrivacyMode'
 import { getSceneImageApiProfile, getSceneTextApiProfileResolution } from '../lib/apiProfiles'
 import { BUILTIN_SKILL_EXAMPLE_ANCHORS } from '../lib/skillWorkshop/builtinSkills'
 import { DEFAULT_FAL_IMAGE_SIZE } from '../lib/paramCompatibility'
@@ -33,7 +34,8 @@ export function SkillWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: ()
   const skillInputDraft = useStore((s) => s.skillInputDraft)
   const skillExpansion = useStore((s) => s.skillExpansion)
   const settings = useStore((s) => s.settings)
-  const tasks = useStore((s) => s.tasks)
+  // 隐私模式：隐藏进入隐私模式前已存在的任务
+  const tasks = useVisibleTasks()
   const loadBuiltinSkills = useStore((s) => s.loadBuiltinSkills)
   const importSkillsRootDirectory = useStore((s) => s.importSkillsRootDirectory)
   const refreshLocalSkills = useStore((s) => s.refreshLocalSkills)

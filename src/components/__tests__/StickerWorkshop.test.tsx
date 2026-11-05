@@ -8,6 +8,7 @@ import { DEFAULT_PARAMS, type TaskRecord } from '../../types'
 import { DEFAULT_GIF_OPTIONS, readGifMetadata } from '../../lib/gif'
 import { ANIMATED_GIF } from '../../lib/__fixtures__/gif'
 import { downloadImageIds } from '../../lib/downloadImages'
+import { createPrivacyModeState } from '../../lib/privacyMode'
 
 vi.mock('../../store', async (original) => ({ ...await original<typeof import('../../store')>(), submitTask: vi.fn(async () => []) }))
 vi.mock('../../lib/imageCache', async (original) => ({ ...await original<typeof import('../../lib/imageCache')>(), ensureImageCached: vi.fn(async () => ANIMATED_GIF), ensureImageThumbnailCached: vi.fn(async () => ({ src: 'data:image/png;base64,poster' })) }))
@@ -92,5 +93,15 @@ describe('通用 GIF 工作台', () => {
     await screen.findByAltText('生成的 GIF 动画')
     fireEvent.click(screen.getByRole('button', { name: '下载 GIF 原件' }))
     await waitFor(() => expect(downloadImageIds).toHaveBeenCalledWith(['output-b'], 'gif-gif-a-2'))
+  })
+  it('隐私模式隐藏进入前已存在的 GIF 任务，新任务仍可见', () => {
+    const hidden = task({ id: 'gif-hidden', createdAt: 1 })
+    const fresh = task({ id: 'gif-new', createdAt: 9_999 })
+    seed([hidden])
+    // 进入隐私模式时把既有任务标记为隐藏（复用真实 createPrivacyModeState 语义）
+    const privacy = createPrivacyModeState({ ...useStore.getState(), tasks: [hidden], batchProgress: null } as unknown as Parameters<typeof createPrivacyModeState>[0], 5_000)
+    useStore.setState({ privacyMode: privacy, tasks: [hidden, fresh] })
+    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    expect(screen.getByText('1 个任务')).toBeTruthy()
   })
 })

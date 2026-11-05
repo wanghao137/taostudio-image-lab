@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Download, Film, Loader2, Play, Settings2, Sparkles, Square } from 'lucide-react'
 import { submitTask, useStore } from '../store'
+import { useVisibleTasks } from '../hooks/usePrivacyMode'
 import { getSceneImageApiProfile, validateApiProfile } from '../lib/apiProfiles'
 import { DEFAULT_GIF_OPTIONS, GIF_MODELS, getGifProfile, validateGifParams, type GifOptions } from '../lib/gif'
 import { ensureImageCached } from '../lib/imageCache'
@@ -28,7 +29,8 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
   const settings = useStore((s) => s.settings)
   const prompt = useStore((s) => s.prompt)
   const setPrompt = useStore((s) => s.setPrompt)
-  const tasks = useStore((s) => s.tasks)
+  // 隐私模式：隐藏进入隐私模式前已存在的任务
+  const tasks = useVisibleTasks()
   const showToast = useStore((s) => s.showToast)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const [initial] = useState(readGifPreferences)

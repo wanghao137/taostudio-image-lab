@@ -8,12 +8,14 @@ import {
 import { ALL_FAVORITES_COLLECTION_ID } from '../../lib/favoriteState'
 import { getPageScrollTop } from '../../lib/pageScroll'
 import { useDragSelect } from '../../hooks/useDragSelect'
+import { useVisibleTasks } from '../../hooks/usePrivacyMode'
 import { FavoriteIcon } from '../icons'
 import { FavoriteCollectionOverviewCard } from './FavoriteCollectionOverviewCard'
 import { getCollectionTasks, getLatestCoverTask, type CollectionCard } from './favoriteUtils'
 
 export function FavoriteCollectionsView() {
-  const tasks = useStore((s) => s.tasks)
+  // 隐私模式：隐藏进入隐私模式前已存在的任务（封面与计数一并隐藏）
+  const tasks = useVisibleTasks()
   const collections = useStore((s) => s.favoriteCollections)
   const defaultFavoriteCollectionId = useStore((s) => s.defaultFavoriteCollectionId)
   const setDefaultFavoriteCollectionId = useStore((s) => s.setDefaultFavoriteCollectionId)

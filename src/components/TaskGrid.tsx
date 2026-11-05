@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState, useEffect } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask } from '../store'
 import { filterAndSortTasks } from '../lib/taskFilters'
+import { useVisibleTasks } from '../hooks/usePrivacyMode'
 import TaskCard from './TaskCard'
 import type { TaskRecord } from '../types'
 
@@ -12,7 +13,8 @@ export default function TaskGrid() {
   // 重渲染（Maximum update depth exceeded）。因此这里只订阅稳定切片，
   // 派生过滤放到 useMemo 里做。
   const gallerySceneFilter = useStore((s) => s.gallerySceneFilter)
-  const allTasks = useStore((s) => s.tasks)
+  // 隐私模式：隐藏进入隐私模式前已存在的任务（v0.8.3 引入 hook，画廊此前未接线）
+  const allTasks = useVisibleTasks()
   const tasks = useMemo(
     () => gallerySceneFilter === 'all'
       ? allTasks
