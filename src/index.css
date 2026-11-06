@@ -22,6 +22,10 @@
   --safe-area-right: env(safe-area-inset-right, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --safe-area-left: env(safe-area-inset-left, 0px);
+  /* 页面滚动条宽度：Toast 等按窗口宽居中的 fixed 元素用它让出滚动条列
+     （v0.8.3 合并引入 Toast 公式但未随合并引入上游的滚动条变量系统，缺定义会使 calc 无效、
+     toast 落回静态位置贴最左）。fork 未启用上游细滚动条系统，常驻 0px。 */
+  --page-scrollbar-width: 0px;
   scrollbar-gutter: stable;
 }
 
