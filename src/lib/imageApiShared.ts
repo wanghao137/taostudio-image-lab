@@ -1,4 +1,4 @@
-import { OUTPUT_FORMATS, type ApiProfile, type AppSettings, type RefusalRecoveryRecord, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { OUTPUT_FORMATS, type ApiProfile, type AppSettings, type ImageSearchGrounding, type RefusalRecoveryRecord, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams, type TaskRecord } from '../types'
 import { blobToDataUrl } from './dataUrl'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { DEFAULT_SVG_MODEL } from './imageModels'
@@ -43,6 +43,7 @@ export interface CallApiOptions {
   /** 第一张输入图上的透明标注层，仅 Images API 编辑接口原生支持 */
   markupDataUrl?: string
   skipCodexCliSizePrompt?: boolean
+  onPromptHintsPrepared?: (hints: TaskRecord['promptHints']) => void
   onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void
   onCustomTaskEnqueued?: (task: { taskId: string }) => void
   onPartialImage?: (partial: { image: string; partialImageIndex?: number; requestIndex?: number }) => void
@@ -52,6 +53,7 @@ export interface CallApiResult {
   gifCompanionCount?: number
   animation?: import('./gif').GifMetadata
   animations?: import('./gif').GifMetadata[]
+  searchGrounding?: ImageSearchGrounding[]
   /** base64 data URL 列表 */
   images: string[]
   /** API 返回的实际生效参数 */
@@ -244,7 +246,9 @@ export function isDataUrl(value: unknown): value is string {
 }
 
 export function normalizeBase64Image(value: string, fallbackMime: string): string {
-  return value.startsWith('data:') ? value : `data:${fallbackMime};base64,${value}`
+  if (value.startsWith('data:')) return value
+  const mime = value.startsWith('/9j/') ? 'image/jpeg' : value.startsWith('iVBORw0KGgo') ? 'image/png' : value.startsWith('UklGR') ? 'image/webp' : fallbackMime
+  return `data:${mime};base64,${value}`
 }
 
 export function getResponsesImageResultBase64(result: ResponsesOutputItem['result']): string | undefined {
@@ -547,5 +551,38 @@ export function normalizeResponsePayload(value: unknown): ResponsesApiResponse |
     ...value,
     ...(typeof value.id === 'string' ? { id: value.id } : { id: undefined }),
     output: normalizeResponsesOutputItems(value.output),
+  }
+}
+
+export function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[]): CallApiResult {
+  const successfulResults = results
+    .filter((result): result is PromiseFulfilledResult<CallApiResult> => result.status === 'fulfilled')
+    .map((result) => result.value)
+  if (!successfulResults.length) {
+    const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')!
+    throw firstError.reason
+  }
+
+  const images = successfulResults.flatMap((result) => result.images)
+  const actualParamsList = successfulResults.flatMap((result) =>
+    result.actualParamsList?.length ? result.actualParamsList : result.images.map(() => result.actualParams),
+  )
+  const revisedPrompts = successfulResults.flatMap((result) =>
+    result.revisedPrompts?.length ? result.revisedPrompts : result.images.map(() => undefined),
+  )
+  const rawImageUrls = successfulResults.flatMap((result) => result.rawImageUrls ?? [])
+  const searchGrounding = successfulResults.flatMap((result) => result.searchGrounding ?? [])
+  const failedRequests = results.flatMap((result, requestIndex) =>
+    result.status === 'rejected' ? [{ requestIndex, error: result.reason instanceof Error ? result.reason.message : String(result.reason) }] : [],
+  )
+
+  return {
+    images,
+    actualParams: mergeActualParams(successfulResults[0].actualParams ?? {}, { n: images.length }),
+    actualParamsList,
+    revisedPrompts,
+    ...(rawImageUrls.length ? { rawImageUrls } : {}),
+    ...(searchGrounding.length ? { searchGrounding } : {}),
+    ...(failedRequests.length ? { failedRequests } : {}),
   }
 }

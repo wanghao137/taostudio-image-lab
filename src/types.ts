@@ -28,7 +28,7 @@ export const ZIP_DOWNLOAD_ROUTE_VALUES = [
 ] as const
 export type ZipDownloadRoute = typeof ZIP_DOWNLOAD_ROUTE_VALUES[number]
 export const DEFAULT_ZIP_DOWNLOAD_ROUTES: ZipDownloadRoute[] = ['task-selection', 'favorite-collection-selection']
-export type BuiltInApiProvider = 'openai' | 'sb2api-async' | 'fal'
+export type BuiltInApiProvider = 'openai' | 'google' | 'xai' | 'sb2api-async' | 'fal'
 export type ApiProvider = BuiltInApiProvider | string
 export type CustomProviderTemplate = 'http-image'
 export const DEFAULT_STREAM_PARTIAL_IMAGES = 1
@@ -78,6 +78,13 @@ export interface CustomProviderDefinition {
   submit: CustomProviderSubmitMapping
   editSubmit?: CustomProviderSubmitMapping
   poll?: CustomProviderPollMapping
+  /** 按顺序匹配模型 ID，支持 * 通配符；匹配后使用整套接口映射 */
+  modelOverrides?: Array<{
+    models: string[]
+    submit: CustomProviderSubmitMapping
+    editSubmit?: CustomProviderSubmitMapping
+    poll?: CustomProviderPollMapping
+  }>
 }
 
 export interface ApiProfile {
@@ -243,6 +250,8 @@ export interface AppSettings {
   saveLocationMode: SaveLocationMode
   allowPromptRewrite: boolean
   taskCompletionNotification: boolean
+  /** 附加图像生成提示词（Google 模型生成提示词 + 搜索提示词；上游 v0.9.0） */
+  imagePromptHints: boolean
   enterSubmit: boolean
   /** 切换隐私模式的快捷键，如 Ctrl+Shift+H；空字符串表示禁用 */
   privacyModeShortcut: string
@@ -302,6 +311,12 @@ export interface TaskParams {
   frame_duration_ms: number
   output_compression: number | null
   moderation: 'auto' | 'low'
+  /** Google/Grok 供应商专用参数（上游 v0.9.0） */
+  aspect_ratio?: string
+  resolution?: string
+  google_search?: boolean
+  image_search?: boolean
+  thinking_level?: 'auto' | 'minimal' | 'low' | 'medium' | 'high'
   n: number
   transparent_output: boolean
   /** 编辑任务输入图比例预处理策略（仅 size 为具体尺寸时有意义）：
@@ -446,6 +461,11 @@ export interface ImageTaskLink {
   updatedAt: string
 }
 
+export interface ImageSearchGrounding {
+  renderedContent?: string
+  sources: Array<{ uri: string; title: string; imageUri?: string; domain?: string }>
+}
+
 export interface TaskRecord {
   markupImageId?: string | null
   gifCompanionCount?: number
@@ -486,6 +506,12 @@ export interface TaskRecord {
   revisedPromptByImage?: Record<string, string>
   /** 审核/安全拒绝后的最小改写恢复记录 */
   refusalRecovery?: RefusalRecoveryRecord
+  /** Gemini 搜索接地来源（上游 v0.9.0） */
+  searchGrounding?: ImageSearchGrounding[]
+  /** 请求中附加的图像生成和搜索提示词 */
+  promptHints?: { prefix: string; suffix: string }
+  /** 请求配置支持的可选参数，用于展示默认值 */
+  paramSupport?: { thinking: boolean; complexity: boolean }
   /** 是否启用透明背景后处理 */
   transparentOutput?: boolean
   /** 实际发送给 API 的透明背景辅助提示词 */

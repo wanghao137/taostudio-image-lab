@@ -3,7 +3,7 @@ import { useStore, submitTask, addImageFromFile } from '../store'
 import { DEFAULT_PARAMS } from '../types'
 import { getSceneImageApiProfile, normalizeSettings, resolveApiProfileModel } from '../lib/apiProfiles'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings, supportsTransparentOutput } from '../lib/paramCompatibility'
-import { isVectorOrAnimatedFormat } from '../lib/imageModels'
+import { getImageModelFamily, isVectorOrAnimatedFormat } from '../lib/imageModels'
 import { formatImageRatio, normalizeCodexCliImageSize, normalizeImageSize, type CommonImageRatio } from '../lib/size'
 import {
   ASSET_4K_RATIO_PRESETS,
@@ -88,7 +88,7 @@ export function useImageComposer() {
   const isFalTextToImage = isFalProvider && inputImages.length === 0
   const nDraftValue = Number(nInput)
   const effectiveNValue = Number.isNaN(nDraftValue) ? params.n : nDraftValue
-  const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && !isVectorOrAnimatedFormat(params.output_format) && effectiveNValue > 1
+  const streamConcurrentByN = activeProfile.provider === 'openai' && !getImageModelFamily(activeProfile) && activeProfile.streamImages === true && !isVectorOrAnimatedFormat(params.output_format) && effectiveNValue > 1
   const nLimitHintText = isFalProvider
     ? `fal.ai 最大请求数量为 ${outputImageLimit}`
     : `OpenAI 最大请求数量为 ${outputImageLimit}`

@@ -100,9 +100,9 @@ describe('GPT Image 2.6 parameter compatibility', () => {
   it('points Responses users to the image model when 2.6 params are unavailable', () => {
     const profile = getActiveApiProfile(createSettings({ apiMode: 'responses', model: 'gpt-image-2.6-sunburst', imageGenerationModel: '' }))
     expect(getParamDisabledReasons(profile)).toMatchObject({
-      complexity: '图像模型 ID 需为 GPT Image 2.6 及以上',
-      gif: '图像模型 ID 需为 GPT Image 2.6 及以上',
-      svg: '图像模型 ID 需为 GPT Image 2.6 及以上',
+      complexity: '当前图像模型不支持复杂度参数',
+      gif: '当前图像模型不支持此格式',
+      svg: '当前图像模型不支持此格式',
     })
   })
 })
@@ -184,6 +184,32 @@ describe('GPT Image 2.6 requests', () => {
     expect(body.get('markup')).toBeInstanceOf(Blob)
     expect(body.has('mask')).toBe(false)
     expect(body.get('complexity')).toBe('low')
+  })
+
+  it('keeps the original image and separate markup when switching 2.6, 2.5 and back', async () => {
+    const originalFetch = globalThis.fetch
+    const fetchMock = mockImageResponse()
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).startsWith('data:')) return originalFetch(input, init)
+      return new Response(JSON.stringify({ data: [{ b64_json: 'aW1hZ2U=' }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    })
+    const inputImageDataUrls = ['data:image/png;base64,aW1hZ2U=']
+    for (const model of ['gpt-image-2.6-sunburst', 'gpt-image-2.5', 'gpt-image-2.6-sunburst']) {
+      fetchMock.mockClear()
+      await callImageApi({
+        settings: createSettings({ model }),
+        prompt: 'prompt',
+        params: DEFAULT_PARAMS,
+        inputImageDataUrls,
+        markupDataUrl: 'data:image/png;base64,bWFya3Vw',
+      })
+      const body = getFormBody(fetchMock)
+      expect(await (body.get('markup') as Blob).text()).toBe('markup')
+      expect(inputImageDataUrls).toEqual(['data:image/png;base64,aW1hZ2U='])
+    }
   })
 
   it('sends GIF frame settings to the Images edit API', async () => {

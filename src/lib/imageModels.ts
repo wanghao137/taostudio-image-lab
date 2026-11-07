@@ -12,6 +12,24 @@ export function getImageGenerationModel(
     : profile.model
 }
 
+export function getImageModelFamily(profile: Pick<ApiProfile, 'provider' | 'apiMode' | 'model'>): 'gemini' | 'grok' | null {
+  if (profile.provider === 'openai' && profile.apiMode === 'responses') return null
+  if (profile.provider === 'google') return 'gemini'
+  if (profile.provider === 'xai') return 'grok'
+  const model = profile.model.trim().toLowerCase()
+  if (/(?:^|\/)gemini-[^/]*image|(?:^|\/)(?:gemini-)?nano[-_]?banana/.test(model)) return 'gemini'
+  if (/(?:^|\/)grok-[^/]*image|(?:^|\/)grok-imagine-\d/.test(model)) return 'grok'
+  return null
+}
+
+export function supportsGrokQuality(model: string) {
+  return /grok-imagine-image-2[.-]0(?:$|[-/])/.test(model.toLowerCase())
+}
+
+export function usesGrokSizeParams(profile: ApiProfile) {
+  return profile.provider === 'openai' && /(?:^|\/)grok-imagine-1\.5-(?:apimart|ext)$/i.test(profile.model)
+}
+
 /** 从 `gpt-image-2.6-flare`、`openai/gpt-image-2.5/sunburst` 等 ID 中解析主次版本号，无法识别时返回 null */
 function parseGptImageVersion(model: string) {
   const match = model.trim().toLowerCase().match(/gpt-image-(\d+)(?:\.(\d+))?/)
@@ -24,7 +42,7 @@ function isGptImageModelAtLeast(model: string, major: number, minor: number) {
   return version.major > major || (version.major === major && version.minor >= minor)
 }
 
-/** xhigh / max 画质和 markup 标注编辑 */
+/** xhigh / max 质量和 markup 标注编辑 */
 export function isGptImage25PlusModel(model: string) {
   return isGptImageModelAtLeast(model, 2, 5)
 }
@@ -34,7 +52,7 @@ export function isGptImage26PlusModel(model: string) {
   return isGptImageModelAtLeast(model, 2, 6)
 }
 
-/** xhigh / max 画质；fal.ai 的 2.6 端点画质只到 high */
+/** xhigh / max 质量；fal.ai 的 2.6 端点质量只到 high */
 export function supportsExtendedQuality(profile: ApiProfile) {
   const model = getImageGenerationModel(profile)
   if (profile.provider === 'fal' && isGptImage26PlusModel(model)) return false

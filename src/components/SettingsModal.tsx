@@ -5,11 +5,12 @@ import { hasActiveDataOperations } from '../lib/dataOperations'
 import { useSettingsDataTransfer } from '../lib/dataProgress'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
 import { isLocalAutoSaveSupported } from '../lib/localAutoSave'
-import { DEFAULT_SVG_MODEL, isGptImage26PlusModel } from '../lib/imageModels'
+import { DEFAULT_SVG_MODEL, getImageModelFamily, isGptImage26PlusModel } from '../lib/imageModels'
 import { isTauri } from '../lib/platform'
 import { useStore, exportData, importData, clearData, getLocalAutoSaveRetryableTaskCount, type SettingsTab } from '../store'
 import {
   createDefaultOpenAIProfile,
+  NATIVE_IMAGE_PROVIDERS,
   DEFAULT_FAL_BASE_URL,
   DEFAULT_FAL_MODEL,
   DEFAULT_IMAGES_MODEL,
@@ -19,6 +20,7 @@ import {
   findEquivalentApiProfile,
   getApiProviderLabel,
   getActiveApiProfile,
+  getCustomProviderDefinition,
   getDefaultOpenAIModel,
   getTextApiProfileResolution,
   importCustomProviderSettingsFromJson,
@@ -30,6 +32,7 @@ import {
   normalizeSettings,
   normalizeStreamPartialImages,
   rememberOpenAIProfileModel,
+  resolveApiProfileModel,
   splitModelList,
   switchApiProfileProvider,
   switchOpenAIProfileApiMode,
@@ -233,9 +236,12 @@ export default function SettingsModal() {
   const defaultConfigOnly = isDefaultConfigOnlyEnabled()
   const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
   const activeProviderIsOpenAICompatible = isOpenAICompatibleProvider(draft, activeProfile.provider)
-  const activeProviderUsesApiUrl = activeProviderIsOpenAICompatible || activeProfile.provider === 'fal'
-  const activeCustomProvider = draft.customProviders.find((provider) => provider.id === activeProfile.provider)
-  const activeCustomProviderSupportsNativeTransparentBackground = !activeCustomProvider || customProviderSupportsNativeTransparentBackground(activeCustomProvider)
+  const nativeImageProvider = activeProfile.provider === 'google' || activeProfile.provider === 'xai' ? NATIVE_IMAGE_PROVIDERS[activeProfile.provider] : null
+  const activeProviderUsesApiUrl = activeProviderIsOpenAICompatible || activeProfile.provider === 'fal' || Boolean(nativeImageProvider)
+  const activeCustomProvider = getCustomProviderDefinition(draft, activeProfile.provider)
+  const resolvedActiveProfile = resolveApiProfileModel(activeProfile, undefined, activeCustomProvider)
+  const activeImageFamily = getImageModelFamily(resolvedActiveProfile)
+  const activeCustomProviderSupportsNativeTransparentBackground = !activeImageFamily && (!activeCustomProvider || customProviderSupportsNativeTransparentBackground(activeCustomProvider, resolvedActiveProfile.model))
   const activeProfileLocked = isPresetProfileLocked(activeProfile.id)
   const activePresetDescription = getPresetProfileDescription(activeProfile.id)
   const activeProfileApiProxyEligible = isProfileApiProxyEligible(draft, activeProfile)
@@ -253,11 +259,14 @@ export default function SettingsModal() {
   const pendingLocalAutoSaveCount = getLocalAutoSaveRetryableTaskCount(tasks)
   const localAutoSaveNeedsPermission = tasks.some((task) => task.localAutoSave?.status === 'needs_permission')
   const canRetryLocalAutoSave = localAutoSave.enabled && pendingLocalAutoSaveCount > 0
-  const defaultProviderOrder = ['openai', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
+  const defaultProviderOrder = ['openai', 'google', 'xai', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
   const unorderedProviderOptions = [
     { label: 'OpenAI 兼容接口', value: 'openai', draggable: true },
+    { label: 'Google', value: 'google', draggable: true },
+    { label: 'xAI', value: 'xai', draggable: true },
+    { label: 'sub2api（异步）', value: 'sb2api-async', draggable: true },
     { label: 'fal.ai', value: 'fal', draggable: true },
     ...draft.customProviders.map((provider) => ({
       label: provider.name,
@@ -923,7 +932,7 @@ export default function SettingsModal() {
   }
 
   const handleProviderReorder = (sourceValue: string | number, targetValue: string | number, position: 'before' | 'after' | null) => {
-    const currentOrder = draft.providerOrder || ['openai', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
+    const currentOrder = draft.providerOrder || ['openai', 'google', 'xai', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
     const sourceIndex = currentOrder.indexOf(String(sourceValue))
     const targetIndex = currentOrder.indexOf(String(targetValue))
     if (sourceIndex < 0 || targetIndex < 0) return
@@ -985,6 +994,7 @@ export default function SettingsModal() {
       submit: provider.submit,
       editSubmit: provider.editSubmit,
       poll: provider.poll,
+      modelOverrides: provider.modelOverrides,
     }, null, 2))
     setShowCustomProviderImport(true)
     setCustomProviderImportError(null)
@@ -1470,8 +1480,8 @@ export default function SettingsModal() {
                     onChange={(e) => updateActiveProfile({ baseUrl: e.target.value })}
                     onBlur={(e) => commitActiveProfilePatch({ baseUrl: e.target.value })}
                     type="text"
-                    disabled={apiProxyEnabled}
-                    placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_BASE_URL : DEFAULT_SETTINGS.baseUrl}
+                    disabled={apiProxyEnabled || activeProfileLocked}
+                    placeholder={nativeImageProvider?.baseUrl ?? (activeProfile.provider === 'fal' ? DEFAULT_FAL_BASE_URL : DEFAULT_SETTINGS.baseUrl)}
                     className={`w-full rounded-xl border border-transparent bg-black/[0.04] px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:bg-white/[0.06] dark:text-gray-200 dark:focus:border-blue-500/50 ${apiProxyEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                   />
                   <div data-selectable-text className="mt-1.5 min-h-[22px] flex items-center text-xs text-gray-500 dark:text-gray-500">
@@ -1479,8 +1489,10 @@ export default function SettingsModal() {
                       <span className="text-yellow-600 dark:text-yellow-500">已开启代理，实际请求目标由部署端决定，此处设置被忽略。</span>
                     ) : activeProfile.provider === 'fal' ? (
                       <span>默认使用 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">{DEFAULT_FAL_BASE_URL}</code>；填写自定义地址时将作为 fal.ai 代理 URL。</span>
+                    ) : activeProfile.provider === 'google' ? (
+                      <span>末尾带 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/</code> 时直接使用该地址拼接接口，不补 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/v1beta</code> 前缀；可通过配置分享链接导入。</span>
                     ) : (
-                      <span>支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code></span>
+                      <span>末尾带 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/</code> 时直接使用该地址拼接接口，不补 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/v1</code> 前缀；支持通过链接参数导入：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiUrl=</code>。</span>
                     )}
                   </div>
                 </label>
@@ -1520,7 +1532,7 @@ export default function SettingsModal() {
                     onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
                     onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
                     type={showApiKey ? 'text' : 'password'}
-                    placeholder={activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...'}
+                    placeholder={activeProfile.provider === 'google' ? 'AIza...' : activeProfile.provider === 'xai' ? 'xai-...' : activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...'}
                     className="w-full rounded-xl border border-transparent bg-black/[0.04] px-3 py-2.5 pr-10 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:bg-white/[0.06] dark:text-gray-200 dark:focus:border-blue-500/50"
                   />
                   <button
@@ -1587,8 +1599,9 @@ export default function SettingsModal() {
                     commitActiveProfilePatch(rememberOpenAIProfileModel(activeProfile, model))
                   }}
                   type="text"
-                  placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultOpenAIModel(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
-                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                  disabled={activeProfileLocked}
+                  placeholder={nativeImageProvider?.model ?? (activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode))}
+                  className="w-full rounded-xl border border-transparent bg-black/[0.04] px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:bg-white/[0.06] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
                   {activeProfile.provider === 'fal' ? (
@@ -1599,12 +1612,14 @@ export default function SettingsModal() {
                       <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">openai/gpt-image-2.6/sunburst</code>{' '}
                       <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">openai/gpt-image-2.6/flare</code>。
                     </>
+                  ) : nativeImageProvider ? (
+                    <>图像模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{nativeImageProvider.model}</code>。</>
                   ) : activeCustomProvider ? (
                     <>当前使用 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{activeCustomProvider.name}</code>。</>
                   ) : isResponsesProfile ? (
                     <>接收提示词并调用 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">image_generation</code> 工具的文本模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_RESPONSES_MODEL}</code>。</>
                   ) : (
-                    <>GPT Image 模型，例如 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">{DEFAULT_IMAGES_MODEL}</code>。</>
+                    <>支持 GPT Image、Gemini 和 Grok 图像模型，参数随模型切换。</>
                   )}
                   多个模型以逗号分隔，可在首页的模型参数中切换。
                   {activeProfile.provider === 'openai' && (
@@ -1672,7 +1687,7 @@ export default function SettingsModal() {
               )}
 
               {/* 8. 流式传输 + 中间步骤图像数 */}
-              {activeProfile.provider === 'openai' && (
+              {activeProfile.provider === 'openai' && !activeImageFamily && (
                 <div className="block space-y-3">
                   <div>
                     <div className="mb-1.5 flex items-center justify-between gap-3">
@@ -1723,7 +1738,7 @@ export default function SettingsModal() {
                   <span className="block text-sm text-gray-600 dark:text-gray-300">透明背景实现方式</span>
                   <div className="w-28 shrink-0">
                     <Select
-                      value={activeProfile.transparentBackgroundMethod}
+                      value={resolvedActiveProfile.transparentBackgroundMethod}
                       onChange={(value) => updateActiveProfile({ transparentBackgroundMethod: value as ApiProfile['transparentBackgroundMethod'] }, true)}
                       options={[
                         { label: 'API 原生', value: 'api' },
@@ -1736,13 +1751,13 @@ export default function SettingsModal() {
                 </div>
                 <div data-selectable-text className="text-xs text-gray-500 dark:text-gray-500">
                   {activeCustomProviderSupportsNativeTransparentBackground
-                    ? 'API 原生会请求接口直接生成透明背景，需当前接口支持；本地后处理会生成纯色背景并在浏览器中去除。'
-                    : <>当前自定义服务商 Manifest 未映射 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">$params.background</code>，无法使用 API 原生透明背景。</>}
+                    ? `API 原生会请求接口直接生成透明背景，需当前接口支持；本地后处理会生成纯色背景并在${isTauri ? '本地' : '浏览器中'}去除。`
+                    : activeImageFamily ? '当前图像模型使用本地后处理生成透明背景。' : <>当前自定义服务商 Manifest 未映射 <code className="rounded bg-gray-100 px-1 py-0.5 dark:bg-white/[0.06]">$params.background</code>，无法使用 API 原生透明背景。</>}
                 </div>
               </div>
 
               {/* 10. 返回 Base64 图片数据 */}
-              {activeProviderIsOpenAICompatible && (
+              {(activeProviderIsOpenAICompatible || activeProfile.provider === 'xai') && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">返回 Base64 图片数据</span>
@@ -1764,7 +1779,7 @@ export default function SettingsModal() {
               )}
 
               {/* 11. Codex CLI 兼容模式 */}
-              {activeProviderIsOpenAICompatible && (
+              {activeProviderIsOpenAICompatible && !activeImageFamily && (
                 <div className="block">
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">Codex CLI 兼容模式</span>
@@ -1788,8 +1803,8 @@ export default function SettingsModal() {
                 </div>
               )}
 
-              {/* 11. 请求超时 */}
-              {activeProviderIsOpenAICompatible && (
+              {/* 12. 请求超时 */}
+              {(activeProviderIsOpenAICompatible || nativeImageProvider) && (
                 <label className="block">
                   <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">请求超时 (秒)</span>
                   <input
