@@ -22,6 +22,7 @@ import {
   isHttpUrl,
   mergeActualParams,
   mergeConcurrentApiResults,
+  NetworkFetchError,
   maybeAppendImageToolDroppedHint,
   MIME_MAP,
   normalizeBase64Image,
@@ -962,7 +963,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
     }
 
     if (!response.ok) {
-      const errorMessage = await getApiErrorMessage(response)
+      let errorMessage = await getApiErrorMessage(response)
+      if (isGif && /GIF output is not enabled/i.test(errorMessage)) {
+        errorMessage += '\n当前供应商通道未启用原生 GIF 输出（Codex 订阅后端在通道级禁用了 GIF，与请求参数无关）。请把场景 API 切换到支持 ChatGPT web 对话流的供应商（如 chatgpt2api 的 web 别名通道）后再试，或改用静态图输出。'
+      }
       throw new ApiError({
         message: maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages),
         status: response.status,
@@ -995,7 +999,27 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
 
   try {
     // GIF 超时后上游可能已执行；不自动重发或改写用户的动画意图。
-    if (isGif) return await sendRequest(firstPrompt)
+    if (isGif) {
+      // 例外：提交后极短时间内（15s）就以 429/网络错误失败，说明上游根本没开始生成，
+      // 重发不会造成双重消费——这是号池配额窗口/网关抖动的常见形态（实测每 4-5 张一次，窗口 >20s），
+      // 自动退避重试最多 3 次。502/503 可能是上游生成中途失败，重试会双重消费，保持不重试。
+      for (let gifAttempt = 0; ; gifAttempt++) {
+        const gifAttemptStart = Date.now()
+        try {
+          return await sendRequest(firstPrompt)
+        } catch (err) {
+          const failedFast = Date.now() - gifAttemptStart < 15_000
+          const status = isApiError(err) ? err.status : undefined
+          const retryableFast = failedFast && (status === 429 || err instanceof NetworkFetchError)
+          if (!retryableFast || gifAttempt >= 2) throw err
+          const waitMs = 30_000 * (gifAttempt + 1)
+          await new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, waitMs)
+            controller.signal.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')) }, { once: true })
+          })
+        }
+      }
+    }
     try {
       // 瞬态失败重试：408/429/5xx/网络错误自动退避重试。每次重试重置超时窗口，
       // 否则一次 600s 预算被首尝试耗尽后重试立即失败。

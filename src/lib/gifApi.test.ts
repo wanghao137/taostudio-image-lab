@@ -16,17 +16,44 @@ describe('原生 GIF 请求', () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: ANIMATED_GIF_BASE64 }], output_format: 'gif' }), { headers: { 'Content-Type': 'application/json' } }))
     const result = await callImageApi(options)
     expect(String(fetch.mock.calls[0][0])).toContain('/images/generations')
-    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ model: 'gpt-image-2.6-flare', prompt: options.prompt, output_format: 'gif', moderation: 'low', size: 'auto', quality: 'auto', frame_count: 9, frame_duration_ms: 200, complexity: 'high', n: 1 })
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ model: 'gpt-image-2.6-sunburst', prompt: options.prompt, output_format: 'gif', moderation: 'low', size: 'auto', quality: 'auto', frame_count: 6, frame_duration_ms: 200, complexity: 'high', n: 1 })
     expect(result.images[0]).toBe(`data:image/gif;base64,${ANIMATED_GIF_BASE64}`)
     expect(result.animation).toMatchObject({ frameCount: 2, durationMs: 400 })
   })
-  it('64 帧、自定义尺寸、max 画质与多个 GIF 都进入同一请求', async () => {
+  it('16 帧、自定义尺寸、max 画质与多个 GIF 都进入同一请求', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: ANIMATED_GIF_BASE64 }, { b64_json: ANIMATED_GIF_BASE64 }] })))
-    const result = await callImageApi({ ...options, params: { ...options.params, n: 2, size: '512x512', quality: 'max', gif: { ...DEFAULT_GIF_OPTIONS, frame_count: 64, frame_duration_ms: 2000, complexity: 'low' } } })
+    const result = await callImageApi({ ...options, params: { ...options.params, n: 2, size: '512x512', quality: 'max', gif: { ...DEFAULT_GIF_OPTIONS, frame_count: 16, frame_duration_ms: 2000, complexity: 'low' } } })
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({ n: 2, size: '512x512', quality: 'max', frame_count: 64, frame_duration_ms: 2000, complexity: 'low' })
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({ n: 2, size: '512x512', quality: 'max', frame_count: 16, frame_duration_ms: 2000, complexity: 'low' })
     expect(result.animations).toHaveLength(2)
   })
+  it('通道级禁用 GIF 的错误翻译为可操作指引', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ error: { message: 'GIF output is not enabled for this request.', type: 'invalid_request_error' } }), { status: 400 }))
+    await expect(callImageApi(options)).rejects.toThrow('通道未启用原生 GIF')
+  })
+  it('快速失败 429 自动退避重试至多 3 次（上游未开始生成，无双重消费）', async () => {
+    vi.useFakeTimers()
+    try {
+      const fetch = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'no available image quota' } }), { status: 429 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'no available image quota' } }), { status: 429 }))
+        .mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: ANIMATED_GIF_BASE64 }] })))
+      const promise = callImageApi(options)
+      const result = await vi.advanceTimersByTimeAsync(120_000).then(() => promise)
+      expect(fetch).toHaveBeenCalledTimes(3)
+      expect(result.images[0]).toBe(`data:image/gif;base64,${ANIMATED_GIF_BASE64}`)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('超时类慢失败不重试 GIF（避免上游已执行导致双重消费）', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
+    const slowOptions = { ...options, apiProfile: { ...profile, timeout: 2 } }
+    await expect(callImageApi(slowOptions)).rejects.toThrow()
+    expect(fetch).toHaveBeenCalledTimes(1)
+  }, 10_000)
   it('拒绝参考图与伪 GIF，不自动重新生成', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: 'AAAA' }] })))
     await expect(callImageApi({ ...options, inputImageDataUrls: ['data:image/png;base64,AAAA'] })).rejects.toThrow('参考图')

@@ -3,7 +3,7 @@ import { Download, Film, Loader2, Play, Settings2, Sparkles, Square } from 'luci
 import { submitTask, useStore } from '../store'
 import { useVisibleTasks } from '../hooks/usePrivacyMode'
 import { getSceneImageApiProfile, validateApiProfile } from '../lib/apiProfiles'
-import { DEFAULT_GIF_OPTIONS, GIF_MODELS, getGifProfile, validateGifParams, type GifOptions } from '../lib/gif'
+import { DEFAULT_GIF_OPTIONS, GIF_MODELS, buildGifPromptEnhancement, estimateGifFrameSize, getGifProfile, validateGifParams, type GifOptions } from '../lib/gif'
 import { ensureImageCached } from '../lib/imageCache'
 import { safeCreateImageThumbnail } from '../lib/dbWeb'
 import { downloadImageIds, withSaveLocation } from '../lib/downloadImages'
@@ -15,11 +15,11 @@ const BUTTON = 'inline-flex items-center justify-center gap-2 rounded-xl bg-[#df
 const SECONDARY = 'inline-flex items-center justify-center gap-2 rounded-xl border border-stone-200/80 px-3 py-2 text-xs font-medium text-stone-700 transition hover:bg-stone-100 disabled:opacity-50 dark:border-white/10 dark:text-stone-200 dark:hover:bg-white/5'
 
 function readGifPreferences(): TaskParams {
-  const defaults: TaskParams = { ...DEFAULT_PARAMS, output_format: 'gif', gif: { ...DEFAULT_GIF_OPTIONS }, quality: 'auto', moderation: 'auto' }
+  const defaults: TaskParams = { ...DEFAULT_PARAMS, output_format: 'gif', gif: { ...DEFAULT_GIF_OPTIONS }, quality: 'high', moderation: 'auto' }
   try {
     const saved = JSON.parse(readLocal('gif-workbench-v1') ?? 'null') as Partial<TaskParams> | null
     if (!saved) return defaults
-    const params = { ...defaults, gif: saved.gif, size: saved.size ?? 'auto', quality: saved.quality ?? 'auto', n: saved.n ?? 1, moderation: saved.moderation ?? 'auto' }
+    const params = { ...defaults, gif: saved.gif, size: saved.size ?? 'auto', quality: saved.quality ?? 'high', n: saved.n ?? 1, moderation: saved.moderation ?? 'auto' }
     validateGifParams(params)
     return params
   } catch { return defaults }
@@ -48,6 +48,7 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
   const [preview, setPreview] = useState('')
   const [poster, setPoster] = useState('')
   const [previewError, setPreviewError] = useState('')
+  const [promptEnhance, setPromptEnhance] = useState(() => readLocal('gif-workbench-prompt-enhance') !== 'off')
   const gifTasks = useMemo(() => tasks.filter((t) => t.params.output_format === 'gif'), [tasks])
   const selected = gifTasks.find((t) => t.id === selectedId) ?? gifTasks[0]
   const running = gifTasks.some((t) => t.status === 'running')
@@ -87,7 +88,8 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
     try {
       setSelectedId(null)
       setOutputIndex(0)
-      await submitTask({ gif: { prompt: prompt.trim(), params }, ignoreBatchPrompt: true })
+      const finalPrompt = promptEnhance ? `${prompt.trim()}\n\n${buildGifPromptEnhancement(gif, count)}` : prompt.trim()
+      await submitTask({ gif: { prompt: finalPrompt, params }, ignoreBatchPrompt: true })
     } catch (err) { showToast(`提交失败：${err instanceof Error ? err.message : String(err)}`, 'error') }
     finally { submitLock.current = false; setSubmitting(false) }
   }
@@ -128,21 +130,25 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
           <div className="rounded-xl border border-stone-200/70 p-4 dark:border-white/[0.08]">
             <div className="mb-4 flex items-center justify-between gap-2"><h3 className="text-sm font-semibold text-stone-800 dark:text-stone-100">动画节奏</h3><output className="font-mono text-xs text-[#bd6547] dark:text-[#ffb096]">{Number.isFinite(gif.frame_count * gif.frame_duration_ms) ? (gif.frame_count * gif.frame_duration_ms / 1000).toFixed(2) : '—'} 秒 / 周期</output></div>
             <div className="grid grid-cols-2 gap-4">
-              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">帧数<input aria-label="GIF 帧数" type="number" min={2} max={64} step={1} value={Number.isNaN(gif.frame_count) ? '' : gif.frame_count} onChange={(e) => setGif({ ...gif, frame_count: e.target.valueAsNumber })} className={FIELD} required /><span className="block text-[11px] text-stone-500">2–64 帧，默认 9 帧</span></label>
+              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">帧数<input aria-label="GIF 帧数" type="number" min={2} max={16} step={1} value={Number.isNaN(gif.frame_count) ? '' : gif.frame_count} onChange={(e) => setGif({ ...gif, frame_count: e.target.valueAsNumber })} className={FIELD} required /><span className="block text-[11px] text-stone-500">2–16 帧，默认 6 帧；帧数越少单帧越清晰，清晰优先建议 4 帧＋方形画幅</span></label>
               <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">每帧时长 ms<input aria-label="GIF 每帧时长" type="number" min={20} max={2000} step={10} value={Number.isNaN(gif.frame_duration_ms) ? '' : gif.frame_duration_ms} onChange={(e) => setGif({ ...gif, frame_duration_ms: e.target.valueAsNumber })} className={FIELD} required /></label>
             </div>
-            {gif.frame_count > 16 && <p className="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-200">指南支持最多 64 帧；当前接口参考仍写 16 帧，部分服务商可能拒绝更高帧数。</p>}
+            <p className="mt-3 text-xs leading-relaxed text-stone-500 dark:text-stone-400">上游对每段 GIF 的总像素预算近似恒定（约 155 万像素，所有帧共享），帧数越多单帧越小：16 帧≈309px、8 帧≈439px、6 帧≈508px、4 帧≈620px。当前配置预计单帧约 <output className="font-mono font-semibold text-[#bd6547] dark:text-[#ffb096]">{Number.isFinite(gif.frame_count) ? estimateGifFrameSize(count, gif.frame_count) : '—'}px</output> 见方。</p>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">每帧尺寸<input aria-label="GIF 每帧尺寸" value={size} onChange={(e) => setSize(e.target.value.trim())} placeholder="auto 或 512x512" className={FIELD} /><span className="block text-[11px] leading-relaxed text-stone-500">auto 自动选择；自定义宽高须为 16 的倍数。</span></label>
+              <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">每帧尺寸<input aria-label="GIF 每帧尺寸" value={size} onChange={(e) => setSize(e.target.value.trim())} placeholder="auto、1k、2k、4k 或 512x512" className={FIELD} /><span className="block text-[11px] leading-relaxed text-stone-500">auto 自动选择；1k/2k/4k 为档位制，宽幅内容建议 2k；自定义宽高须为 16 的倍数。</span></label>
               <label className="block space-y-2 text-xs text-stone-600 dark:text-stone-300">生成数量<input aria-label="GIF 生成数量" type="number" min={1} max={10} step={1} value={Number.isNaN(count) ? '' : count} onChange={(e) => setCount(e.target.valueAsNumber)} className={FIELD} required /><span className="block text-[11px] leading-relaxed text-stone-500">帧数、尺寸和数量共同占用像素预算；超限时降低其中一项。</span></label>
             </div>
           </div>
           <details className="text-xs text-stone-600 dark:text-stone-300">
             <summary className="cursor-pointer py-1 font-medium">高级设置</summary>
             <div className="mt-3 grid gap-4 sm:grid-cols-2">
-              <label className="space-y-2">规划强度<select aria-label="GIF 规划强度" value={gif.complexity} onChange={(e) => setGif({ ...gif, complexity: e.target.value as GifOptions['complexity'] })} className={FIELD}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+              <label className="space-y-2">规划强度<select aria-label="GIF 规划强度" value={gif.complexity} onChange={(e) => setGif({ ...gif, complexity: e.target.value as GifOptions['complexity'] })} className={FIELD}><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select></label>
               <label className="space-y-2">内容审核<select aria-label="GIF 内容审核" value={moderation} onChange={(e) => setModeration(e.target.value as TaskParams['moderation'])} className={FIELD}><option value="auto">标准 auto</option><option value="low">较宽松 low</option></select></label>
             </div>
+            <label className="mt-3 flex items-start gap-2 leading-relaxed">
+              <input type="checkbox" checked={promptEnhance} onChange={(e) => { setPromptEnhance(e.target.checked); writeLocal('gif-workbench-prompt-enhance', e.target.checked ? 'on' : 'off') }} className="mt-0.5 h-4 w-4 shrink-0 rounded border-stone-300 text-[#df7b57] focus:ring-[#df7b57]/30 dark:border-white/20" />
+              <span><span className="font-medium text-stone-700 dark:text-stone-200">GIF 提示词增强</span><span className="mt-0.5 block text-stone-500 dark:text-stone-400">把帧数、时长与清晰度要求自动拼进提示词。chatgpt2api 等走 web 对话流的网关会忽略 API 层的 GIF 参数，提示词是控制帧数与清晰度的唯一有效通道；官方契约型供应商同样会参考这些措辞。</span></span>
+            </label>
             <p className="mt-3 leading-relaxed text-stone-500">规划强度控制渲染前的规划量，默认高，与画质独立。GIF 不支持流式预览、压缩率或图片编辑。</p>
           </details>
           {profileError && <div role="alert" className="rounded-xl bg-amber-50 p-3 text-xs leading-relaxed text-amber-800 dark:bg-amber-500/10 dark:text-amber-200"><p>{profileError}</p><button type="button" onClick={() => setShowSettings(true)} className={`${SECONDARY} mt-2`}>打开 API 设置</button></div>}

@@ -17,6 +17,7 @@ vi.mock('../../lib/dbWeb', async (original) => ({ ...await original<typeof impor
 const profile = createDefaultOpenAIProfile({ id: 'image-a', name: '生图配置 A', apiKey: 'test-only', baseUrl: 'https://example.test', apiMode: 'responses', streamImages: true })
 function seed(tasks: TaskRecord[] = []) {
   localStorage.removeItem('gif-workbench-v1')
+  localStorage.removeItem('gif-workbench-prompt-enhance')
   useStore.setState({ settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id, activeScene: 'sticker' }), params: { ...DEFAULT_PARAMS }, prompt: '', tasks, toast: null, showSettings: false, inputImages: [{ id: 'old-image', dataUrl: 'data:image/png;base64,old' }] })
 }
 const task = (overrides: Partial<TaskRecord> = {}): TaskRecord => ({ id: 'gif-a', prompt: '纸灯笼摇晃', params: { ...DEFAULT_PARAMS, output_format: 'gif', gif: DEFAULT_GIF_OPTIONS }, inputImageIds: [], outputImages: ['output-a'], maskImageId: null, maskTargetImageId: null, status: 'done', error: null, createdAt: 1, finishedAt: 2, elapsed: 1, animation: readGifMetadata(ANIMATED_GIF), ...overrides })
@@ -28,7 +29,7 @@ describe('通用 GIF 工作台', () => {
     expect(screen.getByRole('heading', { name: 'GIF 工作台' })).toBeTruthy()
     expect(screen.queryByText('静态表情 / 头像快捷生成')).toBeNull()
     expect(screen.queryByText(/战斗动图工坊/)).toBeNull()
-    expect(screen.getByText('1.80 秒 / 周期')).toBeTruthy()
+    expect(screen.getByText('1.20 秒 / 周期')).toBeTruthy()
     expect((screen.getByRole('button', { name: '生成 GIF' }) as HTMLButtonElement).disabled).toBe(true)
   })
   it('提交独立 GIF 参数，不清除或重写其他场景的参考图与参数', async () => {
@@ -39,17 +40,30 @@ describe('通用 GIF 工作台', () => {
     fireEvent.change(screen.getByLabelText('GIF 生成模型'), { target: { value: 'gpt-image-2.6-sunburst' } })
     fireEvent.click(screen.getByRole('button', { name: '生成 GIF' }))
     await waitFor(() => expect(submitTask).toHaveBeenCalledTimes(1))
-    expect(submitTask).toHaveBeenCalledWith(expect.objectContaining({ gif: { prompt: '产品慢慢旋转，首尾衔接', params: expect.objectContaining({ output_format: 'gif', exact_size: false, size: 'auto', gif: { model: 'gpt-image-2.6-sunburst', frame_count: 12, frame_duration_ms: 100, complexity: 'high' } }) } }))
+    expect(submitTask).toHaveBeenCalledWith(expect.objectContaining({ gif: expect.objectContaining({
+      prompt: expect.stringContaining('整段GIF共12帧，每帧持续约100毫秒'),
+      params: expect.objectContaining({ output_format: 'gif', exact_size: false, size: 'auto', gif: { model: 'gpt-image-2.6-sunburst', frame_count: 12, frame_duration_ms: 100, complexity: 'high' } }),
+    }) }))
+    expect((submitTask as ReturnType<typeof vi.fn>).mock.calls[0][0].gif.prompt).toContain('产品慢慢旋转，首尾衔接')
+    expect((submitTask as ReturnType<typeof vi.fn>).mock.calls[0][0].gif.prompt).toContain('预计单帧约359px')
     expect(useStore.getState().inputImages[0].id).toBe('old-image')
     expect(useStore.getState().params.output_format).toBe('png')
     expect(profile.apiMode).toBe('responses')
+  })
+  it('关闭 GIF 提示词增强时提交原始提示词', async () => {
+    seed(); localStorage.setItem('gif-workbench-prompt-enhance', 'off')
+    render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
+    fireEvent.change(screen.getByLabelText('动画描述'), { target: { value: '产品慢慢旋转，首尾衔接' } })
+    fireEvent.click(screen.getByRole('button', { name: '生成 GIF' }))
+    await waitFor(() => expect(submitTask).toHaveBeenCalledTimes(1))
+    expect((submitTask as ReturnType<typeof vi.fn>).mock.calls[0][0].gif.prompt).toBe('产品慢慢旋转，首尾衔接')
   })
   it('参数错误阻止提交，运行中保留明确状态', () => {
     seed([task({ status: 'running', outputImages: [] })]); render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
     expect(screen.getByText('正在生成动画')).toBeTruthy()
     expect((screen.getByRole('button', { name: '生成中…' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '65' } })
-    expect(screen.getByText('GIF 帧数须为 2–64 的整数')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '17' } })
+    expect(screen.getByText('GIF 帧数须为 2–16 的整数')).toBeTruthy()
   })
   it('从持久任务预览、停止播放并下载 GIF 原件', async () => {
     seed([task(), task({ id: 'static-old', params: DEFAULT_PARAMS })]); render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
@@ -80,13 +94,13 @@ describe('通用 GIF 工作台', () => {
   it('完整参数配置可恢复，多个输出分别预览和下载', async () => {
     seed([task({ params: { ...DEFAULT_PARAMS, output_format: 'gif', gif: DEFAULT_GIF_OPTIONS, n: 2 }, outputImages: ['output-a', 'output-b'], animations: [readGifMetadata(ANIMATED_GIF), readGifMetadata(ANIMATED_GIF)] })])
     const { unmount } = render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '64' } })
+    fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '16' } })
     fireEvent.change(screen.getByLabelText('GIF 每帧尺寸'), { target: { value: '512x512' } })
     fireEvent.change(screen.getByLabelText('GIF 画质'), { target: { value: 'max' } })
     fireEvent.change(screen.getByLabelText('GIF 生成数量'), { target: { value: '2' } })
     unmount()
     render(<StickerWorkshop onOpenSceneSettings={() => {}} />)
-    expect((screen.getByLabelText('GIF 帧数') as HTMLInputElement).value).toBe('64')
+    expect((screen.getByLabelText('GIF 帧数') as HTMLInputElement).value).toBe('16')
     expect((screen.getByLabelText('GIF 每帧尺寸') as HTMLInputElement).value).toBe('512x512')
     expect((screen.getByLabelText('GIF 画质') as HTMLSelectElement).value).toBe('max')
     fireEvent.click(screen.getByRole('button', { name: /^动画 2$/ }))

@@ -21,20 +21,42 @@ export interface GifMetadata {
 }
 
 export const DEFAULT_GIF_OPTIONS: GifOptions = {
-  model: GIF_MODELS[0], frame_count: 9, frame_duration_ms: 200, complexity: 'high',
+  model: GIF_MODELS[1], frame_count: 6, frame_duration_ms: 200, complexity: 'high',
+}
+
+/**
+ * 上游对整段 GIF 的总像素预算近似恒定（实测约 155 万像素，所有帧共享）：
+ * 帧数越多单帧越小——16 帧≈309²、8 帧≈439²、6 帧≈508²、4 帧≈620²。
+ * 以此估算单帧边长，帮助用户在清晰度与流畅度之间取舍。
+ */
+export const GIF_PIXEL_BUDGET = 1_550_000
+
+export function estimateGifFrameSize(n: number, frameCount: number): number {
+  const safeN = Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1
+  const safeFrames = Number.isFinite(frameCount) && frameCount >= 1 ? Math.floor(frameCount) : 1
+  return Math.floor(Math.sqrt(GIF_PIXEL_BUDGET / (safeN * safeFrames)))
+}
+
+/** GIF 请求支持 1k/2k/4k 档位（2k 放宽宽幅上限），或 16 倍数的逐帧宽高。 */
+export function isGifSizeTier(size: string): boolean {
+  return ['1k', '2k', '4k'].includes(size.toLowerCase())
 }
 
 export function validateGifParams(params: TaskParams): void {
   if (params.output_format !== 'gif') throw new Error('GIF 任务必须使用 GIF 输出格式')
   const gif = params.gif
   if (!gif || !GIF_MODELS.includes(gif.model)) throw new Error('请选择 GPT Image 2.6 GIF 模型')
-  // 按官方生成指南开放 64 帧；部分网关与较早接口参考仍限制 16 帧。
-  if (!Number.isInteger(gif.frame_count) || gif.frame_count < 2 || gif.frame_count > 64) throw new Error('GIF 帧数须为 2–64 的整数')
+  // 官方接口参考限制 2-16 帧；上游 GIF 总像素预算恒定，帧数越多单帧越小，16 帧以上清晰度不可接受。
+  if (!Number.isInteger(gif.frame_count) || gif.frame_count < 2 || gif.frame_count > 16) throw new Error('GIF 帧数须为 2–16 的整数')
   if (!Number.isInteger(gif.frame_duration_ms) || gif.frame_duration_ms < 20 || gif.frame_duration_ms > 2000 || gif.frame_duration_ms % 10) throw new Error('每帧时长须为 20–2000ms，按 10ms 递增')
   if (!['low', 'medium', 'high'].includes(gif.complexity)) throw new Error('GIF 规划强度无效')
   if (params.size !== 'auto') {
-    const match = /^(\d+)x(\d+)$/.exec(params.size)
-    if (!match || !match.slice(1).every((s) => Number(s) > 0 && Number.isSafeInteger(Number(s)) && Number(s) % 16 === 0)) throw new Error('GIF 每帧宽高须为正整数且为 16 的倍数')
+    if (isGifSizeTier(params.size)) {
+      // 档位制：官方契约中 GIF 的 size 为 1k/2k/4k，宽幅内容建议 2k。
+    } else {
+      const match = /^(\d+)x(\d+)$/.exec(params.size)
+      if (!match || !match.slice(1).every((s) => Number(s) > 0 && Number.isSafeInteger(Number(s)) && Number(s) % 16 === 0)) throw new Error('GIF 每帧宽高须为 auto、1k、2k、4k 档位，或 16 倍数的宽高')
+    }
   }
   if (!Number.isInteger(params.n) || params.n < 1 || params.n > 10) throw new Error('GIF 生成数量须为 1–10 的整数')
   if (!['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(params.quality)) throw new Error('GIF 画质无效')
@@ -45,6 +67,22 @@ export function validateGifParams(params: TaskParams): void {
 export function getGifProfile(profile: ApiProfile, model: GifOptions['model']): ApiProfile {
   if (profile.provider !== 'openai' || profile.codexCli) throw new Error('GIF 需要 OpenAI 兼容 Images API 配置，请在场景设置中选择')
   return { ...profile, apiMode: 'images', model, streamImages: false, responseFormatB64Json: false }
+}
+
+/**
+ * 把 GIF 请求参数与清晰度要求拼进提示词。
+ * chatgpt2api 等走 ChatGPT web 对话流的网关会忽略 frame_count/frame_duration_ms 等 API 参数，
+ * 提示词是这类通道控制帧数与清晰度的唯一途径；官方契约型供应商也会参考这些措辞。
+ */
+export function buildGifPromptEnhancement(gif: GifOptions, n: number): string {
+  const nNote = Number.isInteger(n) && n > 1 ? `本次请求生成 ${n} 个独立 GIF，像素预算由它们均分。` : ''
+  const sizeNote = estimateGifFrameSize(n, gif.frame_count)
+  return [
+    `整段GIF共${gif.frame_count}帧，每帧持续约${gif.frame_duration_ms}毫秒，首尾无缝循环。`,
+    nNote,
+    `所有帧均为高清渲染（预计单帧约${sizeNote}px见方），画面细节丰富清晰，文字与图案边缘锐利干净，笔画完整可辨，无模糊、无糊化、无重影、无抖动伪影。`,
+    '采用干净平涂的赛璐璐上色，轮廓线粗而闭合、边缘锐利，以大色块为主；装饰元素克制：冲击线与特效符号总数不超过三条且线条粗壮清晰，画面无动态模糊、无景深虚化、无辉光、无柔焦。',
+  ].filter(Boolean).join('')
 }
 
 /** 网关可能把 GIF 与生成它的静态辅助图一起返回，按文件签名识别而非信任 MIME。 */
