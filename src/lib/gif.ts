@@ -1,6 +1,6 @@
 import type { ApiProfile, TaskParams } from '../types'
 
-export const GIF_MODELS = ['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst'] as const
+export const GIF_MODELS = ['gpt-image-2.6'] as const
 
 export interface GifOptions {
   model: typeof GIF_MODELS[number]
@@ -21,7 +21,7 @@ export interface GifMetadata {
 }
 
 export const DEFAULT_GIF_OPTIONS: GifOptions = {
-  model: GIF_MODELS[1], frame_count: 6, frame_duration_ms: 200, complexity: 'high',
+  model: GIF_MODELS[0], frame_count: 6, frame_duration_ms: 200, complexity: 'high',
 }
 
 /**

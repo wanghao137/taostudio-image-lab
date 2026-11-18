@@ -247,8 +247,8 @@ describe('default API URL env', () => {
 })
 
 describe('OpenAI model defaults by API mode', () => {
-  it('uses gpt-image-2.6-sunburst for new Images profiles and gpt-6.1-sol for Responses', () => {
-    expect(createDefaultOpenAIProfile({ apiMode: 'images' }).model).toBe('gpt-image-2.6-sunburst')
+  it('uses gpt-image-2.6 for new Images profiles and gpt-6.1-sol for Responses', () => {
+    expect(createDefaultOpenAIProfile({ apiMode: 'images' }).model).toBe('gpt-image-2.6')
     expect(createDefaultOpenAIProfile({ apiMode: 'responses' }).model).toBe('gpt-6.1-sol')
     expect(DEFAULT_RESPONSES_MODEL).toBe('gpt-6.1-sol')
   })

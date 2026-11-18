@@ -37,12 +37,12 @@ describe('通用 GIF 工作台', () => {
     fireEvent.change(screen.getByLabelText('动画描述'), { target: { value: '产品慢慢旋转，首尾衔接' } })
     fireEvent.change(screen.getByLabelText('GIF 帧数'), { target: { value: '12' } })
     fireEvent.change(screen.getByLabelText('GIF 每帧时长'), { target: { value: '100' } })
-    fireEvent.change(screen.getByLabelText('GIF 生成模型'), { target: { value: 'gpt-image-2.6-sunburst' } })
+    fireEvent.change(screen.getByLabelText('GIF 生成模型'), { target: { value: 'gpt-image-2.6' } })
     fireEvent.click(screen.getByRole('button', { name: '生成 GIF' }))
     await waitFor(() => expect(submitTask).toHaveBeenCalledTimes(1))
     expect(submitTask).toHaveBeenCalledWith(expect.objectContaining({ gif: expect.objectContaining({
       prompt: expect.stringContaining('整段GIF共12帧，每帧持续约100毫秒'),
-      params: expect.objectContaining({ output_format: 'gif', exact_size: false, size: 'auto', gif: { model: 'gpt-image-2.6-sunburst', frame_count: 12, frame_duration_ms: 100, complexity: 'high' } }),
+      params: expect.objectContaining({ output_format: 'gif', exact_size: false, size: 'auto', gif: { model: 'gpt-image-2.6', frame_count: 12, frame_duration_ms: 100, complexity: 'high' } }),
     }) }))
     expect((submitTask as ReturnType<typeof vi.fn>).mock.calls[0][0].gif.prompt).toContain('产品慢慢旋转，首尾衔接')
     expect((submitTask as ReturnType<typeof vi.fn>).mock.calls[0][0].gif.prompt).toContain('预计单帧约359px')

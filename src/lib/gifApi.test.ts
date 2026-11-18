@@ -16,7 +16,7 @@ describe('原生 GIF 请求', () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: ANIMATED_GIF_BASE64 }], output_format: 'gif' }), { headers: { 'Content-Type': 'application/json' } }))
     const result = await callImageApi(options)
     expect(String(fetch.mock.calls[0][0])).toContain('/images/generations')
-    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ model: 'gpt-image-2.6-sunburst', prompt: options.prompt, output_format: 'gif', moderation: 'low', size: 'auto', quality: 'auto', frame_count: 6, frame_duration_ms: 200, complexity: 'high', n: 1 })
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ model: 'gpt-image-2.6', prompt: options.prompt, output_format: 'gif', moderation: 'low', size: 'auto', quality: 'auto', frame_count: 6, frame_duration_ms: 200, complexity: 'high', n: 1 })
     expect(result.images[0]).toBe(`data:image/gif;base64,${ANIMATED_GIF_BASE64}`)
     expect(result.animation).toMatchObject({ frameCount: 2, durationMs: 400 })
   })

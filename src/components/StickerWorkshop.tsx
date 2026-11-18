@@ -121,7 +121,7 @@ export function StickerWorkshop({ onOpenSceneSettings }: { onOpenSceneSettings: 
           </label>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <label className="block space-y-2 text-xs font-medium text-stone-600 dark:text-stone-300">生成模型
-              <select aria-label="GIF 生成模型" value={gif.model} onChange={(e) => setGif({ ...gif, model: e.target.value as GifOptions['model'] })} className={FIELD}>{GIF_MODELS.map((model) => <option value={model} key={model}>{model.endsWith('flare') ? 'GPT Image 2.6 Flare' : 'GPT Image 2.6 Sunburst'}</option>)}</select>
+              <select aria-label="GIF 生成模型" value={gif.model} onChange={(e) => setGif({ ...gif, model: e.target.value as GifOptions['model'] })} className={FIELD}>{GIF_MODELS.map((model) => <option value={model} key={model}>{model}</option>)}</select>
             </label>
             <label className="block space-y-2 text-xs font-medium text-stone-600 dark:text-stone-300">画质
               <select aria-label="GIF 画质" value={quality} onChange={(e) => setQuality(e.target.value as TaskParams['quality'])} className={FIELD}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">超高 xhigh</option><option value="max">最高 max</option></select>

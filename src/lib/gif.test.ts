@@ -47,7 +47,7 @@ describe('GIF 文件与请求边界', () => {
   })
   it('局部使用 Images 与 2.6 模型，不修改共享档案', () => {
     const profile = createDefaultOpenAIProfile({ apiMode: 'responses', streamImages: true, model: 'some-text-model' })
-    expect(getGifProfile(profile, DEFAULT_GIF_OPTIONS.model)).toMatchObject({ apiMode: 'images', model: 'gpt-image-2.6-sunburst', streamImages: false })
+    expect(getGifProfile(profile, DEFAULT_GIF_OPTIONS.model)).toMatchObject({ apiMode: 'images', model: 'gpt-image-2.6', streamImages: false })
     expect(profile.apiMode).toBe('responses')
     expect(() => getGifProfile({ ...profile, codexCli: true }, DEFAULT_GIF_OPTIONS.model)).toThrow()
   })
