@@ -8,9 +8,11 @@ import * as web from './dbWeb'
 import * as tauri from './dbTauri'
 import { isTauri } from './platform'
 import { DEFAULT_PARAMS, type TaskRecord } from '../types'
+import { hasImageDimensions } from './size'
 
 type CoreFn = (...args: never[]) => unknown
 const core: Record<string, CoreFn> = (isTauri ? tauri : web) as unknown as Record<string, CoreFn>
+const imageDimensionsPending = new Map<string, Promise<{ width: number; height: number } | undefined>>()
 
 // ===== 核心数据操作（按平台转发） =====
 
@@ -120,3 +122,51 @@ export {
 
 // 客户端专用 API（网页版调用时由 dbTauri 内部判定非 Tauri 报错或空实现）
 export { getImageStats, type ImageStat } from './dbTauri'
+
+// ===== 图片尺寸（上游 v0.9.5）：优先复用元数据，缺失时按需补全并持久化；并发读取共用一次解析 =====
+
+export const updateImageDimensions = core.updateImageDimensions as typeof web.updateImageDimensions
+
+function loadImageElement(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片加载失败'))
+    image.src = dataUrl
+  })
+}
+
+async function saveImageDimensions(id: string, size: { width: number; height: number }) {
+  try {
+    return await updateImageDimensions(id, size.width, size.height) ? size : undefined
+  } catch (err) {
+    console.warn('保存图片尺寸失败', id, err)
+    return size
+  }
+}
+
+export async function getImageDimensions(id: string): Promise<{ width: number; height: number } | undefined> {
+  const pending = imageDimensionsPending.get(id)
+  if (pending) return pending
+  const request = (async () => {
+    const meta = await getImageMeta(id)
+    if (!meta) return undefined
+    if (hasImageDimensions(meta)) return { width: meta.width, height: meta.height }
+    const thumbnail = await getStoredImageThumbnail(id)
+    if (hasImageDimensions(thumbnail)) {
+      return saveImageDimensions(id, { width: thumbnail.width, height: thumbnail.height })
+    }
+    const image = await getImage(id)
+    if (!image) return undefined
+    const decoded = await loadImageElement(image.dataUrl)
+    const size = { width: decoded.naturalWidth, height: decoded.naturalHeight }
+    return saveImageDimensions(id, size)
+  })().catch((err) => {
+    console.warn('读取图片尺寸失败', id, err)
+    return undefined
+  }).finally(() => {
+    imageDimensionsPending.delete(id)
+  })
+  imageDimensionsPending.set(id, request)
+  return request
+}

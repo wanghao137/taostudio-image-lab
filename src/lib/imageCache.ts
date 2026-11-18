@@ -1,13 +1,14 @@
 import {
   CURRENT_THUMBNAIL_VERSION,
   getImage,
-  getImageMetadata,
+  getImageDimensions,
   getImageMeta,
   getImageThumbnail,
 } from './db'
 import { getImageStats, getThumbnailFile, payloadToDataUrl, RAW_DATA_URL_MIME } from './dbTauri'
 import { getFreshThumbnailIds, getThumbnailSource } from './imageBlob'
 import { isTauri } from './platform'
+import { hasImageDimensions } from './size'
 
 /** 从存储读出的 src 是 Blob URL（旧格式记录为 dataUrl），生成或导入时缓存的仍是 dataUrl */
 type ImageThumbnail = {
@@ -17,19 +18,23 @@ type ImageThumbnail = {
   thumbnailVersion?: number
 }
 
+type ImageDimensions = { width: number; height: number }
+
 const imageCache = new Map<string, string>()
 // 配额耗尽时未写入 IndexedDB 的图：钉在缓存外层，永不参与 LRU 淘汰——
 // 它们是仅存副本，被淘汰即永久丢失。
 const pinnedQuotaImages = new Map<string, string>()
 const thumbnailCache = new Map<string, ImageThumbnail>()
 const thumbnailBackfillIds = new Map<string, 'visible' | 'background'>()
-const thumbnailBackfillRunningIds = new Set<string>()
+const thumbnailBackfillRunningIds = new Map<string, { cancelled: boolean }>()
 const thumbnailSubscribers = new Map<string, Set<(thumbnail: ImageThumbnail) => void>>()
+const dimensionsWaiters = new Map<string, Array<(size: ImageDimensions | undefined) => void>>()
 // 正在显示某张缩略图的组件数（以订阅计）。使用中的缓存项不淘汰，其 Blob URL 被替换或删除时推迟到无人使用再撤销，
 // 避免撤销仍在页面上的图片
 const thumbnailUsers = new Map<string, number>()
 const pendingRevokeSrcs = new Map<string, string[]>()
 let thumbnailBackfillScheduled = false
+let thumbnailBackfillProcessing = false
 
 const MAX_IMAGE_CACHE_ENTRIES = 8
 const MAX_THUMBNAIL_CACHE_ENTRIES = 200
@@ -72,17 +77,6 @@ export function getCachedImage(id: string): string | undefined {
   return dataUrl
 }
 
-/** 钉住一张仅存在于内存的配额失败图（不参与 LRU 淘汰），返回是否新钉入。 */
-export function pinQuotaImage(id: string, dataUrl: string): boolean {
-  if (pinnedQuotaImages.has(id)) return false
-  pinnedQuotaImages.set(id, dataUrl)
-  return true
-}
-
-export function getUnpinnedQuotaImageIds(): string[] {
-  return [...pinnedQuotaImages.keys()]
-}
-
 export function cacheImage(id: string, dataUrl: string) {
   // 一旦同 id 的图成功写盘（例如重试后），解除钉住。
   pinnedQuotaImages.delete(id)
@@ -93,6 +87,17 @@ export function cacheImage(id: string, dataUrl: string) {
     if (oldestKey == null) break
     imageCache.delete(oldestKey)
   }
+}
+
+/** 钉住一张仅存在于内存的配额失败图（不参与 LRU 淘汰），返回是否新钉入。 */
+export function pinQuotaImage(id: string, dataUrl: string): boolean {
+  if (pinnedQuotaImages.has(id)) return false
+  pinnedQuotaImages.set(id, dataUrl)
+  return true
+}
+
+export function getUnpinnedQuotaImageIds(): string[] {
+  return [...pinnedQuotaImages.keys()]
 }
 
 export function deleteCachedImage(id: string) {
@@ -122,10 +127,14 @@ export function cacheThumbnail(id: string, thumbnail: ImageThumbnail) {
 
 export function deleteImageCacheEntry(id: string) {
   imageCache.delete(id)
+  pinnedQuotaImages.delete(id)
   deleteCachedThumbnail(id)
   thumbnailBackfillIds.delete(id)
-  thumbnailBackfillRunningIds.delete(id)
+  const running = thumbnailBackfillRunningIds.get(id)
+  if (running) running.cancelled = true
   thumbnailSubscribers.delete(id)
+  dimensionsWaiters.get(id)?.forEach((resolve) => resolve(undefined))
+  dimensionsWaiters.delete(id)
 }
 
 export function clearImageCaches() {
@@ -133,6 +142,9 @@ export function clearImageCaches() {
   pinnedQuotaImages.clear()
   for (const id of [...thumbnailCache.keys()]) deleteCachedThumbnail(id)
   thumbnailBackfillIds.clear()
+  for (const running of thumbnailBackfillRunningIds.values()) running.cancelled = true
+  for (const waiters of dimensionsWaiters.values()) waiters.forEach((resolve) => resolve(undefined))
+  dimensionsWaiters.clear()
 }
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
@@ -148,7 +160,10 @@ export async function ensureImageCached(id: string): Promise<string | undefined>
 
 export async function ensureImageThumbnailCached(id: string): Promise<ImageThumbnail | undefined> {
   const cached = getCachedThumbnail(id)
-  if (cached) return cached
+  if (cached) {
+    if (!hasImageDimensions(cached)) scheduleThumbnailBackfill([id], 'visible')
+    return cached
+  }
 
   const thumbnail = isTauri ? await readTauriThumbnail(id) : await getThumbnailSource(id, CURRENT_THUMBNAIL_VERSION)
   if (!thumbnail) {
@@ -163,7 +178,31 @@ export async function ensureImageThumbnailCached(id: string): Promise<ImageThumb
     return raced
   }
   cacheThumbnail(id, thumbnail)
+  if (!hasImageDimensions(thumbnail)) scheduleThumbnailBackfill([id], 'visible')
   return thumbnail
+}
+
+/** 元数据读取无需排队；原图解码与缩略图重建共用补全队列。 */
+export async function ensureImageDimensionsCached(id: string): Promise<ImageDimensions | undefined> {
+  try {
+    const cached = getCachedThumbnail(id)
+    if (hasImageDimensions(cached)) return { width: cached.width, height: cached.height }
+    const meta = await getImageMeta(id)
+    if (!meta) return undefined
+    if (hasImageDimensions(meta)) return { width: meta.width, height: meta.height }
+    await ensureImageThumbnailCached(id)
+    const thumbnail = getCachedThumbnail(id)
+    if (hasImageDimensions(thumbnail)) return { width: thumbnail.width, height: thumbnail.height }
+    return new Promise((resolve) => {
+      const waiters = dimensionsWaiters.get(id)
+      if (waiters) waiters.push(resolve)
+      else dimensionsWaiters.set(id, [resolve])
+      scheduleThumbnailBackfill([id], 'visible')
+    })
+  } catch (err) {
+    console.warn('读取图片尺寸失败', id, err)
+    return undefined
+  }
 }
 
 /** 客户端直接用文件二进制生成 Blob URL，省去 base64 编码和超长 dataUrl 字符串 */
@@ -209,7 +248,8 @@ export function subscribeImageThumbnail(id: string, callback: (thumbnail: ImageT
 
 export function scheduleThumbnailBackfill(ids: Iterable<string>, priority: 'visible' | 'background' = 'background') {
   for (const id of ids) {
-    if (getCachedThumbnail(id) || thumbnailBackfillRunningIds.has(id)) continue
+    const cached = getCachedThumbnail(id)
+    if (hasImageDimensions(cached) || thumbnailBackfillRunningIds.has(id)) continue
     const currentPriority = thumbnailBackfillIds.get(id)
     if (!currentPriority || priority === 'visible') thumbnailBackfillIds.set(id, priority)
   }
@@ -249,28 +289,28 @@ function scheduleThumbnailBackfillTick() {
 }
 
 async function processNextThumbnailBackfill() {
-  if (thumbnailBackfillRunningIds.size > 0) return
-
-  const ids = await getNextThumbnailBackfillBatch()
-  for (const id of ids) void startThumbnailBackfill(id)
-
-  if (thumbnailBackfillIds.size > 0) scheduleThumbnailBackfillTick()
+  if (thumbnailBackfillProcessing || thumbnailBackfillRunningIds.size > 0) return
+  thumbnailBackfillProcessing = true
+  try {
+    const ids = await getNextThumbnailBackfillBatch()
+    for (const id of ids) void startThumbnailBackfill(id)
+  } finally {
+    thumbnailBackfillProcessing = false
+    if (thumbnailBackfillRunningIds.size === 0) scheduleThumbnailBackfillTick()
+  }
 }
 
 async function getNextThumbnailBackfillBatch() {
   const candidates = getOrderedThumbnailBackfillIds().slice(0, MAX_THUMBNAIL_BACKFILL_CONCURRENT)
   if (candidates.length === 0) return []
 
-  // 只读元数据做并发分级——不做 Blob→dataUrl 全量转换（否则每张 4K 图
-  // 启动期都要在主线程编一次码，纯为算并发数，白白卡顿）。
-  // 客户端查数据库记录（不读文件），网页版取记录元数据；查询失败按尺寸未知处理（并发 1）。
-  const stats = isTauri ? new Map<string, Awaited<ReturnType<typeof getImageStats>>[number]>((await getImageStats().catch((): Awaited<ReturnType<typeof getImageStats>> => [])).map((stat) => [stat.id, stat])) : undefined
+  // 只查询候选图片的元数据，尺寸未知时按并发 1 处理。
   const sizes = await Promise.all(candidates.map(async (id) => {
-    const meta = stats ? stats.get(id) : await getImageMeta(id)
+    const meta = await getImageMeta(id).catch(() => undefined)
     return { width: meta?.width ?? undefined, height: meta?.height ?? undefined }
   }))
   const concurrency = getThumbnailConcurrencyForBatch(sizes)
-  const selected = candidates.slice(0, concurrency)
+  const selected = candidates.slice(0, concurrency).filter((id) => thumbnailBackfillIds.has(id))
   for (const id of selected) thumbnailBackfillIds.delete(id)
   return selected
 }
@@ -287,9 +327,9 @@ function getOrderedThumbnailBackfillIds() {
 
 function getThumbnailConcurrencyForBatch(sizes: Array<{ width?: number; height?: number }>) {
   let maxMegapixels = 0
-  for (const { width, height } of sizes) {
-    if (!width || !height) return 1
-    maxMegapixels = Math.max(maxMegapixels, (width * height) / 1_000_000)
+  for (const size of sizes) {
+    if (!hasImageDimensions(size)) return 1
+    maxMegapixels = Math.max(maxMegapixels, (size.width * size.height) / 1_000_000)
   }
   if (maxMegapixels >= 8) return 1
   if (maxMegapixels >= 4) return 2
@@ -298,28 +338,38 @@ function getThumbnailConcurrencyForBatch(sizes: Array<{ width?: number; height?:
 }
 
 async function startThumbnailBackfill(id: string) {
-  thumbnailBackfillRunningIds.add(id)
+  const running = { cancelled: false }
+  thumbnailBackfillRunningIds.set(id, running)
 
   try {
-    if (getCachedThumbnail(id)) return
-
-    const thumbnail = await getImageThumbnail(id)
-    if (thumbnail?.thumbnailDataUrl) {
-      cacheThumbnail(id, {
-        src: thumbnail.thumbnailDataUrl,
-        width: thumbnail.width,
-        height: thumbnail.height,
-        thumbnailVersion: thumbnail.thumbnailVersion,
-      })
-      thumbnailSubscribers.get(id)?.forEach((callback) => callback({
-        src: thumbnail.thumbnailDataUrl,
-        width: thumbnail.width,
-        height: thumbnail.height,
-      }))
+    const cached = getCachedThumbnail(id)
+    if (hasImageDimensions(cached)) return
+    if (cached) {
+      const size = await getImageDimensions(id)
+      if (!size || running.cancelled) return
+      const thumbnail = { ...cached, ...size }
+      cacheThumbnail(id, thumbnail)
+      thumbnailSubscribers.get(id)?.forEach((callback) => callback(thumbnail))
+      return
     }
-  } catch {
-    // 缩略图生成失败时保留占位图，后续仍可再次补全。
+
+    const stored = await getImageThumbnail(id)
+    if (!stored?.thumbnailDataUrl || running.cancelled) return
+    const thumbnail = {
+      src: stored.thumbnailDataUrl,
+      width: stored.width,
+      height: stored.height,
+      thumbnailVersion: stored.thumbnailVersion,
+    }
+    cacheThumbnail(id, thumbnail)
+    thumbnailSubscribers.get(id)?.forEach((callback) => callback(thumbnail))
+  } catch (err) {
+    console.warn('补全图片信息失败', id, err)
   } finally {
+    const thumbnail = getCachedThumbnail(id)
+    const size = hasImageDimensions(thumbnail) ? { width: thumbnail.width, height: thumbnail.height } : undefined
+    dimensionsWaiters.get(id)?.forEach((resolve) => resolve(size))
+    dimensionsWaiters.delete(id)
     thumbnailBackfillRunningIds.delete(id)
     scheduleThumbnailBackfillTick()
   }

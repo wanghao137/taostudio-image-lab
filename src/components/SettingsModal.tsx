@@ -259,7 +259,7 @@ export default function SettingsModal() {
   const pendingLocalAutoSaveCount = getLocalAutoSaveRetryableTaskCount(tasks)
   const localAutoSaveNeedsPermission = tasks.some((task) => task.localAutoSave?.status === 'needs_permission')
   const canRetryLocalAutoSave = localAutoSave.enabled && pendingLocalAutoSaveCount > 0
-  const defaultProviderOrder = ['openai', 'google', 'xai', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
+  const defaultProviderOrder = ['openai', 'google', 'xai', 'bytedance', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
   const unorderedProviderOptions = [

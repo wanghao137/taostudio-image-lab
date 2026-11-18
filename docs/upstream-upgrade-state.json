@@ -1,7 +1,7 @@
 {
   "upstreamRepo": "https://github.com/CookSleep/gpt_image_playground.git",
-  "upstreamRef": "v0.9.0",
-  "lastAppliedCommit": "5e1f5e79b23e3d6bec0b96381c15629c316d4fd5",
-  "upgradedAt": "2026-11-07T03:30:27.376Z",
+  "upstreamRef": "v0.9.5",
+  "lastAppliedCommit": "5514e61c2a9d843cfd2438849ce16c42bab6a77a",
+  "upgradedAt": "2026-11-18T09:59:42.757Z",
   "notes": "Updated by transactional three-way upstream migration. TaoStudio behavior contracts require independent verification."
 }

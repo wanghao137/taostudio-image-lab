@@ -1,3 +1,4 @@
+import type { TaskParams } from '../types'
 import { COMMON_SIZE_PRESETS, calculateImageSize as calculateCoreImageSize } from '../../packages/image-job-core/index.mjs'
 
 const SIZE_PATTERN = /^\s*(\d+)\s*[xX×]\s*(\d+)\s*$/
@@ -259,3 +260,112 @@ export function resolveExactDeliverySize(size: string): ImageSize | null {
   const normalized = normalizeImageSize(size)
   return (normalized && deliverySizeByNormalized.get(normalized)) || parsed
 }
+
+export const SIZE_TIERS: SizeTier[] = ['1K', '2K', '4K']
+
+export const SIZE_RATIOS = [
+  { label: '1:1', value: '1:1' },
+  { label: '3:2', value: '3:2' },
+  { label: '2:3', value: '2:3' },
+  { label: '16:9', value: '16:9' },
+  { label: '9:16', value: '9:16' },
+  { label: '4:3', value: '4:3' },
+  { label: '3:4', value: '3:4' },
+  { label: '21:9', value: '21:9' },
+]
+
+/** Seedream 5.5 的分辨率档位，每档对应基准边长 1K=1024、1.5K=1536、2K=2048 */
+
+export const SEEDREAM_RESOLUTIONS = ['1K', '1.5K', '2K'] as const
+
+export const SEEDREAM_SIZE_LIMIT_TEXT = '由于模型限制，不符合要求的分辨率会被自动规整：\n宽高比不超过 16:1，总像素限制为 921600-4624220。'
+
+export const SIZE_LIMIT_TEXT = '由于模型限制，不符合要求的分辨率会被自动规整：\n宽高均为 16 的倍数，最大边长 3840px，宽高比不超过 3:1，总像素限制为 655360-8294400。'
+
+export const CODEX_CLI_SIZE_LIMIT_TEXT = '由于模型和 Codex CLI 限制，不符合要求的分辨率会被自动规整：\n宽高均为 16 的倍数，宽高比不超过 3:1，分辨率不超过 1K。'
+
+const MODEL_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9', '1:2', '2:1', '5:2', '1:4', '4:1', '1:8', '8:1', '1:16', '16:1', '9:19.5', '19.5:9', '9:20', '20:9'].map((label) => {
+  const [width, height] = label.split(':').map(Number)
+  return { label, value: width / height }
+})
+
+/** 分辨率档位的基准边长，档位按总像素的平方根划分 */
+
+export function getSeedreamRatioSize(resolution: string, ratio: string) {
+  const parsed = parseRatio(ratio)
+  if (!parsed) return ''
+  const { width, height } = parsed
+  const side = resolution === '1K' ? 1024 : resolution === '1.5K' ? 1536 : 2048
+  const short = Math.floor(side / Math.sqrt(Math.max(width, height) / Math.min(width, height)))
+  const long = Math.floor(short * Math.max(width, height) / Math.min(width, height))
+  return normalizeSeedreamImageSize(width >= height ? `${long}x${short}` : `${short}x${long}`)
+}
+
+
+export function normalizeSeedreamImageSize(size: string) {
+  const match = size.match(SIZE_PATTERN)
+  if (!match) return ''
+  let width = Number(match[1])
+  let height = Number(match[2])
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return ''
+  for (let i = 0; i < 4; i++) {
+    width = Math.min(width, height * 16)
+    height = Math.min(height, width * 16)
+    const pixels = width * height
+    if (pixels < 921600) {
+      const scale = Math.sqrt(921600 / pixels)
+      width = Math.ceil(width * scale)
+      height = Math.ceil(height * scale)
+    } else if (pixels > 4624220) {
+      const scale = Math.sqrt(4624220 / pixels)
+      width = Math.floor(width * scale)
+      height = Math.floor(height * scale)
+    }
+  }
+  return `${width}x${height}`
+}
+
+// 按档位基准边长算出指定比例的宽高，再按模型限制规整，保证预览与实际发送的尺寸一致。
+
+export function getActualRatioAndResolution(size: string | undefined, requested: Pick<TaskParams, 'aspect_ratio' | 'resolution'>): Pick<TaskParams, 'aspect_ratio' | 'resolution'> {
+  const match = size?.match(SIZE_PATTERN)
+  if (!match) return {}
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) return {}
+
+  // 按对数比较，放大和缩小相同倍数算作相同差距
+  const distance = (a: number, b: number) => Math.abs(Math.log(a / b))
+  const ratio = width / height
+  const side = Math.sqrt(width * height)
+  const requestedRatio = parseRatio(requested.aspect_ratio ?? '')
+  const closestRatio = MODEL_RATIOS.reduce((best, item) => distance(ratio, item.value) < distance(ratio, best.value) ? item : best)
+  const closestTier = RESOLUTION_TIERS.reduce((best, tier) => distance(side, tier.side) < distance(side, best.side) ? tier : best)
+
+  return {
+    aspect_ratio: requestedRatio && distance(ratio, requestedRatio.width / requestedRatio.height) <= RATIO_TOLERANCE
+      ? requested.aspect_ratio
+      : distance(ratio, closestRatio.value) <= RATIO_TOLERANCE ? closestRatio.label : formatImageRatio(width, height),
+    resolution: requested.resolution?.toUpperCase() === closestTier.label ? requested.resolution : closestTier.label,
+  }
+}
+
+/**
+ * 每个档位的像素预算上限。
+ * 在该预算内、满足所有 OpenAI 约束的前提下，选取总像素最大的候选尺寸。
+ */
+
+export function hasImageDimensions(size: { width?: number; height?: number } | undefined): size is { width: number; height: number } {
+  return typeof size?.width === 'number' && typeof size.height === 'number' && Number.isSafeInteger(size.width) && Number.isSafeInteger(size.height) && size.width > 0 && size.height > 0
+}
+
+
+const RESOLUTION_TIERS = [
+  { label: '512', side: 512 },
+  { label: '1K', side: 1024 },
+  { label: '1.5K', side: 1536 },
+  { label: '2K', side: 2048 },
+  { label: '3K', side: 3072 },
+  { label: '4K', side: 4096 },
+]
+const RATIO_TOLERANCE = 0.04

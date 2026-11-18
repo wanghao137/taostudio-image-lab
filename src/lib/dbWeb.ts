@@ -512,6 +512,14 @@ function imageToBlobRecord(image: StoredImage): StoredImageRecord {
   }
 }
 
+export async function updateImageDimensions(id: string, width: number, height: number): Promise<boolean> {
+  const record = await dbTransaction<StoredImageRecord | undefined>(STORE_IMAGES, 'readonly', (s) => s.get(id))
+  if (!record) return false
+  const updated: StoredImageRecord = { ...record, width, height }
+  await dbTransaction(STORE_IMAGES, 'readwrite', (s) => s.put(updated))
+  return true
+}
+
 export async function getImage(id: string): Promise<StoredImage | undefined> {
   const record = await dbTransaction<StoredImageRecord | undefined>(STORE_IMAGES, 'readonly', (s) => s.get(id))
   if (!record) return undefined

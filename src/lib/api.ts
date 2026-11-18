@@ -3,6 +3,7 @@ import { composeMarkupDataUrl, toApiInputImageDataUrl } from './canvasImage'
 import { callFalAiImageApi } from './falAiImageApi'
 import { callGoogleImageApi } from './googleImageApi'
 import { supportsImageMarkup } from './imageModels'
+import { assertInputImageLimit } from './inputImageLimits'
 import { getImageSearchSupport } from './imageSearch'
 import { callOpenAICompatibleImageApi } from './openaiCompatibleImageApi'
 import type { CallApiOptions, CallApiResult } from './imageApiShared'
@@ -12,12 +13,16 @@ export type { CallApiOptions, CallApiResult } from './imageApiShared'
 export { normalizeBaseUrl } from './devProxy'
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
+  if (opts.params.output_format === 'gif' && opts.maskDataUrl) {
+    throw new Error('GIF 不支持遮罩，请移除遮罩或切换输出格式')
+  }
   let profile = opts.apiProfile ?? getSceneImageApiProfile(opts.settings)
   if (opts.params.output_format === 'gif' && opts.params.gif) {
     validateGifParams(opts.params)
     if (opts.inputImageDataUrls.length || opts.maskDataUrl || opts.nativeTransparentBackground) throw new Error('原生 GIF 只支持文字生成，不支持参考图或遮罩编辑')
     profile = getGifProfile(profile, opts.params.gif!.model)
   }
+  assertInputImageLimit(profile, opts.inputImageDataUrls.length)
   const inputImageDataUrls = await Promise.all(opts.inputImageDataUrls.map(toApiInputImageDataUrl))
   const inputImageUrls = opts.inputImageUrls ? [...opts.inputImageUrls] : undefined
   let markupDataUrl = opts.markupDataUrl

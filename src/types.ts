@@ -57,6 +57,7 @@ export interface CustomProviderSubmitMapping {
   files?: CustomProviderFileMapping[]
   taskIdPath?: string
   result?: CustomProviderResultMapping
+  omitValues?: Record<string, Array<string | number | boolean>>
 }
 
 export interface CustomProviderPollMapping {
@@ -71,16 +72,24 @@ export interface CustomProviderPollMapping {
   result: CustomProviderResultMapping
 }
 
+export type CustomProviderImageSize = { mode: 'pixels' } | {
+  mode: 'aspect-ratio'
+  ratios: string[]
+  resolutions: string[]
+}
+
 export interface CustomProviderDefinition {
   id: string
   name: string
   template?: CustomProviderTemplate
+  imageSize?: CustomProviderImageSize
   submit: CustomProviderSubmitMapping
   editSubmit?: CustomProviderSubmitMapping
   poll?: CustomProviderPollMapping
   /** 按顺序匹配模型 ID，支持 * 通配符；匹配后使用整套接口映射 */
   modelOverrides?: Array<{
     models: string[]
+    imageSize?: CustomProviderImageSize
     submit: CustomProviderSubmitMapping
     editSubmit?: CustomProviderSubmitMapping
     poll?: CustomProviderPollMapping
@@ -106,6 +115,10 @@ export interface ApiProfile {
   timeout: number
   apiMode: ApiMode
   reasoningEffort?: ReasoningEffort
+  /** SVG 编写模型的思考等级（上游 v0.9.5） */
+  svgReasoningEffort?: ReasoningEffort
+  /** 是否在模型列表中显示（预置配置展示控制，上游 v0.9.5） */
+  showInModelList?: boolean
   codexCli: boolean
   apiProxy: boolean
   responseFormatB64Json?: boolean
@@ -290,6 +303,8 @@ export const GIF_FRAME_DURATION_RANGE = { min: 20, max: 2000 }
 
 /** 参数面板中不可选的项及原因，undefined 表示可选 */
 export interface ParamDisabledReasons {
+  outputFormat?: string
+  moderation?: string
   complexity?: string
   gif?: string
   svg?: string
@@ -319,6 +334,8 @@ export interface TaskParams {
   thinking_level?: 'auto' | 'minimal' | 'low' | 'medium' | 'high'
   n: number
   transparent_output: boolean
+  background?: 'auto' | 'transparent' | 'opaque'
+  watermark?: boolean
   /** 编辑任务输入图比例预处理策略（仅 size 为具体尺寸时有意义）：
    *  auto=输入图比例与目标偏差 >2% 时按 crop 处理；off=不做预处理。
    *  网关编辑链路输出画幅=输入图原尺寸，预处理输入图是控画幅的主力手段。 */
@@ -459,6 +476,17 @@ export interface ImageTaskLink {
   sourceAssetId?: string | null
   finalAssetId?: string | null
   updatedAt: string
+}
+
+export interface ImageParameterControl {
+  type: 'string' | 'enum' | 'boolean' | 'integer'
+  visible: boolean
+  disabledReason?: string
+  options?: Array<{ label: string; value: string; disabledReason?: string }>
+  min?: number
+  max?: number
+  nullable?: boolean
+  hint?: string
 }
 
 export interface ImageSearchGrounding {
@@ -800,6 +828,7 @@ export interface FalImageFile {
 }
 
 export interface FalApiResponse {
+  grounding_metadata?: { searchEntryPoint?: { renderedContent?: string }; sourceRendering?: unknown; sources?: unknown[] }
   images?: FalImageFile[]
   image?: FalImageFile | string
   url?: string
@@ -853,4 +882,10 @@ export interface SkillInfo {
   skillDir: string
   /** `path` 为安装后的 Skill 文件夹 */
   skills: { id: SkillTarget; path: string; state: SkillState }[]
+}
+
+export type LightboxContext = { type: 'input' } | {
+  type: 'history'
+  maskTargetImageId?: string | null
+  maskImageId?: string | null
 }

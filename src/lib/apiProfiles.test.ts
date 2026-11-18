@@ -4,6 +4,7 @@ import {
   DEFAULT_LOCAL_AUTO_SAVE_SETTINGS,
   DEFAULT_FAL_BASE_URL,
   DEFAULT_FAL_MODEL,
+  DEFAULT_FAL_MODEL_LIST,
   DEFAULT_IMAGES_MODEL,
   DEFAULT_RESPONSES_MODEL,
   DEFAULT_OPENAI_PROFILE_ID,
@@ -447,7 +448,7 @@ describe('mergeImportedSettings', () => {
           provider: 'fal',
           baseUrl: DEFAULT_FAL_BASE_URL,
           apiKey: 'fal-key',
-          model: DEFAULT_FAL_MODEL,
+          model: DEFAULT_FAL_MODEL_LIST,
           timeout: 300,
           apiMode: 'images',
           codexCli: false,
@@ -546,7 +547,7 @@ describe('mergeImportedSettings', () => {
           provider: 'fal',
           baseUrl: DEFAULT_FAL_BASE_URL,
           apiKey: 'fal-key',
-          model: DEFAULT_FAL_MODEL,
+          model: DEFAULT_FAL_MODEL_LIST,
           timeout: 300,
           apiMode: 'images',
           codexCli: false,
@@ -590,7 +591,7 @@ describe('mergeImportedSettings', () => {
           provider: 'fal',
           baseUrl: DEFAULT_FAL_BASE_URL,
           apiKey: 'fal-key',
-          model: DEFAULT_FAL_MODEL,
+          model: DEFAULT_FAL_MODEL_LIST,
           timeout: 300,
           apiMode: 'images',
           codexCli: false,
@@ -602,7 +603,7 @@ describe('mergeImportedSettings', () => {
     expect(merged.profiles).toHaveLength(3)
     expect(merged.profiles[0]).toMatchObject({ apiKey: 'current-key', model: 'current-model' })
     expect(merged.profiles[1]).toMatchObject({ id: 'duplicate-openai', apiKey: 'current-key', model: 'current-model' })
-    expect(merged.profiles[2]).toMatchObject({ provider: 'fal', apiKey: 'fal-key', model: DEFAULT_FAL_MODEL })
+    expect(merged.profiles[2]).toMatchObject({ provider: 'fal', apiKey: 'fal-key', model: DEFAULT_FAL_MODEL_LIST })
   })
 
   it('preserves an imported custom profile ID when its connection matches an existing profile', () => {
@@ -858,7 +859,7 @@ describe('mergePresetImportedSettings', () => {
     const changedAgain = mergeDefaultImportedSettings(repeated.settings, lastConfig, { previousPresetConfig: repeated.presetConfig })
 
     expect(merged.activeProfileId).toBe('source-profile')
-    expect(merged.profiles.map((profile) => profile.model)).toEqual(['later-local-model', DEFAULT_FAL_MODEL])
+    expect(merged.profiles.map((profile) => profile.model)).toEqual(['later-local-model', DEFAULT_FAL_MODEL_LIST])
     expect(merged.profiles[0]).toMatchObject({
       id: 'source-profile',
       baseUrl: 'https://later-local.example.com/v1',
@@ -1037,7 +1038,7 @@ describe('mergePresetImportedSettings', () => {
     expect(merged.profiles[0]).toMatchObject({
       provider: 'fal',
       baseUrl: DEFAULT_FAL_BASE_URL,
-      model: DEFAULT_FAL_MODEL,
+      model: DEFAULT_FAL_MODEL_LIST,
     })
   })
 
@@ -1853,7 +1854,7 @@ describe('custom providers', () => {
       ],
     })
 
-    expect(settings.providerOrder).toEqual(['fal', 'openai', 'google', 'xai', 'sb2api-async', 'custom-alpha', 'custom-beta'])
+    expect(settings.providerOrder).toEqual(['fal', 'openai', 'google', 'xai', 'bytedance', 'sb2api-async', 'custom-alpha', 'custom-beta'])
   })
 
   it('keeps active custom providers in Images API mode when legacy apiMode is responses', () => {

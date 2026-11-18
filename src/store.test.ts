@@ -2059,6 +2059,8 @@ describe('fal task recovery', () => {
 
     await initStore()
     await vi.waitFor(() => {
+      const dbg = useStore.getState().tasks.find((item) => item.id === falTask.id)
+      console.log('DBG-RECOVERY:', JSON.stringify({ status: dbg?.status, error: dbg?.error, falRecoverable: dbg?.falRecoverable }))
       expect(useStore.getState().tasks.find((item) => item.id === falTask.id)).toMatchObject({ status: 'done', falRecoverable: false })
     })
 
